@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Test Models API</title>
+</head>
+<body>
+    <h1>Testing Models API</h1>
+    <div id="results"></div>
+    
+    <script>
+        console.log('Starting models API test...');
+        
+        async function testModelsAPI() {
+            try {
+                console.log('Calling /api/models...');
+                const response = await fetch('/api/models');
+                console.log('Response status:', response.status);
+                
+                const data = await response.json();
+                console.log('Response data:', data);
+                
+                const resultsDiv = document.getElementById('results');
+                if (data.data && Array.isArray(data.data)) {
+                    resultsDiv.innerHTML = `
+                        <h2>Found ${data.data.length} models:</h2>
+                        <ul>
+                            ${data.data.map(model => `
+                                <li>${model.name} (${model.provider}/${model.model}) ${model.isActive ? '[Active]' : '[Inactive]'}</li>
+                            `).join('')}
+                        </ul>
+                    `;
+                } else {
+                    resultsDiv.innerHTML = '<p>Error: Invalid response format</p>';
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                document.getElementById('results').innerHTML = `<p>Error: ${error.message}</p>`;
+            }
+        }
+        
+        // Test when page loads
+        window.addEventListener('load', testModelsAPI);
+    </script>
+</body>
+</html>

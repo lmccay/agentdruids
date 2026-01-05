@@ -1,0 +1,121 @@
+version: '3.8'
+
+services:
+  # Production Druids Application
+  druids-app:
+    build:
+      context: .
+      target: production
+      dockerfile: Dockerfile
+    container_name: druids-prod
+    ports:
+      - "3000:3000"   # Main API server
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - ALLOWED_ORIGINS=https://your-domain.com
+      - LOG_LEVEL=info
+      - DRUIDS_ENV=docker-prod
+      - DATABASE_URL=postgresql://druids_user:${POSTGRES_PASSWORD}@druids-postgres:5432/druids
+      - REDIS_URL=redis://druids-redis:6379
+      - OLLAMA_URL=http://druids-ollama:11434
+    volumes:
+      - druids-data:/app/data
+    networks:
+      - druids-network
+    depends_on:
+      - druids-redis
+      - druids-postgres
+      - druids-ollama
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '0.5'
+        reservations:
+          memory: 512M
+          cpus: '0.25'
+
+  # Redis for production
+  druids-redis:
+    image: redis:7-alpine
+    container_name: druids-redis-prod
+    volumes:
+      - druids-redis-data:/data
+      - ./docker/redis-prod.conf:/usr/local/etc/redis/redis.conf
+    command: redis-server /usr/local/etc/redis/redis.conf
+    networks:
+      - druids-network
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.25'
+
+  # PostgreSQL for production
+  druids-postgres:
+    image: postgres:15-alpine
+    container_name: druids-postgres-prod
+    environment:
+      - POSTGRES_DB=druids
+      - POSTGRES_USER=druids_user
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+    volumes:
+      - druids-postgres-data:/var/lib/postgresql/data
+    networks:
+      - druids-network
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+
+  # Ollama for production
+  druids-ollama:
+    image: ollama/ollama:latest
+    container_name: druids-ollama-prod
+    volumes:
+      - druids-ollama-data:/root/.ollama
+    networks:
+      - druids-network
+    restart: unless-stopped
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.0'
+
+  # Nginx reverse proxy
+  druids-nginx:
+    image: nginx:alpine
+    container_name: druids-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf
+      - ./docker/nginx/ssl:/etc/nginx/ssl
+    networks:
+      - druids-network
+    depends_on:
+      - druids-app
+    restart: unless-stopped
+
+volumes:
+  druids-data:
+    driver: local
+  druids-redis-data:
+    driver: local
+  druids-postgres-data:
+    driver: local
+  druids-ollama-data:
+    driver: local
+
+networks:
+  druids-network:
+    driver: bridge

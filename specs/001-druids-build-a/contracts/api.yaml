@@ -1,0 +1,755 @@
+openapi: 3.0.3
+info:
+  title: Druids Multi-Agent System API
+  version: 1.0.0
+  description: MCP Server interface for managing agents, scenarios, and coordination
+
+servers:
+  - url: http://localhost:3000
+    description: Local development server
+
+paths:
+  /agents:
+    get:
+      summary: List all agents
+      operationId: listAgents
+      parameters:
+        - name: realmId
+          in: query
+          schema:
+            type: string
+        - name: type
+          in: query
+          schema:
+            type: string
+            enum: [druid, elemental, gaia, worldtree]
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [active, inactive, error]
+      responses:
+        '200':
+          description: List of agents
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Agent'
+    
+    post:
+      summary: Create new agent
+      operationId: createAgent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateAgentRequest'
+      responses:
+        '201':
+          description: Agent created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Agent'
+        '400':
+          description: Invalid agent configuration
+        '409':
+          description: Agent ID already exists
+
+  /agents/{agentId}:
+    get:
+      summary: Get agent details
+      operationId: getAgent
+      parameters:
+        - name: agentId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Agent details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Agent'
+        '404':
+          description: Agent not found
+
+    put:
+      summary: Update agent configuration
+      operationId: updateAgent
+      parameters:
+        - name: agentId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateAgentRequest'
+      responses:
+        '200':
+          description: Agent updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Agent'
+        '404':
+          description: Agent not found
+        '400':
+          description: Invalid configuration
+
+    delete:
+      summary: Delete agent
+      operationId: deleteAgent
+      parameters:
+        - name: agentId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '204':
+          description: Agent deleted successfully
+        '404':
+          description: Agent not found
+        '409':
+          description: Agent is active in scenarios
+
+  /agents/{agentId}/bindings:
+    get:
+      summary: Get agent bindings (for Druids)
+      operationId: getAgentBindings
+      parameters:
+        - name: agentId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Agent bindings
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: string
+
+    post:
+      summary: Create agent binding
+      operationId: createAgentBinding
+      parameters:
+        - name: agentId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                elementalAgentId:
+                  type: string
+              required:
+                - elementalAgentId
+      responses:
+        '201':
+          description: Binding created successfully
+        '400':
+          description: Invalid binding
+        '404':
+          description: Agent not found
+
+  /realms:
+    get:
+      summary: List all realms
+      operationId: listRealms
+      responses:
+        '200':
+          description: List of realms
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Realm'
+
+    post:
+      summary: Create new realm
+      operationId: createRealm
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateRealmRequest'
+      responses:
+        '201':
+          description: Realm created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Realm'
+
+  /realms/{realmId}/ley-lines:
+    get:
+      summary: Get realm's ley line connections
+      operationId: getRealmLeyLines
+      parameters:
+        - name: realmId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Ley line connections
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/LeyLineConnection'
+
+    post:
+      summary: Create ley line connection
+      operationId: createLeyLineConnection
+      parameters:
+        - name: realmId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateLeyLineRequest'
+      responses:
+        '201':
+          description: Ley line connection created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LeyLineConnection'
+
+  /scenarios:
+    get:
+      summary: List scenarios
+      operationId: listScenarios
+      parameters:
+        - name: type
+          in: query
+          schema:
+            type: string
+            enum: [self-play, evaluation, training]
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [created, running, completed, failed, timeout]
+      responses:
+        '200':
+          description: List of scenarios
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Scenario'
+
+    post:
+      summary: Create new scenario
+      operationId: createScenario
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateScenarioRequest'
+      responses:
+        '201':
+          description: Scenario created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Scenario'
+
+  /scenarios/{scenarioId}/execute:
+    post:
+      summary: Execute scenario
+      operationId: executeScenario
+      parameters:
+        - name: scenarioId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '202':
+          description: Scenario execution started
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowExecution'
+
+  /executions/{executionId}:
+    get:
+      summary: Get execution status and results
+      operationId: getExecution
+      parameters:
+        - name: executionId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Execution details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowExecution'
+
+  /knowledge/namespaces:
+    get:
+      summary: List accessible knowledge namespaces
+      operationId: listKnowledgeNamespaces
+      parameters:
+        - name: agentId
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Accessible namespaces
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/KnowledgeNamespace'
+
+  /knowledge/namespaces/{namespacePath}:
+    get:
+      summary: Read from knowledge namespace
+      operationId: readKnowledge
+      parameters:
+        - name: namespacePath
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: agentId
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Knowledge content
+          content:
+            application/json:
+              schema:
+                type: object
+        '403':
+          description: Access denied
+        '404':
+          description: Namespace not found
+
+    post:
+      summary: Write to knowledge namespace
+      operationId: writeKnowledge
+      parameters:
+        - name: namespacePath
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                agentId:
+                  type: string
+                content:
+                  type: object
+              required:
+                - agentId
+                - content
+      responses:
+        '201':
+          description: Knowledge written successfully
+        '403':
+          description: Access denied
+        '400':
+          description: Invalid content
+
+  /tools/access:
+    post:
+      summary: Grant tool access to agent
+      operationId: grantToolAccess
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ToolAccessGrant'
+      responses:
+        '201':
+          description: Access granted successfully
+        '400':
+          description: Invalid access grant
+        '404':
+          description: Agent or tool not found
+
+components:
+  schemas:
+    Agent:
+      type: object
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+          enum: [druid, elemental, gaia, worldtree]
+        realmId:
+          type: string
+        status:
+          type: string
+          enum: [active, inactive, error]
+        createdAt:
+          type: string
+          format: date-time
+        lastActive:
+          type: string
+          format: date-time
+        configuration:
+          $ref: '#/components/schemas/AgentConfiguration'
+
+    AgentConfiguration:
+      type: object
+      properties:
+        llmModel:
+          type: string
+        systemPrompt:
+          type: string
+        toolAccess:
+          type: array
+          items:
+            $ref: '#/components/schemas/ToolAccessPolicy'
+        knowledgeAccess:
+          type: array
+          items:
+            $ref: '#/components/schemas/KnowledgeAccessPolicy'
+        specialization:
+          $ref: '#/components/schemas/SpecializationProfile'
+        persona:
+          $ref: '#/components/schemas/DruidPersona'
+
+    CreateAgentRequest:
+      type: object
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+          enum: [druid, elemental, gaia, worldtree]
+        realmId:
+          type: string
+        configuration:
+          $ref: '#/components/schemas/AgentConfiguration'
+      required:
+        - id
+        - type
+        - realmId
+        - configuration
+
+    UpdateAgentRequest:
+      type: object
+      properties:
+        configuration:
+          $ref: '#/components/schemas/AgentConfiguration'
+        status:
+          type: string
+          enum: [active, inactive, error]
+
+    DruidPersona:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        coordinationStyle:
+          type: string
+          enum: [collaborative, directive, consultative, delegative]
+        decisionMakingApproach:
+          type: string
+        managementPrinciples:
+          type: array
+          items:
+            type: string
+        elementalBindings:
+          type: array
+          items:
+            type: string
+
+    SpecializationProfile:
+      type: object
+      properties:
+        id:
+          type: string
+        domain:
+          type: string
+        expertise:
+          type: array
+          items:
+            type: string
+        capabilities:
+          type: array
+          items:
+            type: string
+        constraints:
+          type: array
+          items:
+            type: string
+        defaultPrompts:
+          type: array
+          items:
+            type: string
+
+    Realm:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        status:
+          type: string
+          enum: [active, maintenance, offline]
+        agents:
+          type: array
+          items:
+            $ref: '#/components/schemas/Agent'
+        leyLineConnections:
+          type: array
+          items:
+            $ref: '#/components/schemas/LeyLineConnection'
+
+    CreateRealmRequest:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+      required:
+        - id
+        - name
+
+    LeyLineConnection:
+      type: object
+      properties:
+        id:
+          type: string
+        sourceRealmId:
+          type: string
+        targetRealmId:
+          type: string
+        status:
+          type: string
+          enum: [connected, disconnected, degraded]
+        latency:
+          type: number
+        lastPingTime:
+          type: string
+          format: date-time
+
+    CreateLeyLineRequest:
+      type: object
+      properties:
+        targetRealmId:
+          type: string
+      required:
+        - targetRealmId
+
+    Scenario:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        type:
+          type: string
+          enum: [self-play, evaluation, training]
+        participants:
+          type: array
+          items:
+            $ref: '#/components/schemas/ScenarioParticipant'
+        timeLimit:
+          type: number
+
+    CreateScenarioRequest:
+      type: object
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        type:
+          type: string
+          enum: [self-play, evaluation, training]
+        participants:
+          type: array
+          items:
+            $ref: '#/components/schemas/ScenarioParticipant'
+        timeLimit:
+          type: number
+      required:
+        - name
+        - type
+        - participants
+
+    ScenarioParticipant:
+      type: object
+      properties:
+        agentId:
+          type: string
+        role:
+          type: string
+        objectives:
+          type: array
+          items:
+            type: string
+        constraints:
+          type: array
+          items:
+            type: string
+
+    WorkflowExecution:
+      type: object
+      properties:
+        id:
+          type: string
+        scenarioId:
+          type: string
+        startTime:
+          type: string
+          format: date-time
+        endTime:
+          type: string
+          format: date-time
+        status:
+          type: string
+          enum: [running, completed, failed, timeout]
+        participants:
+          type: array
+          items:
+            $ref: '#/components/schemas/Agent'
+        interactions:
+          type: array
+          items:
+            $ref: '#/components/schemas/AgentInteraction'
+
+    AgentInteraction:
+      type: object
+      properties:
+        id:
+          type: string
+        sourceAgentId:
+          type: string
+        targetAgentId:
+          type: string
+        type:
+          type: string
+          enum: [communication, tool-invocation, knowledge-access]
+        timestamp:
+          type: string
+          format: date-time
+        content:
+          type: object
+
+    KnowledgeNamespace:
+      type: object
+      properties:
+        path:
+          type: string
+        ownerId:
+          type: string
+        type:
+          type: string
+          enum: [private, public, shared]
+
+    KnowledgeAccessPolicy:
+      type: object
+      properties:
+        agentId:
+          type: string
+        namespacePath:
+          type: string
+        permissions:
+          type: array
+          items:
+            type: string
+            enum: [read, write, execute]
+
+    ToolAccessPolicy:
+      type: object
+      properties:
+        agentId:
+          type: string
+        mcpServerId:
+          type: string
+        toolName:
+          type: string
+        permissions:
+          type: array
+          items:
+            type: string
+            enum: [invoke, configure]
+
+    ToolAccessGrant:
+      type: object
+      properties:
+        agentId:
+          type: string
+        mcpServerId:
+          type: string
+        toolName:
+          type: string
+        permissions:
+          type: array
+          items:
+            type: string
+            enum: [invoke, configure]
+      required:
+        - agentId
+        - mcpServerId
+        - toolName
+        - permissions

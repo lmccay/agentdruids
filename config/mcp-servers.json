@@ -1,0 +1,43 @@
+{
+  "servers": {
+    "github": {
+      "id": "github-mcp-server",
+      "name": "GitHub MCP Server",
+      "description": "Official GitHub-hosted MCP server for repository operations. For self-hosted, use http://localhost:3001/mcp",
+      "transport": "http",
+      "baseUrl": "https://api.githubcopilot.com/mcp/",
+      "authentication": {
+        "type": "bearer",
+        "tokenSource": "env",
+        "envVar": "GITHUB_TOKEN",
+        "header": "Authorization",
+        "prefix": "Bearer "
+      },
+      "tools": [
+        "list_pull_requests",
+        "get_pull_request",
+        "create_review_comment",
+        "get_file_contents",
+        "search_repositories",
+        "create_issue",
+        "get_issue"
+      ]
+    }
+  },
+  "realmBindings": {
+    "oss-realm": {
+      "servers": ["github"],
+      "elementals": {
+        "github-elemental-1": {
+          "serverId": "github",
+          "allowedTools": [
+            "list_pull_requests",
+            "get_pull_request",
+            "create_review_comment",
+            "get_file_contents"
+          ]
+        }
+      }
+    }
+  }
+}

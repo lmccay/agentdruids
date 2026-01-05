@@ -1,0 +1,6 @@
+export class TeamParsingService {
+  async parseTeamDescription(description: string): Promise<TeamSpecification>;
+  private extractRoles(description: string): AgentRoleSpec[];
+  private identifyCoordinator(roles: AgentRoleSpec[]): AgentRoleSpec;
+  private mapSpecializationToExpertise(specialization: string): string[];
+}

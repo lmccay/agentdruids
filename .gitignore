@@ -1,0 +1,10 @@
+node_modules
+data
+dist
+frontend/dist
+
+# Environment variables (contains secrets)
+.env
+.env.local
+.env.*.local
+.env.backup

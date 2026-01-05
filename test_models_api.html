@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Test Models API</title>
+</head>
+<body>
+    <h1>Testing Models API</h1>
+    <div id="output"></div>
+    
+    <script>
+        async function testModelsAPI() {
+            try {
+                const response = await fetch('/api/agents/models');
+                const data = await response.json();
+                document.getElementById('output').innerHTML = '<pre>' + JSON.stringify(data, null, 2) + '</pre>';
+            } catch (error) {
+                document.getElementById('output').innerHTML = '<p style="color: red;">Error: ' + error.message + '</p>';
+            }
+        }
+        
+        testModelsAPI();
+    </script>
+</body>
+</html>

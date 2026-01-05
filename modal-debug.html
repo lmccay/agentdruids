@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Agent Modal Debug</title>
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body>
+    <div id="root"></div>
+    
+    <script type="text/babel">
+        const { useState, useEffect } = React;
+        
+        // Test minimal modal component
+        function TestModal({ isOpen, onClose }) {
+            const [formData, setFormData] = useState({
+                name: '',
+                modelId: 'analytical-researcher'
+            });
+            
+            const [availableModels, setAvailableModels] = useState([]);
+            const [modelsLoading, setModelsLoading] = useState(true);
+            
+            useEffect(() => {
+                const loadModels = async () => {
+                    try {
+                        setModelsLoading(true);
+                        const response = await fetch('/api/agents/models');
+                        const data = await response.json();
+                        setAvailableModels(data.data);
+                    } catch (error) {
+                        console.error('Failed to load models:', error);
+                        setAvailableModels([
+                            { id: 'test-model', name: 'Test Model', description: 'Test' }
+                        ]);
+                    } finally {
+                        setModelsLoading(false);
+                    }
+                };
+                
+                if (isOpen) {
+                    loadModels();
+                }
+            }, [isOpen]);
+            
+            if (!isOpen) return null;
+            
+            return React.createElement('div', {
+                style: {
+                    position: 'fixed',
+                    top: 0,
+                    left: 0,
+                    right: 0,
+                    bottom: 0,
+                    backgroundColor: 'rgba(0,0,0,0.5)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center'
+                }
+            }, React.createElement('div', {
+                style: {
+                    backgroundColor: 'white',
+                    padding: '20px',
+                    borderRadius: '8px',
+                    minWidth: '400px'
+                }
+            }, [
+                React.createElement('h2', { key: 'title' }, 'Test Agent Modal'),
+                React.createElement('div', { key: 'form' }, [
+                    React.createElement('label', { key: 'name-label' }, 'Name:'),
+                    React.createElement('input', {
+                        key: 'name-input',
+                        type: 'text',
+                        value: formData.name,
+                        onChange: (e) => setFormData({...formData, name: e.target.value}),
+                        style: { display: 'block', margin: '10px 0' }
+                    }),
+                    React.createElement('label', { key: 'model-label' }, 'Model:'),
+                    React.createElement('select', {
+                        key: 'model-select',
+                        value: formData.modelId,
+                        onChange: (e) => setFormData({...formData, modelId: e.target.value}),
+                        style: { display: 'block', margin: '10px 0' }
+                    }, modelsLoading ? 
+                        React.createElement('option', {}, 'Loading...') :
+                        availableModels.map(model => 
+                            React.createElement('option', { 
+                                key: model.id, 
+                                value: model.id 
+                            }, `${model.name} - ${model.description}`)
+                        )
+                    )
+                ]),
+                React.createElement('button', {
+                    key: 'close',
+                    onClick: onClose,
+                    style: { marginTop: '20px' }
+                }, 'Close')
+            ]));
+        }
+        
+        function App() {
+            const [modalOpen, setModalOpen] = useState(false);
+            
+            return React.createElement('div', {}, [
+                React.createElement('h1', { key: 'title' }, 'Modal Debug Test'),
+                React.createElement('button', {
+                    key: 'open-btn',
+                    onClick: () => setModalOpen(true)
+                }, 'Open Modal'),
+                React.createElement(TestModal, {
+                    key: 'modal',
+                    isOpen: modalOpen,
+                    onClose: () => setModalOpen(false)
+                })
+            ]);
+        }
+        
+        ReactDOM.render(React.createElement(App), document.getElementById('root'));
+    </script>
+</body>
+</html>

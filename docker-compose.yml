@@ -1,0 +1,271 @@
+version: '3.8'
+
+services:
+  # Main Druids Application
+  druids-app:
+    build:
+      context: .
+      target: development
+      dockerfile: Dockerfile
+    container_name: druids-main
+    ports:
+      - "3000:3000"   # Main API server - exposed for MCP clients
+      - "9229:9229"   # Node.js debugging port
+    environment:
+      - NODE_ENV=development
+      - PORT=3000
+      - ALLOWED_ORIGINS=http://localhost:3000,http://localhost:8080,http://localhost:3001
+      - LOG_LEVEL=debug
+      - DRUIDS_ENV=docker-dev
+      - OLLAMA_BASE_URL=http://druids-ollama:11434
+      - OLLAMA_MODEL=qwen2.5:1.5b
+      - OLLAMA_TIMEOUT=300000
+      # OpenAI API Configuration (enabled)
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_ORGANIZATION=${OPENAI_ORGANIZATION}
+      - OPENAI_DEFAULT_MODEL=gpt-4
+      - OPENAI_TIMEOUT=60000
+      # GitHub MCP Server Authentication
+      - GITHUB_TOKEN=${GITHUB_TOKEN}
+      - DATABASE_URL=postgresql://druids_user:druids_pass_dev@druids-postgres:5432/druids
+      - REDIS_URL=redis://:druids_redis_dev@druids-redis:6379
+    volumes:
+      - .:/app
+      - /app/node_modules
+      - druids-data:/app/data
+    networks:
+      - druids-network
+    depends_on:
+      - druids-redis
+      - druids-postgres
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # MCP Server for external client integration (using fixed SimpleMCPServer)
+  druids-mcp:
+    build:
+      context: .
+      target: development
+      dockerfile: Dockerfile
+    container_name: druids-mcp-server
+    ports:
+      - "3003:3003"   # MCP protocol server - exposed for external MCP clients
+    environment:
+      - NODE_ENV=development
+      - MCP_SERVER_PORT=3003
+      - MCP_SERVER_HOST=0.0.0.0
+      - PORT=3003  # Internal port for this container
+      - LOG_LEVEL=debug
+      - MAIN_APP_URL=http://druids-main:3000
+    volumes:
+      - .:/app
+      - /app/node_modules
+      - druids-data:/app/data
+    networks:
+      - druids-network
+    depends_on:
+      - druids-app
+    restart: unless-stopped
+    command: npm run mcp:server
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3003/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # Frontend UI
+  druids-frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: druids-frontend
+    ports:
+      - "3004:80"   # Frontend UI - exposed for users
+    environment:
+      - NODE_ENV=production
+    networks:
+      - druids-network
+    depends_on:
+      - druids-app
+      - druids-mcp
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # Redis for caching and session storage
+  druids-redis:
+    image: redis:7-alpine
+    container_name: druids-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - druids-redis-data:/data
+      - ./docker/redis.conf:/usr/local/etc/redis/redis.conf
+    command: redis-server /usr/local/etc/redis/redis.conf
+    networks:
+      - druids-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # PostgreSQL for persistent storage
+  druids-postgres:
+    image: postgres:15-alpine
+    container_name: druids-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_DB=druids
+      - POSTGRES_USER=druids_user
+      - POSTGRES_PASSWORD=druids_pass_dev
+      - POSTGRES_INITDB_ARGS=--encoding=UTF-8 --lc-collate=C --lc-ctype=C
+    volumes:
+      - druids-postgres-data:/var/lib/postgresql/data
+      - ./docker/init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - druids-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U druids_user -d druids"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Ollama for LLM integration
+  druids-ollama:
+    image: ollama/ollama:latest
+    container_name: druids-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - druids-ollama-data:/root/.ollama
+      - ./docker/ollama-init.sh:/ollama-init.sh
+    networks:
+      - druids-network
+    restart: unless-stopped
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+      - OLLAMA_MODELS=qwen2.5:1.5b
+      - OLLAMA_KEEP_ALIVE=24h
+      - OLLAMA_NUM_PARALLEL=4
+      - OLLAMA_MAX_LOADED_MODELS=2
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 60s
+      timeout: 30s
+      retries: 5
+      start_period: 120s
+    # Default command is already "ollama serve"
+    # command: ["ollama", "serve"]
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: '2.0'
+        reservations:
+          memory: 2G
+          cpus: '1.0'
+
+  # MCP Gateway (for external MCP client integration)
+  druids-mcp-gateway:
+    build:
+      context: .
+      target: development
+    container_name: druids-mcp-gateway
+    env_file:
+      - .env
+    ports:
+      - "3001:3001"   # MCP protocol port - exposed for external clients
+    environment:
+      - NODE_ENV=development
+      - PORT=3001  # Internal port for this container
+      - DRUIDS_API_URL=http://druids-app:3000
+      - MCP_MODE=server
+      # OpenAI Configuration (preferred for production workloads)
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_BASE_URL=https://api.openai.com/v1
+      - OPENAI_DEFAULT_MODEL=gpt-4
+      - OPENAI_TIMEOUT=60000
+      # Ollama Configuration (fallback for local development)
+      - OLLAMA_BASE_URL=http://druids-ollama:11434
+      - OLLAMA_MODEL=qwen2.5:1.5b
+      - OLLAMA_TIMEOUT=300000
+      - DATABASE_URL=postgresql://druids_user:druids_pass_dev@druids-postgres:5432/druids
+      - REDIS_URL=redis://:druids_redis_dev@druids-redis:6379
+    volumes:
+      - .:/app
+      - /app/node_modules
+    networks:
+      - druids-network
+    depends_on:
+      - druids-app
+    restart: unless-stopped
+    command: ["npm", "run", "mcp:server"]
+
+  # Monitoring and observability
+  druids-prometheus:
+    image: prom/prometheus:latest
+    container_name: druids-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./docker/prometheus.yml:/etc/prometheus/prometheus.yml
+      - druids-prometheus-data:/prometheus
+    networks:
+      - druids-network
+    restart: unless-stopped
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+
+  # Grafana for monitoring dashboards
+  druids-grafana:
+    image: grafana/grafana:latest
+    container_name: druids-grafana
+    ports:
+      - "3002:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=druids_admin
+    volumes:
+      - druids-grafana-data:/var/lib/grafana
+      - ./docker/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./docker/grafana/datasources:/etc/grafana/provisioning/datasources
+    networks:
+      - druids-network
+    restart: unless-stopped
+
+volumes:
+  druids-data:
+    driver: local
+  druids-redis-data:
+    driver: local
+  druids-postgres-data:
+    driver: local
+  druids-ollama-data:
+    driver: local
+  druids-prometheus-data:
+    driver: local
+  druids-grafana-data:
+    driver: local
+
+networks:
+  druids-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

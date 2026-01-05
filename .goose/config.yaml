@@ -1,0 +1,4 @@
+extensions:
+  - transport: sse
+    url: "http://localhost:3003/mcp"
+    name: "druids-mcp"

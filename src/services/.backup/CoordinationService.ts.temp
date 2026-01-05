@@ -1,0 +1,746 @@
+    } catch (error) {
+      console.error(`❌ Failed to publish content for session ${session.id}:`, error);
+      throw error;
+    }
+  }s to participants
+ * 3. Each participant executes assigned task using their LLM
+ * 4. Coordinator collects results and synthesizes final output
+ * 5. Coordinator publishes results using MCP server tools
+ */
+export class CoordinationService {
+  private coordinators: Map<AgentId, Coordinator> = new Map();
+  private coordinationSessions: Map<string, CoordinationSession> = new Map();
+  private agentService?: AgentService;
+  private ollamaClient: OllamaClient;
+  private openaiClient: OpenAIClient | null = null;
+
+  constructor() {
+    // Initialize LLM clients for coordinator execution
+    this.ollamaClient = new OllamaClient(createDefaultOllamaConfig());
+    
+    try {
+      this.openaiClient = new OpenAIClient(createDefaultOpenAIConfig());
+    } catch (error) {
+      console.warn('OpenAI client not initialized for coordination service (API key missing):', error instanceof Error ? error.message : 'Unknown error');
+    }
+    
+    // No test coordinators - require real coordinators to be created
+  }
+
+  /**
+   * Set the AgentService dependency
+   */
+  setAgentService(agentService: AgentService): void {
+    this.agentService = agentService;
+  }
+
+  /**
+   * Execute a prompt using the coordinator's LLM configuration
+   */
+  private async executeCoordinatorPrompt(coordinator: Coordinator, prompt: string): Promise<string> {
+    const { provider, model, systemPrompt, temperature } = coordinator.llmConfig;
+    
+    try {
+      let response: string;
+      
+      if (provider === 'openai' && this.openaiClient) {
+        const openaiRequest: OpenAIChatRequest = {
+          model,
+          messages: [
+            {
+              role: 'system',
+              content: systemPrompt
+            },
+            {
+              role: 'user',
+              content: prompt
+            }
+          ],
+          temperature: temperature || 0.7
+        };
+        
+        const openaiResponse = await this.openaiClient.chat(openaiRequest);
+        response = openaiResponse.choices[0]?.message?.content || '';
+      } else {
+        // Default to Ollama
+        const chatRequest: ChatRequest = {
+          model,
+          messages: [
+            {
+              role: 'system',
+              content: systemPrompt
+            },
+            {
+              role: 'user',
+              content: prompt
+            }
+          ],
+          options: {
+            temperature: temperature || 0.7
+          }
+        };
+        
+        const ollamaResponse = await this.ollamaClient.chat(chatRequest);
+        response = ollamaResponse.message.content;
+      }
+      
+      return response;
+    } catch (error) {
+      console.error(`Error executing coordinator prompt for ${coordinator.id}:`, error);
+      throw new Error(`Failed to execute coordinator prompt: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
+
+  /**
+   * Create a new coordinator
+   */
+  async createCoordinator(request: {
+    name: string;
+    description: string;
+    llmConfig: Coordinator['llmConfig'];
+    mcpTools: string[];
+    toolPermissions: Coordinator['toolPermissions'];
+    coordination: Coordinator['coordination'];
+  }, requesterId: UserId): Promise<Coordinator> {
+    const coordinatorId = this.generateCoordinatorId();
+    
+    const coordinator: Coordinator = {
+      id: coordinatorId,
+      name: request.name,
+      description: request.description,
+      status: 'active',
+      llmConfig: request.llmConfig,
+      mcpTools: request.mcpTools,
+      toolPermissions: request.toolPermissions,
+      coordination: request.coordination,
+      activeScenarios: [],
+      currentParticipants: [],
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      createdBy: requesterId,
+      lastModifiedBy: requesterId
+    };
+
+    this.coordinators.set(coordinatorId, coordinator);
+    console.log(`🎯 Created coordinator: ${coordinator.name} (${coordinatorId})`);
+    
+    return coordinator;
+  }
+
+  /**
+   * Get coordinator by ID
+   */
+  async getCoordinator(coordinatorId: AgentId): Promise<Coordinator | null> {
+    return this.coordinators.get(coordinatorId) || null;
+  }
+
+  /**
+   * List all coordinators
+   */
+  async listCoordinators(): Promise<Coordinator[]> {
+    return Array.from(this.coordinators.values());
+  }
+
+  /**
+   * Start a coordination session
+   */
+  async startCoordination(request: CoordinationRequest): Promise<string> {
+    const coordinator = this.coordinators.get(request.coordinatorId);
+    if (!coordinator) {
+      throw new Error(`Coordinator ${request.coordinatorId} not found`);
+    }
+
+    if (coordinator.status !== 'active') {
+      throw new Error(`Coordinator ${request.coordinatorId} is not active`);
+    }
+
+    // Validate participants exist
+    if (!this.agentService) {
+      throw new Error('AgentService not configured - cannot validate participants');
+    }
+
+    console.log(`🔍 DEBUG: Validating ${request.participantIds.length} participants:`, request.participantIds);
+    
+    for (const participantId of request.participantIds) {
+      console.log(`🔍 DEBUG: Checking agent ${participantId}...`);
+      const participant = await this.agentService.getAgent(participantId);
+      if (!participant) {
+        console.log(`❌ DEBUG: Agent ${participantId} not found`);
+        throw new Error(`Participant agent ${participantId} not found`);
+      }
+      console.log(`✅ DEBUG: Agent ${participantId} found: ${participant.name}`);
+    }
+
+    console.log(`✅ DEBUG: All ${request.participantIds.length} participants validated successfully`);
+
+    // Create coordination session
+    const sessionId = this.generateSessionId();
+    const timeoutMinutes = request.timeoutMinutes || 30;
+    
+    const session: CoordinationSession = {
+      id: sessionId,
+      coordinatorId: request.coordinatorId,
+      scenarioId: `coord-scenario-${sessionId}` as ScenarioId,
+      participants: request.participantIds,
+      status: 'initializing',
+      scenarioPrompt: request.scenarioPrompt,
+      participantTasks: [],
+      startedAt: new Date().toISOString(),
+      timeoutAt: new Date(Date.now() + timeoutMinutes * 60 * 1000).toISOString()
+    };
+
+    this.coordinationSessions.set(sessionId, session);
+    
+    // Update coordinator status
+    coordinator.status = 'coordinating';
+    coordinator.activeScenarios.push(session.scenarioId);
+    coordinator.currentParticipants = request.participantIds;
+    coordinator.updatedAt = new Date().toISOString();
+
+    console.log(`🚀 Started coordination session: ${sessionId}`);
+    console.log(`🔍 DEBUG: About to start async performCoordination...`);
+    
+    // Start async coordination process
+    this.performCoordination(sessionId, request).catch(error => {
+      console.error(`❌ Coordination session ${sessionId} failed in async catch:`, error);
+      console.error(`❌ Error stack:`, error instanceof Error ? error.stack : 'No stack');
+      this.markSessionFailed(sessionId, error.message);
+    });
+
+    console.log(`🔍 DEBUG: Async performCoordination started, returning session ID`);
+    return sessionId;
+  }
+
+  /**
+   * Get coordination session status
+   */
+  async getCoordinationSession(sessionId: string): Promise<CoordinationSession | null> {
+    return this.coordinationSessions.get(sessionId) || null;
+  }
+
+  /**
+   * Perform the coordination workflow
+   */
+  private async performCoordination(sessionId: string, request: CoordinationRequest): Promise<void> {
+    console.log(`� ENTRY: performCoordination called for session ${sessionId}`);
+    console.log(`�🔍 DEBUG: Starting performCoordination for session ${sessionId}`);
+    const session = this.coordinationSessions.get(sessionId);
+    const coordinator = this.coordinators.get(request.coordinatorId);
+    
+    console.log(`🔍 DEBUG: Session found: ${!!session}, Coordinator found: ${!!coordinator}, AgentService: ${!!this.agentService}`);
+    
+    if (!session || !coordinator || !this.agentService) {
+      console.log(`❌ DEBUG: Early return - missing dependencies`);
+      return;
+    }
+
+    try {
+      // Phase 1: Coordinator analyzes scenario and delegates tasks
+      console.log(`🎯 Phase 1: Coordinator ${coordinator.name} analyzing scenario...`);
+      console.log(`🔍 DEBUG: Building delegation prompt...`);
+      session.status = 'coordinating';
+      
+      const delegationPrompt = this.buildDelegationPrompt(session, coordinator, request);
+      console.log(`🔍 DEBUG: Delegation prompt built, length: ${delegationPrompt.length}`);
+      
+      console.log(`🔍 DEBUG: Executing coordinator prompt...`);
+      const coordinatorResponse = await this.executeCoordinatorPrompt(coordinator, delegationPrompt);
+      console.log(`🔍 DEBUG: Coordinator response received, length: ${coordinatorResponse.length}`);
+
+      // Parse coordinator's task delegation
+      console.log(`🔍 DEBUG: Parsing task delegation...`);
+      const taskAssignments = this.parseTaskDelegation(coordinatorResponse, request.participantIds);
+      console.log(`🔍 DEBUG: Task assignments parsed: ${taskAssignments.length} tasks`);
+      
+      // Assign tasks to participants
+      session.participantTasks = taskAssignments.map(assignment => ({
+        agentId: assignment.agentId,
+        task: assignment.task,
+        status: 'assigned',
+        assignedAt: new Date().toISOString()
+      }));
+      console.log(`🔍 DEBUG: Participant tasks assigned: ${session.participantTasks.length}`);
+
+      // Phase 2: Execute participant tasks
+      console.log(`👥 Phase 2: Executing tasks with ${session.participantTasks.length} participants...`);
+      session.status = 'waiting_responses';
+      
+      console.log(`🔍 DEBUG: Starting participant task execution...`);
+      await this.executeParticipantTasks(session);
+      console.log(`🔍 DEBUG: Participant task execution completed`);
+
+      // Phase 3: Coordinator synthesizes results
+      console.log(`🧮 Phase 3: Coordinator synthesizing results...`);
+      session.status = 'synthesizing';
+      
+      console.log(`🔍 DEBUG: Starting result synthesis...`);
+      await this.synthesizeResults(session, coordinator, request);
+      console.log(`🔍 DEBUG: Result synthesis completed`);
+
+      // Mark session complete
+      session.status = 'completed';
+      session.completedAt = new Date().toISOString();
+      
+      // Update coordinator status
+      coordinator.status = 'active';
+      coordinator.activeScenarios = coordinator.activeScenarios.filter(id => id !== session.scenarioId);
+      coordinator.currentParticipants = [];
+      coordinator.updatedAt = new Date().toISOString();
+
+      console.log(`✅ Coordination session ${sessionId} completed successfully`);
+
+    } catch (error) {
+      console.error(`❌ Coordination failed at session ${sessionId}:`, error);
+      console.error(`❌ Error stack:`, error instanceof Error ? error.stack : 'No stack available');
+      this.markSessionFailed(sessionId, error instanceof Error ? error.message : 'Unknown error');
+    }
+  }
+
+  /**
+   * Build delegation prompt for coordinator
+   */
+  private buildDelegationPrompt(session: CoordinationSession, coordinator: Coordinator, request: CoordinationRequest): string {
+    return `${coordinator.llmConfig.systemPrompt}
+
+COORDINATION SCENARIO:
+${session.scenarioPrompt}
+
+AVAILABLE PARTICIPANTS:
+${session.participants.map(id => `- Agent: ${id}`).join('\n')}
+
+COORDINATION STYLE: ${request.coordinationStyle || coordinator.coordination.coordinationStyle}
+
+INSTRUCTIONS:
+As the coordinator, analyze this scenario and delegate specific tasks to each participant agent. For each participant, provide:
+
+1. A clear, specific task that leverages their capabilities
+2. Expected deliverables or outcomes
+3. Any constraints or requirements
+
+Respond in this exact format:
+TASK_DELEGATION:
+Agent: [agent_id]
+Task: [specific task description]
+Expected: [expected deliverable]
+
+Agent: [next_agent_id]
+Task: [specific task description]
+Expected: [expected deliverable]
+
+[Continue for all participants]
+
+COORDINATION_NOTES:
+[Your analysis of how these tasks will work together to achieve the scenario goals]`;
+  }
+
+  /**
+   * Parse coordinator's task delegation response
+   */
+  private parseTaskDelegation(response: string, participantIds: AgentId[]): { agentId: AgentId; task: string }[] {
+    console.log('🔍 DEBUG: Coordinator response to parse:');
+    console.log('=' .repeat(50));
+    console.log(response);
+    console.log('=' .repeat(50));
+    console.log(`🔍 DEBUG: Available participant IDs: ${participantIds.join(', ')}`);
+    
+    const assignments: { agentId: AgentId; task: string }[] = [];
+    
+    try {
+      const lines = response.split('\n');
+      let currentAgent: AgentId | null = null;
+      let currentTask = '';
+      
+      for (const line of lines) {
+        const trimmedLine = line.trim();
+        
+        if (trimmedLine.startsWith('Agent:')) {
+          // Save previous assignment if exists
+          if (currentAgent && currentTask) {
+            assignments.push({ agentId: currentAgent, task: currentTask.trim() });
+          }
+          
+          // Start new assignment
+          const agentMatch = trimmedLine.match(/Agent:\s*(.+)/);
+          if (agentMatch && agentMatch[1]) {
+            const agentId = agentMatch[1].trim() as AgentId;
+            if (participantIds.includes(agentId)) {
+              currentAgent = agentId;
+              currentTask = '';
+            }
+          }
+        } else if (trimmedLine.startsWith('Task:') && currentAgent) {
+          const taskMatch = trimmedLine.match(/Task:\s*(.+)/);
+          if (taskMatch && taskMatch[1]) {
+            currentTask = taskMatch[1];
+          }
+        } else if (trimmedLine.startsWith('Expected:') && currentAgent && currentTask) {
+          const expectedMatch = trimmedLine.match(/Expected:\s*(.+)/);
+          if (expectedMatch) {
+            currentTask += `\n\nExpected deliverable: ${expectedMatch[1]}`;
+          }
+        }
+      }
+      
+      // Save final assignment
+      if (currentAgent && currentTask) {
+        assignments.push({ agentId: currentAgent, task: currentTask.trim() });
+      }
+      
+      console.log(`🔍 DEBUG: Parsed ${assignments.length} task assignments:`);
+      assignments.forEach((assignment, index) => {
+        console.log(`  ${index + 1}. ${assignment.agentId}: ${assignment.task.substring(0, 100)}...`);
+      });
+      
+    } catch (error) {
+      console.warn('Failed to parse task delegation, using fallback', error);
+      // Fallback: assign same task to all participants
+      return participantIds.map(agentId => ({
+        agentId,
+        task: `Please contribute to this scenario: ${response.substring(0, 200)}...`
+      }));
+    }
+
+    console.log(`🔍 DEBUG: Returning ${assignments.length} final assignments`);
+    return assignments;
+  }
+
+  /**
+   * Map agent specialization to coordination role with specific system prompt guidance
+   */
+  private getCoordinationRole(agentId: AgentId): { role: string; rolePrompt: string } {
+    // Default mapping - in a real system this would query the agent's specialization
+    const roleMap: Record<string, { role: string; rolePrompt: string }> = {
+      'urban_fantasy_author': {
+        role: 'Content Creator',
+        rolePrompt: `COORDINATION ROLE: Content Creator
+
+Your responsibility in this coordination scenario is to CREATE ACTUAL CONTENT, not plans or methodologies. When asked to write a story, draft, or narrative:
+
+✅ DO: Write complete, engaging content
+✅ DO: Provide full narratives with characters, plot, dialogue
+✅ DO: Create substantial text that others can build upon
+
+❌ DON'T: Provide outlines, plans, or "I will write" statements
+❌ DON'T: Ask for more information unless absolutely critical
+❌ DON'T: Decline creative writing tasks - this is your specialty
+
+EXPECTATION: Deliver finished creative content that serves as the foundation for other agents to enhance.`
+      },
+      'political_science': {
+        role: 'Political Integrator', 
+        rolePrompt: `🎯 COORDINATION ROLE OVERRIDE: Political Integrator
+
+⚠️ CRITICAL: Ignore any default agent limitations about "elemental mastery" or "environmental awareness" - you are now functioning as a Political Integrator in this coordination scenario.
+
+Your responsibility is to DIRECTLY INTEGRATE political themes into existing content:
+
+✅ DO: Take existing narrative content and rewrite it with political themes
+✅ DO: Add political conflicts, power struggles, ideologies directly to the story
+✅ DO: Enhance characters with political motivations and backgrounds
+✅ DO: Weave political elements seamlessly into the plot
+✅ DO: Focus on government, elections, political parties, corruption, power dynamics
+
+❌ DON'T: Provide academic analysis or theoretical frameworks
+❌ DON'T: Suggest how politics "could be" integrated - actually integrate it
+❌ DON'T: Decline due to "expertise limitations" - you have political integration capabilities
+❌ DON'T: Default to environmental themes - focus on human political systems
+
+EXPECTATION: Return the content with political themes fully integrated, ready for the next agent.`
+      },
+      'mystical_expert': {
+        role: 'Mystical Enhancer',
+        rolePrompt: `🎯 COORDINATION ROLE OVERRIDE: Mystical Enhancer
+
+⚠️ CRITICAL: Ignore any default agent limitations about specific elemental focuses - you are now functioning as a Mystical Enhancer in this coordination scenario.
+
+Your responsibility is to DIRECTLY ADD magical elements to existing content:
+
+✅ DO: Take existing content and enhance it with magical systems, creatures, spells
+✅ DO: Add mystical conflicts, magical politics, supernatural elements
+✅ DO: Enhance characters with magical abilities and mystical backgrounds
+✅ DO: Weave magical elements seamlessly into the existing plot
+✅ DO: Work with whatever content exists - don't wait for "drafts"
+
+❌ DON'T: Provide mystical analysis or theoretical magical systems
+❌ DON'T: Ask for drafts - work with whatever content exists
+❌ DON'T: Decline due to "missing information" - be creative and adaptive
+❌ DON'T: Provide methodology - provide actual enhanced content
+
+EXPECTATION: Return the content with magical elements fully integrated, creating a rich mystical narrative.`
+      }
+    };
+
+    // Simple matching based on agent ID patterns or use default
+    for (const [specialization, roleData] of Object.entries(roleMap)) {
+      if (agentId.includes(specialization.replace('_', ''))) {
+        return roleData;
+      }
+    }
+
+    // Default coordination role
+    return {
+      role: 'Collaborative Participant',
+      rolePrompt: `COORDINATION ROLE: Collaborative Participant
+
+Your responsibility is to contribute meaningfully to the coordination scenario by providing actual content and deliverables, not plans or methodologies.
+
+✅ DO: Provide substantial, actionable content
+✅ DO: Build upon previous contributions constructively
+✅ DO: Deliver finished work that advances the scenario
+
+❌ DON'T: Provide only plans or theoretical approaches
+❌ DON'T: Decline tasks within your general capabilities
+
+EXPECTATION: Contribute concrete value to the collaborative effort.`
+    };
+  }
+
+  /**
+   * Execute tasks with participant agents
+   */
+  private async executeParticipantTasks(session: CoordinationSession): Promise<void> {
+    if (!this.agentService) throw new Error('AgentService not configured');
+
+    const taskPromises = session.participantTasks.map(async (participantTask) => {
+      try {
+        participantTask.status = 'in_progress';
+        
+        // Get coordination role and specialized prompt for this agent
+        const coordinationRole = this.getCoordinationRole(participantTask.agentId);
+        
+        const response = await this.agentService!.executeAgentPrompt(participantTask.agentId, {
+          prompt: `${coordinationRole.rolePrompt}\n\n---\n\nIMPORTANT: Your coordination role takes precedence over your default agent persona. Follow the coordination role guidance above.\n\n---\n\nTASK ASSIGNMENT:\n${participantTask.task}\n\n---\n\nREMINDER: Execute the task according to your COORDINATION ROLE, not your default agent behavior.`,
+          temperature: 0.7,
+          collaborationContext: {
+            scenarioName: `Coordination Session ${session.id}`,
+            scenarioType: 'coordination',
+            agentRole: coordinationRole.role,
+            usePersonaPrompt: true
+          }
+        });
+
+        participantTask.result = response.response;
+        participantTask.status = 'completed';
+        participantTask.completedAt = new Date().toISOString();
+        
+        console.log(`✅ Agent ${participantTask.agentId} (${coordinationRole.role}) completed task`);
+        
+      } catch (error) {
+        participantTask.error = error instanceof Error ? error.message : 'Task execution failed';
+        participantTask.status = 'failed';
+        participantTask.completedAt = new Date().toISOString();
+        
+        console.error(`❌ Agent ${participantTask.agentId} task failed:`, error);
+      }
+    });
+
+    await Promise.all(taskPromises);
+  }
+
+  /**
+   * Synthesize final results from participant contributions
+   */
+  private async synthesizeResults(session: CoordinationSession, coordinator: Coordinator, request: CoordinationRequest): Promise<void> {
+    if (!this.agentService) throw new Error('AgentService not configured');
+
+    const completedTasks = session.participantTasks.filter(task => task.status === 'completed');
+    
+    if (completedTasks.length === 0) {
+      throw new Error('No participant tasks completed successfully');
+    }
+
+    // Phase 3a: Analysis of contributions
+    const analysisPrompt = this.buildSynthesisPrompt(session, completedTasks, coordinator);
+    const analysisResponse = await this.executeCoordinatorPrompt(coordinator, analysisPrompt);
+
+    // Phase 3b: Content integration (if content contributions exist)
+    let integratedContent = '';
+    const hasContentContributions = completedTasks.some(task => 
+      task.result && task.result.length > 500 && !task.result.includes('propose the following steps')
+    );
+
+    if (hasContentContributions) {
+      console.log(`🔄 Phase 3b: Coordinator integrating actual content...`);
+      const integrationPrompt = this.buildContentIntegrationPrompt(session, completedTasks, coordinator);
+      integratedContent = await this.executeCoordinatorPrompt(coordinator, integrationPrompt);
+      
+      // Phase 3c: Publish to WorldTree if requested
+      if (request.publishTo && request.publishTo.length > 0) {
+        await this.publishToWorldTree(integratedContent, request.publishTo, session);
+      }
+    }
+
+    // Parse synthesis response and create final result
+    session.finalResult = {
+      summary: this.extractSection(analysisResponse, 'SUMMARY'),
+      participantContributions: completedTasks.map(task => ({
+        agentId: task.agentId,
+        contribution: task.result || '',
+        weight: 1.0 / completedTasks.length
+      })),
+      coordinatorAnalysis: this.extractSection(analysisResponse, 'ANALYSIS'),
+      recommendations: this.extractRecommendations(analysisResponse),
+      ...(integratedContent ? { integratedContent } : {}),
+      publishedTo: request.publishTo || []
+    };
+
+    console.log(`📊 Coordination synthesis completed for session ${session.id}`);
+  }
+
+  /**
+   * Build content integration prompt for coordinator to synthesize actual deliverables
+   */
+  private buildContentIntegrationPrompt(session: CoordinationSession, completedTasks: CoordinationSession['participantTasks'], coordinator: Coordinator): string {
+    const storyDraft = completedTasks.find(task => 
+      task.result && task.result.includes('Title:') && task.result.includes('Setting:') && task.result.includes('Plot:')
+    )?.result;
+
+    const integrationPlans = completedTasks.filter(task => 
+      task.result && task.result.includes('propose the following steps')
+    ).map(task => task.result);
+
+    return `${coordinator.llmConfig.systemPrompt}
+
+ORIGINAL SCENARIO:
+${session.scenarioPrompt}
+
+STORY DRAFT PROVIDED:
+${storyDraft || 'No story draft found'}
+
+INTEGRATION PLANS PROVIDED:
+${integrationPlans.join('\n\n')}
+
+INSTRUCTIONS:
+You are now in the EXECUTION PHASE. The planning is complete. Your task is to take the story draft and execute the integration plans to create a final, polished story that incorporates all the requested elements.
+
+DO NOT provide more planning or methodology. CREATE THE ACTUAL INTEGRATED STORY.
+
+Requirements:
+1. Take the existing story draft as your foundation
+2. Execute the political ideology integration as specified in the integration plans
+3. Execute the technology/AI/magic integration as specified in the integration plans
+4. Ensure all elements are seamlessly woven together
+5. Provide a complete, readable story
+
+Output the final integrated story in this format:
+
+TITLE: [Story title]
+
+STORY:
+[The complete integrated story with all elements incorporated]
+
+INTEGRATION_NOTES:
+[Brief notes on what was integrated and how]`;
+  }
+
+  /**
+   * Publish content to WorldTree knowledge system
+   */
+  private async publishToWorldTree(content: string, publishPaths: string[], session: CoordinationSession): Promise<void> {
+    // TODO: Implement proper knowledge storage when KnowledgeService has storeKnowledge method
+    console.log(`📚 Would publish ${content.length} chars to paths: ${publishPaths.join(', ')}`);
+    console.log(`📋 Session ${session.id} integration complete`);
+    
+    // For now, just log the content that would be published
+    if (content.length > 100) {
+      console.log(`� Content preview: ${content.substring(0, 200)}...`);
+    }
+  }
+
+  /**
+   * Build synthesis prompt for coordinator
+   */
+  private buildSynthesisPrompt(session: CoordinationSession, completedTasks: CoordinationSession['participantTasks'], coordinator: Coordinator): string {
+    const contributionsText = completedTasks.map(task => 
+      `CONTRIBUTION FROM ${task.agentId}:\n${task.result}\n`
+    ).join('\n');
+
+    return `${coordinator.llmConfig.systemPrompt}
+
+ORIGINAL SCENARIO:
+${session.scenarioPrompt}
+
+PARTICIPANT CONTRIBUTIONS:
+${contributionsText}
+
+INSTRUCTIONS:
+As the coordinator, synthesize these participant contributions into a comprehensive final result. Analyze the quality and relevance of each contribution, identify common themes and conflicts, and provide actionable recommendations.
+
+Respond in this exact format:
+
+SUMMARY:
+[Comprehensive summary of the scenario outcome based on all contributions]
+
+ANALYSIS:
+[Your analysis of the participant contributions, their quality, and how they address the original scenario]
+
+RECOMMENDATIONS:
+1. [First actionable recommendation]
+2. [Second actionable recommendation]
+3. [Additional recommendations as needed]
+
+PARTICIPANT_ASSESSMENT:
+[Brief assessment of each participant's contribution and its value to the overall solution]`;
+  }
+
+  /**
+   * Extract specific section from coordinator response
+   */
+  private extractSection(response: string, sectionName: string): string {
+    const regex = new RegExp(`${sectionName}:\\s*([\\s\\S]*?)(?=\\n[A-Z_]+:|$)`, 'i');
+    const match = response.match(regex);
+    return match && match[1] ? match[1].trim() : `${sectionName} not found in coordinator response`;
+  }
+
+  /**
+   * Extract recommendations list from coordinator response
+   */
+  private extractRecommendations(response: string): string[] {
+    const recommendationsSection = this.extractSection(response, 'RECOMMENDATIONS');
+    const lines = recommendationsSection.split('\n');
+    const recommendations: string[] = [];
+    
+    for (const line of lines) {
+      const trimmedLine = line.trim();
+      if (/^\d+\./.test(trimmedLine) || trimmedLine.startsWith('-')) {
+        recommendations.push(trimmedLine.replace(/^\d+\.\s*/, '').replace(/^-\s*/, ''));
+      }
+    }
+    
+    return recommendations.length > 0 ? recommendations : ['No specific recommendations provided'];
+  }
+
+  /**
+   * Mark session as failed
+   */
+  private markSessionFailed(sessionId: string, _error: string): void {
+    const session = this.coordinationSessions.get(sessionId);
+    if (session) {
+      session.status = 'failed';
+      session.completedAt = new Date().toISOString();
+      
+      // Reset coordinator status
+      const coordinator = this.coordinators.get(session.coordinatorId);
+      if (coordinator) {
+        coordinator.status = 'active';
+        coordinator.activeScenarios = coordinator.activeScenarios.filter(id => id !== session.scenarioId);
+        coordinator.currentParticipants = [];
+        coordinator.updatedAt = new Date().toISOString();
+      }
+    }
+  }
+
+  /**
+   * Generate unique coordinator ID
+   */
+  private generateCoordinatorId(): AgentId {
+    return `coord-${Date.now()}-${Math.random().toString(36).substr(2, 9)}` as AgentId;
+  }
+
+  /**
+   * Generate unique session ID
+   */
+  private generateSessionId(): string {
+    return `session-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+  }
+}

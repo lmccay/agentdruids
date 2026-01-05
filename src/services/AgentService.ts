@@ -1,0 +1,1933 @@
+import { AgentId } from '../models/Types';
+import {
+  Agent,
+  CreateAgentRequest,
+  UpdateAgentRequest,
+  AgentSummary,
+  AgentQueryFilters,
+  DruidPersona,
+  RealmAccess
+} from '../models/Agent';
+import { AgentType } from '../models/Types';
+import { OllamaClient, ChatRequest, createDefaultOllamaConfig } from './OllamaClient';
+import { OpenAIClient, OpenAIChatRequest, createDefaultOpenAIConfig } from './OpenAIClient';
+import { PolicyEngine } from './PolicyEngine';
+import { RepositoryManager } from './RepositoryManager';
+import { RealmService } from './RealmService';
+import { generateUUID, AgentIdMapper } from '../utils/uuidUtils';
+import { MCPConfigLoader } from './mcp/MCPConfigLoader';
+import { HttpMCPClient } from './mcp/HttpMCPClient';
+
+/**
+ * Agent execution request for LLM operations
+ */
+interface AgentExecutionRequest {
+  prompt: string;
+  context?: any;
+  systemPrompt?: string;
+  temperature?: number;
+  // Collaboration context for enhanced persona prompts
+  collaborationContext?: {
+    scenarioName?: string;
+    scenarioType?: string;
+    agentRole?: string;
+    usePersonaPrompt?: boolean;
+  };
+}
+
+/**
+ * Agent execution response from LLM operations
+ */
+interface AgentExecutionResponse {
+  response: string;
+  usage?: {
+    promptTokens: number;
+    completionTokens: number;
+    totalTokens: number;
+  };
+  executionTime: number;
+  toolCalls?: AgentToolCall[];
+}
+
+/**
+ * Agent tool call execution result
+ */
+interface AgentToolCall {
+  tool: string;
+  params: any;
+  result: any;
+  success: boolean;
+  executionTime: number;
+}
+
+/**
+ * Processed agent response with tool calls
+ */
+interface ProcessedAgentResponse {
+  finalResponse: string;
+  toolCalls: AgentToolCall[];
+}
+
+/**
+ * Agent validation result
+ */
+interface AgentValidationResult {
+  isValid: boolean;
+  errors: string[];
+  warnings: string[];
+}
+
+/**
+ * Agent Service for managing agent lifecycle, LLM integration, and policy enforcement
+ */
+export class AgentService {
+  private agents: Map<AgentId, Agent> = new Map();
+  private repositoryManager: RepositoryManager | null = null;
+  private ollamaClient: OllamaClient;
+  private openaiClient: OpenAIClient | null = null;
+  private policyEngine: PolicyEngine;
+  private realmService: RealmService;
+  private mcpConfigLoader: MCPConfigLoader;
+  private mcpClients: Map<string, HttpMCPClient> = new Map();
+
+  constructor(ollamaClient?: OllamaClient, policyEngine?: PolicyEngine, openaiClient?: OpenAIClient) {
+    this.ollamaClient = ollamaClient || new OllamaClient(createDefaultOllamaConfig());
+    this.policyEngine = policyEngine || new PolicyEngine();
+    this.realmService = new RealmService();
+    
+    // Initialize OpenAI client if API key is available
+    try {
+      this.openaiClient = openaiClient || new OpenAIClient(createDefaultOpenAIConfig());
+    } catch (error) {
+      console.warn('OpenAI client not initialized (API key missing):', error instanceof Error ? error.message : 'Unknown error');
+    }
+
+    // Initialize MCP config loader
+    this.mcpConfigLoader = new MCPConfigLoader();
+    this.initializeMCPConfig();
+
+    this.initializeSystemAgents();
+    
+    // Initialize service with dual persistence
+    this.initializeService().catch(error => {
+      console.warn('Failed to initialize AgentService with database:', error instanceof Error ? error.message : 'Unknown error');
+    });
+  }
+
+  /**
+   * Initialize MCP configuration
+   */
+  private async initializeMCPConfig(): Promise<void> {
+    try {
+      await this.mcpConfigLoader.load();
+
+      // Watch for config changes (hot reload) in non-test environments
+      if (process.env['NODE_ENV'] !== 'test') {
+        this.mcpConfigLoader.watch();
+      }
+
+      console.log('✅ MCP config initialized');
+    } catch (error) {
+      console.error('❌ Failed to initialize MCP config:', error);
+      // Continue without MCP support
+    }
+  }
+
+  private async initializeService(): Promise<void> {
+    // Try to initialize database connection
+    try {
+      this.repositoryManager = await RepositoryManager.initialize();
+      console.log('✅ Database connection established for AgentService');
+      
+      // Database is available - load from database as source of truth
+      await this.loadAgentsFromDatabase();
+    } catch (error) {
+      console.warn('⚠️ Database connection failed, using Redis-only fallback mode:', error instanceof Error ? error.message : 'Unknown error');
+      this.repositoryManager = null;
+      
+      // Only use Redis if database is unavailable (fallback mode)
+      await this.loadAgentsFromStorage();
+    }
+  }
+
+  private async loadAgentsFromDatabase(): Promise<void> {
+    if (!this.repositoryManager) {
+      return;
+    }
+
+    try {
+      const dbAgents = await this.repositoryManager.agents.findAll();
+      
+      // Load database agents into memory for fast access
+      for (const dbAgent of dbAgents) {
+        // Generate slug ID from agent name
+        const slugId = dbAgent.name.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+        
+        // Establish the mapping between slug ID and UUID
+        AgentIdMapper.mapExistingAgent(slugId, dbAgent.id);
+        
+        // Use the slug ID as the service ID
+        const serviceAgent = { ...dbAgent, id: slugId };
+        this.agents.set(slugId, serviceAgent);
+        
+        console.log(`🔄 Loaded agent ${slugId} (DB UUID: ${dbAgent.id}) from database`);
+      }
+      
+      if (dbAgents.length > 0) {
+        console.log(`✅ Loaded ${dbAgents.length} agents from database`);
+      } else {
+        console.log('⚠️ No agents found in database.');
+      }
+    } catch (error) {
+      console.warn('Failed to load agents from database:', error instanceof Error ? error.message : 'Unknown error');
+    }
+  }
+
+  /**
+   * Create a new agent with LLM configuration and policy validation
+   */
+  async createAgent(request: CreateAgentRequest): Promise<Agent> {
+    // Validate agent configuration
+    const validation = await this.validateAgentConfiguration(request);
+    if (!validation.isValid) {
+      throw new Error(`Agent validation failed: ${validation.errors.join(', ')}`);
+    }
+
+    // Check policy permissions for agent creation
+    console.log('🔐 Checking access for agent creation:', {
+      subjectId: 'system',
+      subjectType: 'user',
+      resourceType: 'agent',
+      resourceId: request.id || 'new',
+      operation: 'create',
+      requestedAccess: 'write'
+    });
+
+    const accessDecision = await this.policyEngine.checkAccess({
+      subjectId: 'system',
+      subjectType: 'user',
+      resourceType: 'agent',
+      resourceId: request.id || 'new',
+      operation: 'create',
+      requestedAccess: 'write'
+    });
+
+    console.log('🔐 Access decision result:', accessDecision);
+
+    if (!accessDecision.allowed) {
+      throw new Error(`Access denied: ${accessDecision.reason}`);
+    }
+
+    const agentId = request.id || this.generateAgentId();
+    const dbAgentId = AgentIdMapper.needsMapping(agentId) ? AgentIdMapper.getUUIDForStringId(agentId) : agentId;
+    const now = Date.now().toString();
+
+    const agent: Agent = {
+      id: agentId,
+      type: request.type,
+      name: request.name,
+      description: request.description,
+      status: 'inactive',
+      capabilities: request.capabilities,
+      specialization: request.specialization,
+      personality: request.personality,
+      mcpTools: request.mcpTools,
+      toolPermissions: request.toolPermissions,
+      llmConfig: request.llmConfig,
+      resourceLimits: request.resourceLimits || {
+        maxMemoryMB: 512,
+        maxCpuPercent: 50,
+        maxConcurrentTasks: 10,
+        maxExecutionTimeMs: 300000
+      },
+      bindings: [],
+      ...(request.realmAccess && { realmAccess: request.realmAccess }),
+      tags: request.tags || [],
+      metadata: request.metadata || {},
+      createdAt: now,
+      updatedAt: now
+    };
+
+    this.agents.set(agentId, agent);
+    
+    // Write to database as single source of truth
+    if (this.repositoryManager) {
+      try {
+        const dbAgent = { ...agent, id: dbAgentId };
+        await this.repositoryManager.agents.create(dbAgent);
+        console.log(`💾 Stored agent ${agentId} (DB ID: ${dbAgentId}) in database`);
+      } catch (error) {
+        // Remove from memory cache if database write fails
+        this.agents.delete(agentId);
+        console.error('Failed to persist agent to database:', error instanceof Error ? error.message : 'Unknown error');
+        throw error; // Fail fast - don't create agent if DB write fails
+      }
+    } else {
+      console.warn('⚠️ Database unavailable, agent only stored in memory (will be lost on restart)');
+    }
+
+    // Update realm if agent has realm access
+    if (agent.realmAccess) {
+      try {
+        if (agent.realmAccess.boundRealmId) {
+          // For elemental agents, add to single bound realm
+          const realm = await this.realmService.getRealm(agent.realmAccess.boundRealmId);
+          if (realm) {
+            // Update only the agentIds field to avoid schema issues
+            const updatedAgentIds = realm.agentIds.includes(agentId) 
+              ? realm.agentIds 
+              : [...realm.agentIds, agentId];
+            // Only update agentIds field to avoid field mapping issues
+            await this.realmService.updateRealm(agent.realmAccess.boundRealmId, { 
+              agentIds: updatedAgentIds 
+            });
+            console.log(`🌍 Added agent ${agentId} to bound realm ${agent.realmAccess.boundRealmId}`);
+          }
+        } else if (agent.realmAccess.accessibleRealms && agent.realmAccess.accessibleRealms.length > 0) {
+          // For druid agents, add to all accessible realms
+          for (const realmAccess of agent.realmAccess.accessibleRealms) {
+            const realm = await this.realmService.getRealm(realmAccess.realmId);
+            if (realm) {
+              // Update only the agentIds field to avoid schema issues
+              const updatedAgentIds = realm.agentIds.includes(agentId) 
+                ? realm.agentIds 
+                : [...realm.agentIds, agentId];
+              // Only update agentIds field to avoid field mapping issues
+              await this.realmService.updateRealm(realmAccess.realmId, { 
+                agentIds: updatedAgentIds 
+              });
+              console.log(`🌍 Added agent ${agentId} to accessible realm ${realmAccess.realmId}`);
+            }
+          }
+        }
+      } catch (error) {
+        console.warn(`⚠️ Failed to update realm with new agent ${agentId}:`, error instanceof Error ? error.message : 'Unknown error');
+        // Don't fail agent creation if realm update fails - agent is still valid
+      }
+    }
+    
+    console.log(`✅ Created agent ${agentId} with database persistence`);
+    return agent;
+  }
+
+  /**
+   * Get an agent by ID with policy enforcement
+   */
+  async getAgent(agentId: AgentId, requesterId?: string): Promise<Agent> {
+    // 1. Check memory first (fastest)
+    let agent = this.agents.get(agentId);
+    
+    if (!agent) {
+      // 2. Read from database as single source of truth
+      if (this.repositoryManager) {
+        try {
+          const dbAgentId = AgentIdMapper.needsMapping(agentId) ? 
+            AgentIdMapper.getUUIDForStringId(agentId) : agentId;
+          const dbAgent = await this.repositoryManager.agents.findById(dbAgentId);
+          
+          if (dbAgent) {
+            // Convert database format back to application format
+            agent = { ...dbAgent, id: agentId };
+            
+            // Update memory cache
+            this.agents.set(agentId, agent);
+            console.log(`📥 Database hit: Loaded agent ${agentId} into memory cache`);
+          }
+        } catch (error) {
+          console.warn('Database read failed:', error instanceof Error ? error.message : 'Unknown error');
+        }
+      } else {
+        console.warn('⚠️ Database unavailable for agent lookup');
+      }
+    }
+    
+    if (!agent) {
+      throw new Error(`Agent not found: ${agentId}`);
+    }
+
+    // Check read access
+    if (requesterId) {
+      const accessDecision = await this.policyEngine.checkAccess({
+        subjectId: requesterId,
+        subjectType: 'user',
+        resourceType: 'agent',
+        resourceId: agentId,
+        operation: 'read',
+        requestedAccess: 'read'
+      });
+
+      if (!accessDecision.allowed) {
+        throw new Error(`Access denied: ${accessDecision.reason}`);
+      }
+    }
+
+    return agent;
+  }
+
+  /**
+   * List agents with optional filtering and access control
+   */
+  async listAgents(filters: AgentQueryFilters = {}, requesterId?: string): Promise<AgentSummary[]> {
+    // Use in-memory agents (already loaded from database on startup)
+    // No need to refresh from Redis on every call - prevents duplication
+    let agents = Array.from(this.agents.values());
+    console.log(`🔍 AgentService: Total agents in memory: ${agents.length}`);
+    console.log(`🔍 AgentService: Agent IDs:`, agents.map(a => `${a.id}(${a.status})`));
+
+    // Apply filters
+    if (filters.type) {
+      const types = Array.isArray(filters.type) ? filters.type : [filters.type];
+      agents = agents.filter(agent => types.includes(agent.type));
+    }
+
+    if (filters.status) {
+      const statuses = Array.isArray(filters.status) ? filters.status : [filters.status];
+      agents = agents.filter(agent => statuses.includes(agent.status));
+    }
+
+    if (filters.realmId) {
+      agents = agents.filter(agent => {
+        // Check the agent's realm through multiple possible sources
+        const agentRealmId = (agent as any).realmId || 
+                           agent.realmAccess?.currentRealmId || 
+                           agent.realmAccess?.boundRealmId;
+        return agentRealmId === filters.realmId;
+      });
+    }
+
+    if (filters.capabilities) {
+      // Ensure capabilities is always an array
+      const capabilities = Array.isArray(filters.capabilities) ? filters.capabilities : [filters.capabilities];
+      
+      // If capabilities array is empty, it means "any agent matches" (no capability requirements)
+      // If capabilities array has items, agent must have at least one of the required capabilities
+      if (capabilities.length > 0) {
+        agents = agents.filter(agent => 
+          capabilities.some(cap => agent.capabilities.includes(cap))
+        );
+      }
+      // If capabilities array is empty ([]), no filtering is applied - all agents match
+    }
+
+    if (filters.domain) {
+      agents = agents.filter(agent => 
+        agent.specialization.domain === filters.domain
+      );
+    }
+
+    if (filters.tags) {
+      agents = agents.filter(agent => 
+        filters.tags!.some(tag => agent.tags?.includes(tag))
+      );
+    }
+
+    // Apply access control if requesterId provided
+    if (requesterId) {
+      const accessibleAgents: Agent[] = [];
+      for (const agent of agents) {
+        try {
+          const accessDecision = await this.policyEngine.checkAccess({
+            subjectId: requesterId,
+            subjectType: 'user',
+            resourceType: 'agent',
+            resourceId: agent.id,
+            operation: 'read',
+            requestedAccess: 'read'
+          });
+
+          if (accessDecision.allowed) {
+            accessibleAgents.push(agent);
+          }
+        } catch (error) {
+          console.warn(`Access check failed for agent ${agent.id}:`, error);
+        }
+      }
+      agents = accessibleAgents;
+    }
+
+    // Convert to AgentSummary format and sort alphabetically by name
+    const summaries = agents.map(agent => {
+      const summary: any = {
+        id: agent.id,
+        name: agent.name,
+        type: agent.type,
+        status: agent.status,
+        capabilities: agent.capabilities,
+        domain: agent.specialization.domain,
+        lastActive: agent.updatedAt
+      };
+      
+      // Include realmId from multiple possible sources
+      const agentRealmId = (agent as any).realmId || 
+                          agent.deployment?.realmId || 
+                          agent.realmAccess?.currentRealmId || 
+                          agent.realmAccess?.boundRealmId;
+      if (agentRealmId) {
+        summary.realmId = agentRealmId;
+      }
+      
+      // Include realmAccess if it exists
+      if (agent.realmAccess) {
+        summary.realmAccess = agent.realmAccess;
+      }
+      
+      return summary;
+    });
+
+    // Sort alphabetically by name (case-insensitive)
+    summaries.sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
+
+    return summaries;
+  }
+
+  /**
+   * Update an agent with policy enforcement
+   */
+  async updateAgent(agentId: AgentId, updateData: UpdateAgentRequest, requesterId?: string): Promise<Agent> {
+    const agent = await this.getAgent(agentId, requesterId);
+
+    // Check update access
+    if (requesterId) {
+      const accessDecision = await this.policyEngine.checkAccess({
+        subjectId: requesterId,
+        subjectType: 'user',
+        resourceType: 'agent',
+        resourceId: agentId,
+        operation: 'update',
+        requestedAccess: 'write'
+      });
+
+      if (!accessDecision.allowed) {
+        throw new Error(`Access denied: ${accessDecision.reason}`);
+      }
+    }
+
+    // Apply updates safely
+    const updatedAgent: Agent = {
+      ...agent,
+      name: updateData.name || agent.name,
+      description: updateData.description || agent.description,
+      type: updateData.type || agent.type, // Add support for type updates
+      status: updateData.status || agent.status, // Add support for status updates
+      capabilities: updateData.capabilities || agent.capabilities,
+      specialization: {
+        ...agent.specialization,
+        ...(updateData.specialization || {})
+      },
+      personality: {
+        ...agent.personality,
+        ...(updateData.personality || {})
+      },
+      mcpTools: updateData.mcpTools || agent.mcpTools,
+      toolPermissions: updateData.toolPermissions || agent.toolPermissions,
+      llmConfig: {
+        ...agent.llmConfig,
+        ...(updateData.llmConfig || {})
+      },
+      resourceLimits: updateData.resourceLimits || agent.resourceLimits,
+      tags: updateData.tags !== undefined ? updateData.tags : (agent.tags || []),
+      metadata: updateData.metadata !== undefined ? updateData.metadata : (agent.metadata || {}),
+      updatedAt: Date.now().toString(),
+      ...(requesterId && { lastModifiedBy: requesterId }),
+      // Replace realmAccess completely instead of merging to allow removing fields
+      ...(updateData.realmAccess !== undefined && { realmAccess: updateData.realmAccess as RealmAccess })
+    };
+
+    console.log(`🔍 DEBUG AgentService: Setting agent ${agentId} with realmAccess:`, updatedAgent.realmAccess);
+    this.agents.set(agentId, updatedAgent);
+    
+    // Write-through cache: Database is source of truth, Redis is cache
+    if (this.repositoryManager) {
+      try {
+        const dbAgentId = AgentIdMapper.needsMapping(agentId) ? AgentIdMapper.getUUIDForStringId(agentId) : agentId;
+        const dbAgent = { ...updatedAgent, id: dbAgentId };
+        
+        // Try to update first, if it returns null (not found), create the agent
+        const updateResult = await this.repositoryManager.agents.update(dbAgentId, dbAgent);
+        if (updateResult === null) {
+          // Agent not found in database, create it
+          console.log(`⚠️ Agent ${agentId} not found in database, creating new entry...`);
+          await this.repositoryManager.agents.create(dbAgent);
+          console.log(`💾 Created agent ${agentId} (DB ID: ${dbAgentId}) in database`);
+        } else {
+          console.log(`💾 Updated agent ${agentId} (DB ID: ${dbAgentId}) in database`);
+        }
+        
+        // Update cache on successful database write
+        try {
+          // Redis removed - database is single source of truth
+          console.log(`🔄 Cache updated for agent ${agentId}`);
+        } catch (cacheError) {
+          console.warn(`⚠️ Cache update failed for agent ${agentId}:`, cacheError);
+        }
+      } catch (error) {
+        console.error('Failed to persist agent to database:', error instanceof Error ? error.message : 'Unknown error');
+        throw error; // Fail fast - don't update agent if DB write fails
+      }
+    } else {
+      // Fallback to Redis-only if database unavailable
+      console.warn('⚠️ Database unavailable, using Redis-only persistence');
+      // Redis removed - database is single source of truth
+    }
+    
+    console.log(`✅ Updated agent ${agentId} with write-through cache`);
+    return updatedAgent;
+  }
+
+  /**
+   * Start an agent with LLM initialization
+   */
+  async startAgent(agentId: AgentId, requesterId?: string): Promise<Agent> {
+    const agent = await this.getAgent(agentId, requesterId);
+
+    // Check control access
+    if (requesterId) {
+      const accessDecision = await this.policyEngine.checkAccess({
+        subjectId: requesterId,
+        subjectType: 'user',
+        resourceType: 'agent',
+        resourceId: agentId,
+        operation: 'control',
+        requestedAccess: 'admin'
+      });
+
+      if (!accessDecision.allowed) {
+        throw new Error(`Access denied: ${accessDecision.reason}`);
+      }
+    }
+
+    if (agent.status === 'active') {
+      throw new Error(`Agent ${agentId} is already running`);
+    }
+
+    // Initialize LLM connection if configured
+    if (agent.llmConfig.model) {
+      await this.initializeLLMForAgent(agent);
+    }
+
+    const updatedAgent: Agent = {
+      ...agent,
+      status: 'active',
+      deployment: {
+        realmId: agent.deployment?.realmId || 'default',
+        deployedAt: Date.now().toString(),
+        lastHeartbeat: Date.now().toString(),
+        health: 'healthy',
+        resourceUsage: {
+          memoryMB: 0,
+          cpuPercent: 0,
+          activeTasks: 0,
+          queuedTasks: 0
+        },
+        performance: {
+          tasksCompleted: 0,
+          averageTaskTime: 0,
+          successRate: 1.0,
+          errorCount: 0
+        }
+      },
+      updatedAt: Date.now().toString(),
+      ...(requesterId && { lastModifiedBy: requesterId })
+    };
+
+    this.agents.set(agentId, updatedAgent);
+    
+    // Persist status change to storage
+    try {
+      // Redis removed - database is single source of truth
+    } catch (error) {
+      console.warn('Failed to persist agent status change to storage:', error instanceof Error ? error.message : 'Unknown error');
+    }
+    
+    return updatedAgent;
+  }
+
+  /**
+   * Stop an agent
+   */
+  async stopAgent(agentId: AgentId, requesterId?: string): Promise<Agent> {
+    const agent = await this.getAgent(agentId, requesterId);
+
+    // Check control access
+    if (requesterId) {
+      const accessDecision = await this.policyEngine.checkAccess({
+        subjectId: requesterId,
+        subjectType: 'user',
+        resourceType: 'agent',
+        resourceId: agentId,
+        operation: 'control',
+        requestedAccess: 'admin'
+      });
+
+      if (!accessDecision.allowed) {
+        throw new Error(`Access denied: ${accessDecision.reason}`);
+      }
+    }
+
+    const updatedAgent: Agent = {
+      ...agent,
+      status: 'inactive',
+      updatedAt: Date.now().toString(),
+      ...(requesterId && { lastModifiedBy: requesterId })
+    };
+
+    this.agents.set(agentId, updatedAgent);
+    
+    // Persist status change to storage
+    try {
+      // Redis removed - database is single source of truth
+    } catch (error) {
+      console.warn('Failed to persist agent stop to storage:', error instanceof Error ? error.message : 'Unknown error');
+    }
+    
+    return updatedAgent;
+  }
+
+  /**
+   * Execute a prompt through an agent's LLM
+   */
+  async executeAgentPrompt(agentId: AgentId, request: AgentExecutionRequest, requesterId?: string): Promise<AgentExecutionResponse> {
+    const agent = await this.getAgent(agentId, requesterId);
+
+    if (agent.status !== 'active') {
+      throw new Error(`Agent ${agentId} is not active`);
+    }
+
+    // Check execution access
+    if (requesterId) {
+      const accessDecision = await this.policyEngine.checkAccess({
+        subjectId: requesterId,
+        subjectType: 'user',
+        resourceType: 'agent',
+        resourceId: agentId,
+        operation: 'execute',
+        requestedAccess: 'admin'
+      });
+
+      if (!accessDecision.allowed) {
+        throw new Error(`Access denied: ${accessDecision.reason}`);
+      }
+    }
+
+    const startTime = Date.now();
+
+    // Generate system prompt - use persona-aware prompt if collaboration context provided
+    let baseSystemPrompt: string;
+    
+    if (request.systemPrompt) {
+      // Use explicit system prompt override
+      baseSystemPrompt = request.systemPrompt;
+    } else if (request.collaborationContext?.usePersonaPrompt && request.collaborationContext.scenarioName) {
+      // Generate enhanced persona-aware system prompt for collaborations
+      const collaborationContextStr = this.generateCollaborationContext(
+        request.collaborationContext.scenarioName,
+        request.collaborationContext.scenarioType,
+        request.collaborationContext.agentRole
+      );
+      baseSystemPrompt = this.generatePersonaSystemPrompt(
+        agent,
+        collaborationContextStr,
+        request.collaborationContext.agentRole
+      );
+    } else {
+      // Use agent's configured system prompt or fallback
+      baseSystemPrompt = agent.llmConfig.systemPrompt || `You are ${agent.name}. ${agent.description}`;
+    }
+
+    // Add realm context to the system prompt if agent is bound to a realm
+    let systemPrompt = await this.generateRealmAwareSystemPrompt(agent, baseSystemPrompt);
+    
+    // Add tool awareness to system prompt based on agent type and permissions
+    const toolInformation = await this.generateToolAwarenessPrompt(agent);
+    if (toolInformation) {
+      systemPrompt += toolInformation;
+    }
+
+    // Route to appropriate LLM provider based on agent configuration
+    try {
+      let response;
+      let usage;
+      
+      if (agent.llmConfig.provider === 'openai') {
+        if (!this.openaiClient) {
+          throw new Error('OpenAI client not available. Please configure OPENAI_API_KEY.');
+        }
+        
+        // Prepare OpenAI chat request
+        const openaiRequest: OpenAIChatRequest = {
+          model: agent.llmConfig.model,
+          messages: [
+            {
+              role: 'system',
+              content: systemPrompt
+            },
+            {
+              role: 'user',
+              content: request.prompt
+            }
+          ],
+          temperature: request.temperature || agent.llmConfig.temperature || 0.7,
+          ...(agent.llmConfig.maxTokens && { max_tokens: agent.llmConfig.maxTokens }),
+          ...(agent.llmConfig.topP && { top_p: agent.llmConfig.topP }),
+          ...(agent.llmConfig.frequencyPenalty && { frequency_penalty: agent.llmConfig.frequencyPenalty }),
+          ...(agent.llmConfig.presencePenalty && { presence_penalty: agent.llmConfig.presencePenalty })
+        };
+        
+        const openaiResponse = await this.openaiClient.chat(openaiRequest);
+        response = openaiResponse.choices[0]?.message?.content || '';
+        usage = {
+          promptTokens: openaiResponse.usage?.prompt_tokens || 0,
+          completionTokens: openaiResponse.usage?.completion_tokens || 0,
+          totalTokens: openaiResponse.usage?.total_tokens || 0
+        };
+      } else {
+        // Default to Ollama for 'ollama' provider and fallback
+        const chatRequest: ChatRequest = {
+          model: agent.llmConfig.model,
+          messages: [
+            {
+              role: 'system',
+              content: systemPrompt
+            },
+            {
+              role: 'user',
+              content: request.prompt
+            }
+          ],
+          options: {
+            temperature: request.temperature || agent.llmConfig.temperature || 0.7,
+            ...(agent.llmConfig.topP && { top_p: agent.llmConfig.topP }),
+            ...(agent.llmConfig.maxTokens && { num_predict: agent.llmConfig.maxTokens })
+          }
+        };
+        
+        const ollamaResponse = await this.ollamaClient.chat(chatRequest);
+        response = ollamaResponse.message.content;
+        usage = {
+          promptTokens: ollamaResponse.prompt_eval_count || 0,
+          completionTokens: ollamaResponse.eval_count || 0,
+          totalTokens: (ollamaResponse.prompt_eval_count || 0) + (ollamaResponse.eval_count || 0)
+        };
+      }
+
+      // Process tool calls in the response if agent has collaboration tools enabled
+      const processedResponse = await this.processAgentToolCalls(agent, response, agentId);
+      
+      return {
+        response: processedResponse.finalResponse,
+        usage,
+        executionTime: Date.now() - startTime,
+        toolCalls: processedResponse.toolCalls
+      };
+    } catch (error) {
+      throw new Error(`LLM execution failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
+
+  /**
+   * Generate tool awareness prompt that informs the agent about available tools
+   */
+  private async generateToolAwarenessPrompt(agent: Agent): Promise<string> {
+    const availableTools = await this.getAvailableToolsForAgent(agent);
+    
+    if (availableTools.length === 0) {
+      return '';
+    }
+
+    let toolPrompt = `
+
+## Available Tools
+You have access to the following tools. To use tools, include one or more TOOL_CALL entries in your response with this exact format:
+TOOL_CALL: {"tool": "tool_name", "params": {"param1": "value1", "param2": "value2"}}
+
+You can make multiple tool calls in a single response by including multiple TOOL_CALL entries. Each will be executed in sequence.
+
+Available tools:
+`;
+
+    for (const tool of availableTools) {
+      toolPrompt += `- **${tool.name}**: ${tool.description}\n`;
+      if (tool.parameters && Object.keys(tool.parameters).length > 0) {
+        toolPrompt += `  Parameters: ${Object.keys(tool.parameters).join(', ')}\n`;
+      }
+    }
+
+    toolPrompt += `\nOnly use tools that are explicitly listed above. Tool calls will be processed and results will be provided back to you. You can make multiple tool calls in a single response to accomplish complex tasks.`;
+
+    return toolPrompt;
+  }
+
+  /**
+   * Get list of tools available to a specific agent based on type and permissions
+   */
+  private async getAvailableToolsForAgent(agent: Agent): Promise<Array<{name: string, description: string, parameters?: any}>> {
+    const tools: Array<{name: string, description: string, parameters?: any}> = [];
+    
+    // Universal inter-agent communication tools (all agents)
+    tools.push(
+      {
+        name: 'message_agent',
+        description: 'Send a message to another agent and get their response',
+        parameters: { agent_id: 'target agent ID', message: 'message text' }
+      },
+      {
+        name: 'delegate_task',
+        description: 'Delegate a task to another agent for interactive collaboration (allows back-and-forth)',
+        parameters: { agent_id: 'target agent ID', task: 'task description' }
+      },
+      {
+        name: 'assign_simple_task',
+        description: 'Assign a task to another agent for immediate completion (no interaction expected)',
+        parameters: { agent_id: 'target agent ID', task: 'task description' }
+      },
+      {
+        name: 'get_step_content',
+        description: 'Retrieve content from a previous coordination step by content ID',
+        parameters: { content_id: 'content ID from previous step (e.g., coordination/session-123-step-1)' }
+      }
+    );
+
+    // Realm navigation tools (druids only)
+    if (agent.type === 'druid') {
+      tools.push(
+        {
+          name: 'travel_to_realm',
+          description: 'Travel to a different realm (requires realm access permissions)',
+          parameters: { target_realm: 'realm ID to travel to' }
+        },
+        {
+          name: 'get_current_realm',
+          description: 'Get information about your current realm location'
+        },
+        {
+          name: 'get_realm_elementals',
+          description: 'List elemental agents available in a specific realm',
+          parameters: { realm_id: 'realm ID to query' }
+        }
+      );
+    }
+
+    // MCP tools via gateway (based on agent's mcpTools configuration)
+    if (agent.mcpTools && agent.mcpTools.length > 0) {
+      // Add tools from agent's MCP configuration
+      // These will be validated and routed through the MCP Gateway
+      for (const mcpTool of agent.mcpTools) {
+        tools.push({
+          name: mcpTool,
+          description: `Specialized tool: ${mcpTool} (routed via MCP Gateway)`,
+          parameters: { /* Parameters will be validated by MCP Gateway */ }
+        });
+      }
+    }
+
+    return tools;
+  }
+
+  /**
+   * Generate a realm-aware system prompt that includes realm context when agent is bound to a specific realm
+   */
+  private async generateRealmAwareSystemPrompt(agent: Agent, baseSystemPrompt: string): Promise<string> {
+    // Check if agent is bound to a specific realm
+    const boundRealmId = agent.realmAccess?.boundRealmId;
+    if (!boundRealmId) {
+      // No realm binding, return original system prompt
+      return baseSystemPrompt;
+    }
+
+    try {
+      // Get realm information
+      const realm = await this.realmService.getRealm(boundRealmId);
+      if (!realm || !realm.description) {
+        // Realm not found or no description, return original system prompt
+        return baseSystemPrompt;
+      }
+
+      // Combine base system prompt with realm context
+      const realmContext = `
+
+## Realm Context
+You are currently operating within "${realm.name}". ${realm.description}
+
+Your responses and behavior should be appropriate to this realm's context and characteristics while maintaining your core abilities and personality.`;
+
+      return baseSystemPrompt + realmContext;
+    } catch (error) {
+      console.warn(`Failed to get realm context for agent ${agent.id}:`, error instanceof Error ? error.message : 'Unknown error');
+      // Return original prompt if realm lookup fails
+      return baseSystemPrompt;
+    }
+  }
+
+  /**
+   * Generate a persona-aware system prompt that incorporates agent's personality,
+   * specialization, and collaboration context
+   */
+  private generatePersonaSystemPrompt(
+    agent: Agent, 
+    collaborationContext?: string,
+    agentRole?: string
+  ): string {
+    const personality = agent.personality;
+    const specialization = agent.specialization;
+    const agentTypeGuidance = this.getAgentTypePromptSuffix(agent.type);
+    
+    let prompt = `You are a ${agent.type} agent named "${agent.name}"`;
+    
+    if (collaborationContext) {
+      prompt += ` ${collaborationContext}`;
+    }
+    
+    prompt += `.\n\n`;
+    
+    // Role and Specialization Section
+    prompt += `ROLE & SPECIALIZATION:\n`;
+    if (agentRole) {
+      prompt += `- Role: ${agentRole}\n`;
+    }
+    prompt += `- Domain: ${specialization.domain}\n`;
+    prompt += `- Expertise: ${specialization.expertise.join(', ')}\n`;
+    if (specialization.skillLevel) {
+      prompt += `- Skill Level: ${specialization.skillLevel}\n`;
+    }
+    prompt += `\n`;
+    
+    // Personality Section
+    prompt += `PERSONALITY TRAITS:\n`;
+    prompt += `- Communication Style: ${personality.communicationStyle}\n`;
+    prompt += `- Decision Making: ${personality.decisionMaking}\n`;
+    prompt += `- Core Traits: ${personality.traits.join(', ')}\n`;
+    if (personality.riskTolerance) {
+      prompt += `- Risk Tolerance: ${personality.riskTolerance}\n`;
+    }
+    if (personality.collaborationPreference) {
+      prompt += `- Collaboration Style: ${personality.collaborationPreference}\n`;
+    }
+    prompt += `\n`;
+    
+    // Behavior Guidelines Section
+    prompt += `BEHAVIOR GUIDELINES:\n`;
+    prompt += this.generateBehaviorGuidelines(personality);
+    prompt += `\n`;
+    
+    // Agent Type Specific Guidance
+    prompt += `AGENT TYPE SPECIALIZATION:\n`;
+    prompt += agentTypeGuidance;
+    prompt += `\n`;
+    
+    // Task Approach Section
+    prompt += `TASK APPROACH:\n`;
+    prompt += `- Apply your ${agent.type} capabilities systematically\n`;
+    prompt += `- Maintain ${personality.communicationStyle} communication standards\n`;
+    prompt += `- Use ${personality.decisionMaking} decision-making approach\n`;
+    prompt += `- Demonstrate traits: ${personality.traits.join(', ')}\n`;
+    if (specialization.expertise.length > 0) {
+      prompt += `- Leverage your expertise in: ${specialization.expertise.join(', ')}\n`;
+    }
+    
+    return prompt;
+  }
+  
+  /**
+   * Generate behavior guidelines based on personality traits
+   */
+  private generateBehaviorGuidelines(personality: DruidPersona): string {
+    let guidelines = '';
+    
+    // Communication style guidelines
+    switch (personality.communicationStyle) {
+      case 'formal':
+        guidelines += '- Communicate with professional formality and clear structure\n';
+        break;
+      case 'casual':
+        guidelines += '- Use approachable, friendly communication style\n';
+        break;
+      case 'technical':
+        guidelines += '- Focus on precise, technical language and detailed explanations\n';
+        break;
+      case 'concise':
+        guidelines += '- Keep responses brief and to-the-point\n';
+        break;
+      case 'verbose':
+        guidelines += '- Provide comprehensive, detailed explanations\n';
+        break;
+    }
+    
+    // Decision making guidelines
+    switch (personality.decisionMaking) {
+      case 'analytical':
+        guidelines += '- Approach decisions through systematic analysis and data evaluation\n';
+        break;
+      case 'intuitive':
+        guidelines += '- Trust instincts and pattern recognition in decision making\n';
+        break;
+      case 'consensus-seeking':
+        guidelines += '- Seek input and agreement from collaborators before decisions\n';
+        break;
+      case 'independent':
+        guidelines += '- Make autonomous decisions based on available information\n';
+        break;
+      case 'rule-based':
+        guidelines += '- Follow established procedures and guidelines strictly\n';
+        break;
+      case 'optimization-focused':
+        guidelines += '- Always seek the most efficient and optimal solutions\n';
+        break;
+    }
+    
+    // Trait-specific guidelines
+    personality.traits.forEach((trait: string) => {
+      switch (trait.toLowerCase()) {
+        case 'collaborative':
+          guidelines += '- Actively engage with other agents and seek collaborative solutions\n';
+          break;
+        case 'focused':
+          guidelines += '- Maintain clear focus on objectives and avoid unnecessary distractions\n';
+          break;
+        case 'reliable':
+          guidelines += '- Deliver consistent, dependable results and follow through on commitments\n';
+          break;
+        case 'creative':
+          guidelines += '- Explore innovative approaches and think outside conventional boundaries\n';
+          break;
+        case 'methodical':
+          guidelines += '- Follow systematic, step-by-step approaches to problem-solving\n';
+          break;
+        case 'adaptive':
+          guidelines += '- Adjust strategies based on changing circumstances and feedback\n';
+          break;
+      }
+    });
+    
+    return guidelines;
+  }
+  
+  /**
+   * Get agent type-specific prompt guidance
+   */
+  private getAgentTypePromptSuffix(agentType: AgentType): string {
+    switch (agentType) {
+      case 'druid':
+        return 'As a druid, you excel at coordination and high-level reasoning. Provide wise guidance, facilitate collaboration, and maintain harmony between different perspectives. Your strength lies in seeing the bigger picture and orchestrating complex multi-agent interactions.';
+      case 'elemental':
+        return 'As an elemental, you excel at specialized domain tasks with precision and structure. Focus on accurate execution of specific capabilities, maintain consistency in your approach, and deliver reliable results within your area of expertise.';
+      case 'gaia':
+        return 'As gaia, you excel at system-wide harmony and collaborative nurturing. Foster team dynamics, ensure balanced outcomes, and maintain the overall health of collaborative processes. Your role is to support and sustain the collaborative ecosystem.';
+      case 'worldtree':
+        return 'As worldtree, you excel at knowledge synthesis and maintaining contextual connections. Provide comprehensive insights that bridge different domains, maintain context across interactions, and serve as a knowledge hub for the collaboration.';
+      default:
+        return 'Apply your specialized capabilities systematically while maintaining your unique perspective and approach to problem-solving.';
+    }
+  }
+  
+  /**
+   * Generate collaboration context description
+   */
+  private generateCollaborationContext(scenarioName: string, scenarioType?: string, agentRole?: string): string {
+    let context = `participating in collaboration "${scenarioName}"`;
+    
+    if (scenarioType || agentRole) {
+      context += '.\n\nCOLLABORATION DETAILS:';
+      
+      if (scenarioType) {
+        context += `\n- Scenario Type: ${scenarioType}`;
+      }
+      
+      if (agentRole) {
+        context += `\n- Your Role: ${agentRole}`;
+      }
+      
+      context += `\n- Expected collaboration style: ${scenarioType === 'collaboration' ? 'cooperative and coordinated' : 'professional and goal-oriented'}`;
+    }
+    
+    return context;
+  }
+
+  /**
+   * Delete an agent
+   */
+  async deleteAgent(agentId: AgentId, requesterId?: string): Promise<void> {
+    const agent = await this.getAgent(agentId, requesterId);
+
+    // Check delete access
+    if (requesterId) {
+      const accessDecision = await this.policyEngine.checkAccess({
+        subjectId: requesterId,
+        subjectType: 'user',
+        resourceType: 'agent',
+        resourceId: agentId,
+        operation: 'delete',
+        requestedAccess: 'admin'
+      });
+
+      if (!accessDecision.allowed) {
+        throw new Error(`Access denied: ${accessDecision.reason}`);
+      }
+    }
+
+    // Stop agent first if running
+    if (agent.status === 'active') {
+      await this.stopAgent(agentId, requesterId);
+    }
+
+    // Delete from database first
+    if (this.repositoryManager?.agents) {
+      try {
+        // Convert service ID to database UUID if needed
+        const dbUUID = AgentIdMapper.getUUIDForStringId(agentId) || agentId;
+        await this.repositoryManager.agents.delete(dbUUID);
+        console.log(`🗑️ Agent ${agentId} deleted from database (UUID: ${dbUUID})`);
+      } catch (error) {
+        console.error('Failed to delete agent from database:', error instanceof Error ? error.message : 'Unknown error');
+        throw new Error(`Failed to delete agent from database: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      }
+    } else {
+      console.warn('⚠️ Database unavailable for agent deletion');
+      throw new Error('Database unavailable for agent deletion');
+    }
+
+    // Delete from memory cache
+    this.agents.delete(agentId);
+    
+    console.log(`✅ Agent ${agentId} deleted successfully from both database and memory`);
+  }
+
+  /**
+   * Validate agent configuration
+   */
+  private async validateAgentConfiguration(request: CreateAgentRequest): Promise<AgentValidationResult> {
+    const errors: string[] = [];
+    const warnings: string[] = [];
+
+    // Validate required fields
+    if (!request.name?.trim()) {
+      errors.push('Agent name is required');
+    }
+
+    if (!request.type) {
+      errors.push('Agent type is required');
+    }
+
+    if (!request.capabilities?.length) {
+      errors.push('At least one capability is required');
+    }
+
+    // Validate LLM configuration
+    if (request.llmConfig?.model && !request.llmConfig.model.trim()) {
+      errors.push('LLM model name cannot be empty');
+    }
+
+    if (request.llmConfig?.temperature !== undefined) {
+      if (request.llmConfig.temperature < 0 || request.llmConfig.temperature > 2) {
+        errors.push('LLM temperature must be between 0 and 2');
+      }
+    }
+
+    // Validate resource limits
+    if (request.resourceLimits?.maxMemoryMB !== undefined && request.resourceLimits.maxMemoryMB < 1) {
+      errors.push('Memory limit must be at least 1 MB');
+    }
+
+    return {
+      isValid: errors.length === 0,
+      errors,
+      warnings
+    };
+  }
+
+  /**
+   * Initialize LLM connection for an agent
+   */
+  private async initializeLLMForAgent(agent: Agent): Promise<void> {
+    try {
+      if (agent.llmConfig.provider === 'openai') {
+        if (!this.openaiClient) {
+          throw new Error('OpenAI client not available. Please configure OPENAI_API_KEY.');
+        }
+        // Test OpenAI connectivity
+        await this.openaiClient.listModels();
+      } else {
+        // Test Ollama connectivity (default)
+        await this.ollamaClient.listModels();
+      }
+    } catch (error) {
+      throw new Error(`Failed to initialize LLM for agent ${agent.id}: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
+
+  /**
+   * Initialize system agents
+   */
+  private initializeSystemAgents(): void {
+    // No automatic test agent creation - require real agents
+    console.log('🚀 AgentService initialized. Use the API to create agents.');
+    // This would be expanded to create default system agents if needed
+    // For now, just ensuring the service is ready
+  }
+
+  /**
+   * Load agents from persistent storage into memory cache
+   */
+  private async loadAgentsFromStorage(): Promise<void> {
+    // Redis removed - agents are loaded from database during initialization
+    // This method is kept for compatibility but no longer loads from Redis cache
+    console.log('📥 AgentService: Using database-only persistence, agents loaded during init');
+  }
+
+  /**
+   * Refresh agent cache from database to get latest updates
+   * Useful for concurrent user scenarios where agents may have been 
+   * created/updated/deleted by other users
+   */
+  async refreshAgentCache(): Promise<void> {
+    console.log('🔄 Refreshing agent cache from database...');
+    
+    // Clear current cache
+    this.agents.clear();
+    
+    // Reload from database
+    await this.loadAgentsFromDatabase();
+    
+    console.log(`✅ Agent cache refreshed - now contains ${this.agents.size} agents`);
+  }
+
+  /**
+   * Process tool calls in an agent's response and execute them
+   */
+  private async processAgentToolCalls(agent: Agent, response: string, agentId: AgentId): Promise<ProcessedAgentResponse> {
+    const toolCalls: AgentToolCall[] = [];
+    let processedResponse = response;
+
+    // Parse tool calls from the response
+    const toolCallPattern = /TOOL_CALL:\s*(\{(?:[^{}]|{[^{}]*})*\})/g;
+    const matches = Array.from(response.matchAll(toolCallPattern));
+
+    if (matches.length === 0) {
+      // No tool calls found, return original response
+      return {
+        finalResponse: response,
+        toolCalls: []
+      };
+    }
+
+    // Process each tool call
+    for (const match of matches) {
+      try {
+        console.log(`🔍 Raw tool call match: ${match[1]}`);
+        const toolCallJson = JSON.parse(match[1]!);
+        console.log(`🔍 Parsed tool call JSON:`, JSON.stringify(toolCallJson, null, 2));
+        const toolName = toolCallJson.tool;
+        const params = toolCallJson.params || {};
+
+        console.log(`🔧 Agent ${agentId} calling tool: ${toolName}`, params);
+
+        const toolCallStart = Date.now();
+        let toolResult: any;
+        let success = true;
+
+        try {
+          // Execute the tool call through internal MCP interface
+          toolResult = await this.executeAgentTool(agent, toolName, params);
+        } catch (error) {
+          console.error(`❌ Tool call failed for agent ${agentId}:`, error);
+          toolResult = { error: error instanceof Error ? error.message : 'Tool execution failed' };
+          success = false;
+        }
+
+        const toolCall: AgentToolCall = {
+          tool: toolName,
+          params,
+          result: toolResult,
+          success,
+          executionTime: Date.now() - toolCallStart
+        };
+
+        toolCalls.push(toolCall);
+
+        // Replace the tool call in the response with the result
+        const toolResultText = success 
+          ? `TOOL_RESULT: ${JSON.stringify(toolResult, null, 2)}`
+          : `TOOL_ERROR: ${toolResult.error}`;
+        
+        processedResponse = processedResponse.replace(match[0], toolResultText);
+
+      } catch (parseError) {
+        console.error(`❌ Failed to parse tool call for agent ${agentId}:`, parseError);
+        processedResponse = processedResponse.replace(match[0], 'TOOL_ERROR: Invalid tool call format');
+      }
+    }
+
+    return {
+      finalResponse: processedResponse,
+      toolCalls
+    };
+  }
+
+  /**
+   * Execute a specific tool call for an agent
+   */
+  private async executeAgentTool(agent: Agent, toolName: string, params: any): Promise<any> {
+    // Define built-in tools that are handled internally (not via MCP Gateway)
+    const builtInTools = [
+      'message_agent', 'delegate_task', 'assign_simple_task', 'get_step_content',      // Communication tools (all agents)
+      'travel_to_realm', 'get_current_realm', 'get_realm_elementals'  // Realm tools (druids only)
+    ];
+    
+    // Check if this is a built-in tool
+    if (builtInTools.includes(toolName)) {
+      return await this.executeBuiltInTool(agent, toolName, params);
+    }
+    
+    // All other tools are MCP tools that must go through the gateway
+    console.log(`🌐 Routing MCP tool ${toolName} for agent ${agent.id} through MCP Gateway`);
+    return await this.routeToolThroughMCPGateway(agent.id, toolName, params);
+  }
+
+  /**
+   * Execute built-in tools (communication and realm navigation)
+   */
+  private async executeBuiltInTool(agent: Agent, toolName: string, params: any): Promise<any> {
+    // Define inter-agent communication tools that all agents can access
+    const communicationTools = ['message_agent', 'delegate_task', 'assign_simple_task', 'get_step_content'];
+    
+    // Define realm navigation tools (for druids)
+    const realmTools = ['travel_to_realm', 'get_current_realm', 'get_realm_elementals'];
+    
+    // Check access permissions based on agent type and tool category
+    if (communicationTools.includes(toolName)) {
+      // All agents can use inter-agent communication tools
+      console.log(`✅ Agent ${agent.id} (${agent.type}) accessing communication tool: ${toolName}`);
+    } else if (realmTools.includes(toolName)) {
+      // Only druids can use realm navigation tools
+      if (agent.type !== 'druid') {
+        throw new Error(`Agent ${agent.id} (${agent.type}) cannot access realm navigation tool: ${toolName}. Only druid agents can navigate realms.`);
+      }
+      console.log(`✅ Druid agent ${agent.id} accessing realm navigation tool: ${toolName}`);
+    } else {
+      throw new Error(`Unknown built-in tool: ${toolName}`);
+    }
+
+    // Route to appropriate tool implementation
+    switch (toolName) {
+      case 'message_agent':
+        return await this.toolMessageAgent(agent.id, params);
+      
+      case 'delegate_task':
+        return await this.toolDelegateTask(agent.id, params);
+      
+      case 'assign_simple_task':
+        return await this.toolAssignSimpleTask(agent.id, params);
+      
+      case 'get_step_content':
+        return await this.toolGetStepContent(params);
+      
+      case 'travel_to_realm':
+        return await this.toolTravelToRealm(agent.id, params);
+      
+      case 'get_current_realm':
+        return await this.toolGetCurrentRealm(agent.id);
+      
+      case 'get_realm_elementals':
+        return await this.toolGetRealmElementals(params);
+      
+      default:
+        throw new Error(`Unknown built-in tool: ${toolName}`);
+    }
+  }
+
+  /**
+   * Tool: Discover other agents within the same realm
+   * This tool only shows agents that are in the same realm as the requesting agent
+   */
+  public async toolDiscoverAgents(requestingAgent: Agent, params: { capabilities?: string[] }): Promise<any> {
+    // Get the agent's current realm
+    const currentRealmId = (requestingAgent as any).realmId || 
+                          requestingAgent.realmAccess?.currentRealmId || 
+                          requestingAgent.realmAccess?.boundRealmId;
+    
+    if (!currentRealmId) {
+      throw new Error(`Agent ${requestingAgent.name} (${requestingAgent.id}) is not bound to any realm and cannot discover other agents`);
+    }
+
+    const filters: AgentQueryFilters = {
+      status: ['active'], // Only return active agents
+      realmId: currentRealmId // Only agents in the same realm
+    };
+
+    // Only apply capability filtering if specific capabilities were requested
+    if (params.capabilities && params.capabilities.length > 0) {
+      filters.capabilities = params.capabilities;
+    }
+
+    console.log(`🔍 Agent ${requestingAgent.name} (${requestingAgent.id}) discovering agents in realm: ${currentRealmId}`);
+    const agents = await this.listAgents(filters);
+    
+    // Remove the requesting agent from the results (agents can't discover themselves)
+    const otherAgents = agents.filter(agent => agent.id !== requestingAgent.id);
+    
+    console.log(`🔍 Found ${otherAgents.length} other agents in realm ${currentRealmId}:`, otherAgents.map(a => `${a.id}(${a.name})`));
+    
+    return {
+      realm: currentRealmId,
+      agents: otherAgents.map(agent => ({
+        id: agent.id,
+        name: agent.name,
+        type: agent.type,
+        capabilities: agent.capabilities,
+        domain: agent.domain,
+        realmId: agent.realmId
+      })),
+      count: otherAgents.length
+    };
+  }
+
+  /**
+   * Resolve agent name to agent ID if needed (similar to CoordinationService)
+   */
+  private async resolveAgentId(agentIdOrName: string): Promise<string> {
+    // First, try to get agent by ID directly
+    try {
+      const agent = await this.getAgent(agentIdOrName as AgentId);
+      if (agent) {
+        return agentIdOrName; // It's already an ID
+      }
+    } catch (error) {
+      // Not found by ID, try name resolution
+    }
+
+    // Name patterns for common agents
+    const namePatterns = [
+      { pattern: /pierre robert/i, id: 'pierre-robert' },
+      { pattern: /de lint/i, id: 'de-lint' },
+      { pattern: /tolkien/i, id: 'tolkien' },
+      { pattern: /asimov/i, id: 'asimov' },
+      { pattern: /lucas/i, id: 'lucas' },
+      { pattern: /colleen/i, id: 'colleen' }
+    ];
+
+    // Check for specific agent name patterns
+    for (const pattern of namePatterns) {
+      if (pattern.pattern.test(agentIdOrName)) {
+        try {
+          const agent = await this.getAgent(pattern.id as AgentId);
+          if (agent) {
+            console.log(`🔄 Resolved agent name "${agentIdOrName}" to ID "${pattern.id}"`);
+            return pattern.id;
+          }
+        } catch (error) {
+          // Continue to next pattern
+        }
+      }
+    }
+
+    // If no pattern matches, try to find by name from all agents
+    try {
+      const agents = await this.listAgents({});
+      const matchingAgent = agents.find(agent => 
+        agent.name.toLowerCase() === agentIdOrName.toLowerCase() ||
+        agent.name.toLowerCase().includes(agentIdOrName.toLowerCase()) ||
+        agentIdOrName.toLowerCase().includes(agent.name.toLowerCase())
+      );
+      
+      if (matchingAgent) {
+        console.log(`🔄 Resolved agent name "${agentIdOrName}" to ID "${matchingAgent.id}"`);
+        return matchingAgent.id;
+      }
+    } catch (error) {
+      console.error('❌ Error searching agents by name:', error);
+    }
+
+    // If all else fails, return original value
+    console.warn(`⚠️ Could not resolve agent identifier "${agentIdOrName}"`);
+    return agentIdOrName;
+  }
+
+  /**
+   * Tool: Send a message to another agent
+   */
+  private async toolMessageAgent(fromAgentId: AgentId, params: { agent_id: string; message: string }): Promise<any> {
+    // Resolve agent name to ID if needed
+    const resolvedAgentId = await this.resolveAgentId(params.agent_id);
+    const targetAgent = await this.getAgent(resolvedAgentId as AgentId);
+    
+    if (targetAgent.status !== 'active') {
+      throw new Error(`Target agent ${resolvedAgentId} is not active`);
+    }
+
+    // Execute the message as a prompt to the target agent
+    const response = await this.executeAgentPrompt(resolvedAgentId as AgentId, {
+      prompt: `Message from agent ${fromAgentId}: ${params.message}`,
+      collaborationContext: {
+        scenarioName: 'Inter-agent Communication',
+        usePersonaPrompt: true
+      }
+    });
+
+    return {
+      target_agent: resolvedAgentId,
+      message_sent: params.message,
+      response: response.response,
+      execution_time: response.executionTime
+    };
+  }
+
+  /**
+   * Tool: Delegate a task to another agent
+   */
+  private async toolDelegateTask(fromAgentId: AgentId, params: { agent_id: string; task: string }): Promise<any> {
+    const fromAgent = await this.getAgent(fromAgentId);
+    
+    // Resolve agent name to ID if needed
+    const resolvedAgentId = await this.resolveAgentId(params.agent_id);
+    const targetAgent = await this.getAgent(resolvedAgentId as AgentId);
+    
+    if (targetAgent.status !== 'active') {
+      throw new Error(`Target agent ${resolvedAgentId} is not active`);
+    }
+
+    // Check if target agent is in the same realm as the delegating agent
+    const fromAgentRealm = fromAgent.realmAccess?.currentRealmId || fromAgent.realmAccess?.boundRealmId || 'default';
+    const targetAgentRealm = targetAgent.realmAccess?.currentRealmId || targetAgent.realmAccess?.boundRealmId || 'default';
+
+    if (fromAgentRealm !== targetAgentRealm) {
+      throw new Error(`Cannot delegate to agent ${resolvedAgentId} in realm ${targetAgentRealm} from realm ${fromAgentRealm}. Agents can only delegate to other agents in their current realm.`);
+    }
+
+    // Execute the task delegation
+    const response = await this.executeAgentPrompt(resolvedAgentId as AgentId, {
+      prompt: `Task delegated from agent ${fromAgentId}: ${params.task}. Please execute this task and provide your results.`,
+      collaborationContext: {
+        scenarioName: 'Task Delegation',
+        agentRole: 'task_executor',
+        usePersonaPrompt: true
+      }
+    });
+
+    return {
+      target_agent: resolvedAgentId,
+      task_delegated: params.task,
+      result: response.response,
+      execution_time: response.executionTime
+    };
+  }
+
+  /**
+   * Tool: Assign a simple task to another agent (no interactive collaboration)
+   */
+  private async toolAssignSimpleTask(fromAgentId: AgentId, params: { agent_id: string; task: string }): Promise<any> {
+    const fromAgent = await this.getAgent(fromAgentId);
+    
+    // Resolve agent name to ID if needed
+    const resolvedAgentId = await this.resolveAgentId(params.agent_id);
+    const targetAgent = await this.getAgent(resolvedAgentId as AgentId);
+    
+    if (targetAgent.status !== 'active') {
+      throw new Error(`Target agent ${resolvedAgentId} is not active`);
+    }
+
+    // Check if target agent is in the same realm as the delegating agent
+    const fromAgentRealm = fromAgent.realmAccess?.currentRealmId || fromAgent.realmAccess?.boundRealmId || 'default';
+    const targetAgentRealm = targetAgent.realmAccess?.currentRealmId || targetAgent.realmAccess?.boundRealmId || 'default';
+
+    if (fromAgentRealm !== targetAgentRealm) {
+      throw new Error(`Cannot assign task to agent ${resolvedAgentId} in realm ${targetAgentRealm} from realm ${fromAgentRealm}. Agents can only assign tasks to other agents in their current realm.`);
+    }
+
+    // Execute the simple task assignment with clear completion instruction
+    const response = await this.executeAgentPrompt(resolvedAgentId as AgentId, {
+      prompt: `SIMPLE TASK ASSIGNMENT from ${fromAgentId}: ${params.task}
+
+IMPORTANT: This is a simple task assignment that should be completed in a single response. Please:
+1. Complete the requested task fully
+2. Provide your final result/deliverable
+3. Do not ask questions or request further input
+4. Consider this task complete when you finish your response
+
+Task: ${params.task}
+
+Please execute this task now and provide your complete result.`,
+      collaborationContext: {
+        scenarioName: 'Simple Task Assignment',
+        agentRole: 'task_executor',
+        usePersonaPrompt: true
+      }
+    });
+
+    return {
+      target_agent: resolvedAgentId,
+      task_assigned: params.task,
+      result: response.response,
+      execution_time: response.executionTime,
+      completion_type: 'simple_assignment'
+    };
+  }
+
+  /**
+   * Tool: Get content from a previous coordination step
+   */
+  private async toolGetStepContent(params: { content_id: string }): Promise<any> {
+    const fs = await import('fs/promises');
+    const path = await import('path');
+    
+    try {
+      // content_id format: "step-session-{sessionId}-step-{stepNumber}"
+      const contentId = params.content_id;
+      
+      if (!contentId.startsWith('step-session-')) {
+        throw new Error(`Invalid content ID format: ${contentId}. Expected format: step-session-{sessionId}-step-{stepNumber}`);
+      }
+      
+      // Extract session ID from content ID (keep the full session-xxx format)
+      const sessionMatch = contentId.match(/step-(session-[^-]+(?:-[^-]+)*)-step-\d+/);
+      if (!sessionMatch || !sessionMatch[1]) {
+        throw new Error(`Could not extract session ID from content ID: ${contentId}`);
+      }
+      
+      const fullSessionId = sessionMatch[1]; // This will be "session-1762622832666-af856d88"
+      
+      // Build path to session content file
+      const sessionDir = path.join(process.cwd(), 'data', 'published_content', 'sessions', 'sessions', fullSessionId);
+      const contentFilePath = path.join(sessionDir, `${contentId}.json`);
+      
+      console.log(`🔍 Retrieving step content from: ${contentFilePath}`);
+      
+      // Check if file exists
+      try {
+        await fs.access(contentFilePath);
+      } catch (error) {
+        throw new Error(`Step content not found: ${contentId}. File does not exist at ${contentFilePath}`);
+      }
+      
+      // Read and parse the content file
+      const contentData = await fs.readFile(contentFilePath, 'utf-8');
+      const stepContent = JSON.parse(contentData);
+      
+      // Extract the actual content/output from the step
+      const output = stepContent.data?.output || stepContent.output || '';
+      const agentId = stepContent.data?.agent_id || stepContent.metadata?.agentId || 'unknown';
+      const timestamp = stepContent.data?.timestamp || stepContent.metadata?.createdAt || 'unknown';
+      
+      console.log(`✅ Retrieved step content: ${contentId} from agent ${agentId}`);
+      
+      return {
+        content_id: contentId,
+        session_id: fullSessionId,
+        agent_id: agentId,
+        timestamp: timestamp,
+        content: output,
+        raw_data: stepContent.data || stepContent
+      };
+      
+    } catch (error) {
+      console.error(`❌ Failed to retrieve step content ${params.content_id}:`, error);
+      throw new Error(`Failed to retrieve step content: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
+
+  /**
+   * Tool: Travel to a different realm (Druid agents only)
+   */
+  private async toolTravelToRealm(agentId: AgentId, params: { target_realm: string }): Promise<any> {
+    const agent = await this.getAgent(agentId);
+    
+    // Check if agent is a druid (druids inherently have realm travel abilities)
+    if (agent.type !== 'druid') {
+      throw new Error(`Agent ${agentId} is not a druid and cannot travel between realms`);
+    }
+
+    // Resolve target realm name to UUID if needed
+    let targetRealmId = params.target_realm;
+    
+    // Check if the target_realm is a name (not a UUID)
+    const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(params.target_realm);
+    
+    if (!isUUID) {
+      // Try to find realm by name
+      const realms = await this.realmService.listRealms();
+      const targetRealm = realms.find(realm => realm.name === params.target_realm);
+      
+      if (targetRealm) {
+        targetRealmId = targetRealm.id;
+      }
+    }
+
+    // Check if agent has access to target realm (check both the original param and resolved UUID)
+    const hasAccess = agent.realmAccess?.accessibleRealms?.some(
+      realm => {
+        const realmId = typeof realm === 'string' ? realm : realm.realmId;
+        return realmId === params.target_realm || realmId === targetRealmId;
+      }
+    );
+
+    if (!hasAccess) {
+      throw new Error(`Agent ${agentId} does not have access to realm ${params.target_realm} (resolved: ${targetRealmId})`);
+    }
+
+    // Update agent's current realm (use resolved UUID)
+    await this.updateAgent(agentId, {
+      realmAccess: {
+        ...agent.realmAccess,
+        currentRealmId: targetRealmId
+      }
+    });
+
+    return {
+      agent_id: agentId,
+      previous_realm: agent.realmAccess?.currentRealmId || agent.realmAccess?.boundRealmId || 'default',
+      current_realm: targetRealmId,
+      realm_name: params.target_realm,
+      travel_time: new Date().toISOString()
+    };
+  }
+
+  /**
+   * Tool: Get current realm location
+   */
+  private async toolGetCurrentRealm(agentId: AgentId): Promise<any> {
+    const agent = await this.getAgent(agentId);
+    
+    const currentRealm = agent.realmAccess?.currentRealmId || 
+                        agent.realmAccess?.boundRealmId || 
+                        'default';
+
+    return {
+      agent_id: agentId,
+      current_realm: currentRealm,
+      agent_type: agent.type,
+      can_travel: agent.type === 'druid' && agent.realmAccess?.allowRealmTravel
+    };
+  }
+
+  /**
+   * Tool: Get elemental agents in a specific realm
+   */
+  private async toolGetRealmElementals(params: { realm_id: string }): Promise<any> {
+    // Get full agent data to access realmAccess information
+    const allAgents = Array.from(this.agents.values()).filter(agent => 
+      agent.type === 'elemental' && 
+      agent.status === 'active' &&
+      agent.realmAccess?.boundRealmId === params.realm_id
+    );
+
+    return {
+      realm_id: params.realm_id,
+      elementals: allAgents.map(agent => ({
+        id: agent.id,
+        name: agent.name,
+        capabilities: agent.capabilities,
+        domain: agent.specialization.domain,
+        status: agent.status
+      })),
+      count: allAgents.length
+    };
+  }
+
+  /**
+   * Route MCP tool calls through the gateway with config-based routing
+   */
+  private async routeToolThroughMCPGateway(agentId: AgentId, toolName: string, params: any): Promise<any> {
+    try {
+      // 1. Get agent
+      const agent = await this.getAgent(agentId);
+      if (!agent) {
+        throw new Error(`Agent ${agentId} not found`);
+      }
+
+      // 2. Verify agent is elemental
+      if (agent.type !== 'elemental') {
+        throw new Error(
+          `Only elementals can call MCP tools (agent ${agentId} is ${agent.type})`
+        );
+      }
+
+      // 3. Validate agent has tool permission
+      if (!agent.mcpTools || !agent.mcpTools.includes(toolName)) {
+        throw new Error(
+          `Agent ${agentId} not authorized for tool ${toolName}. ` +
+          `Available: ${agent.mcpTools?.join(', ') || 'none'}`
+        );
+      }
+
+      // 4. Get realm ID
+      const realmId = (agent as any).realmId;
+      if (!realmId) {
+        throw new Error(`Elemental ${agentId} has no realmId`);
+      }
+
+      // 5. Get MCP binding from config
+      const binding = this.mcpConfigLoader.getElementalBinding(realmId, agentId);
+      if (!binding) {
+        throw new Error(
+          `No MCP binding for elemental ${agentId} in realm ${realmId}`
+        );
+      }
+
+      // 6. Validate tool access in binding
+      if (!binding.allowedTools.includes(toolName) &&
+          !binding.allowedTools.includes('*')) {
+        throw new Error(
+          `Tool ${toolName} not allowed by MCP binding for elemental ${agentId}`
+        );
+      }
+
+      // 7. Get server config
+      const serverConfig = this.mcpConfigLoader.getServer(binding.serverId);
+      if (!serverConfig) {
+        throw new Error(`MCP server ${binding.serverId} not found in config`);
+      }
+
+      // 8. Get service credential from environment
+      const token = this.mcpConfigLoader.getServerToken(binding.serverId);
+      if (!token && serverConfig.authentication.type !== 'none') {
+        throw new Error(
+          `No token found for MCP server ${binding.serverId}. ` +
+          `Set ${serverConfig.authentication.envVar} in environment.`
+        );
+      }
+
+      // 9. Get or create HTTP client
+      const clientKey = binding.serverId; // One client per server (service credential)
+      let client = this.mcpClients.get(clientKey);
+
+      if (!client) {
+        client = new HttpMCPClient(
+          serverConfig.baseUrl!,
+          token,
+          serverConfig.authentication.header,
+          serverConfig.authentication.prefix
+        );
+        this.mcpClients.set(clientKey, client);
+      }
+
+      // 10. Call MCP tool
+      console.log(
+        `🌐 MCP Routing: agent=${agentId}, tool=${toolName}, server=${binding.serverId}`
+      );
+
+      const result = await client.callTool(toolName, params);
+
+      console.log(`✅ MCP tool ${toolName} completed for agent ${agentId}`);
+      return result;
+
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown';
+      console.error(`❌ MCP routing failed for ${toolName}:`, errorMessage);
+
+      // Return error in MCP format
+      return {
+        content: [{
+          type: 'text',
+          text: `Error: ${errorMessage}`
+        }],
+        isError: true
+      };
+    }
+  }
+
+  /**
+   * Generate a unique agent ID
+   */
+  private generateAgentId(): AgentId {
+    // Generate a proper UUID for new agents to ensure database compatibility
+    return generateUUID();
+  }
+}

@@ -1,0 +1,26 @@
+# Development override for frontend
+version: '3.8'
+
+services:
+  # Frontend UI - Development version with hot reload
+  druids-frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+    container_name: druids-frontend-dev
+    ports:
+      - "3006:3004"   # Map host port 3006 to container port 3004
+    environment:
+      - NODE_ENV=development
+      - VITE_API_URL=http://localhost:3000/api
+      - VITE_MCP_URL=http://localhost:3003/mcp
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    networks:
+      - druids-network
+    depends_on:
+      - druids-app
+      - druids-mcp
+    restart: unless-stopped
+    command: npm run dev -- --host 0.0.0.0 --port 3004
