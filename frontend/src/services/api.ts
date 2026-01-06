@@ -26,6 +26,11 @@ export interface Agent {
     temperature?: number;
     maxTokens?: number;
     systemPrompt?: string;
+    agenticLoop?: {
+      enabled: boolean;
+      maxIterations?: number;
+      trackCosts?: boolean;
+    };
   };
   systemPrompt?: string;
   realmId?: string; // Deprecated - kept for backward compatibility
@@ -69,6 +74,11 @@ export interface CreateAgentRequest {
   decisionMaking?: string;
   modelId?: string; // Named model configuration ID
   mcpTools?: string[]; // MCP tool patterns with wildcard support
+  agenticLoop?: {
+    enabled: boolean;
+    maxIterations?: number;
+    trackCosts?: boolean;
+  };
 }
 
 export interface UpdateAgentRequest {
@@ -89,6 +99,11 @@ export interface UpdateAgentRequest {
   llmConfig?: Partial<{
     systemPrompt: string;
     modelConfigId: string; // Add support for model configuration updates
+    agenticLoop: {
+      enabled: boolean;
+      maxIterations?: number;
+      trackCosts?: boolean;
+    };
   }>;
   type?: 'druid' | 'elemental' | 'gaia' | 'worldtree';
   realmId?: string; // Deprecated - kept for backward compatibility

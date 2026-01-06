@@ -39,6 +39,10 @@ interface AgentFormData {
   modelId: string; // Reference to named model like "creative-writer"
   // MCP tool patterns
   mcpTools: string[]; // MCP tool patterns with wildcard support (e.g., "github:*", "github:list_*")
+  // Agentic loop configuration
+  agenticLoopEnabled: boolean;
+  agenticLoopMaxIterations: number;
+  agenticLoopTrackCosts: boolean;
 }
 
 function AgentCard({ 
@@ -229,7 +233,11 @@ function AgentModal({
     // Named model configuration
     modelId: agent?.llmConfig?.modelConfigId || 'analytical-researcher', // Default model
     // MCP tool patterns
-    mcpTools: agent?.mcpTools || []
+    mcpTools: agent?.mcpTools || [],
+    // Agentic loop configuration
+    agenticLoopEnabled: agent?.llmConfig?.agenticLoop?.enabled || false,
+    agenticLoopMaxIterations: agent?.llmConfig?.agenticLoop?.maxIterations || 10,
+    agenticLoopTrackCosts: agent?.llmConfig?.agenticLoop?.trackCosts ?? true
   });
 
     // Update form data when agent prop changes
@@ -251,7 +259,10 @@ function AgentModal({
         communicationStyle: agent.personality?.communicationStyle || 'formal',
         decisionMaking: agent.personality?.decisionMaking || 'analytical',
         modelId: agent.llmConfig?.modelConfigId || 'analytical-researcher',
-        mcpTools: agent.mcpTools || []
+        mcpTools: agent.mcpTools || [],
+        agenticLoopEnabled: agent.llmConfig?.agenticLoop?.enabled || false,
+        agenticLoopMaxIterations: agent.llmConfig?.agenticLoop?.maxIterations || 10,
+        agenticLoopTrackCosts: agent.llmConfig?.agenticLoop?.trackCosts ?? true
       });
     } else {
       // Reset form for create mode
@@ -271,7 +282,10 @@ function AgentModal({
         communicationStyle: 'formal',
         decisionMaking: 'analytical',
         modelId: 'analytical-researcher', // Default model
-        mcpTools: []
+        mcpTools: [],
+        agenticLoopEnabled: false,
+        agenticLoopMaxIterations: 10,
+        agenticLoopTrackCosts: true
       });
     }
   }, [agent]);
@@ -620,7 +634,7 @@ function AgentModal({
           {/* LLM Model Configuration */}
           <div className="border-t pt-6">
             <h4 className="font-medium text-gray-900 mb-4">Language Model Configuration</h4>
-            
+
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">
                 Model Profile
@@ -644,11 +658,70 @@ function AgentModal({
                 )}
               </select>
               <p className="text-xs text-gray-500 mt-1">
-                {modelsLoading 
-                  ? "Loading available model profiles..." 
+                {modelsLoading
+                  ? "Loading available model profiles..."
                   : "Choose a model profile optimized for your agent's intended tasks"
                 }
               </p>
+            </div>
+
+            {/* Agentic Loop Configuration */}
+            <div className="mt-6 p-4 bg-blue-50 border border-blue-200 rounded-md">
+              <div className="flex items-start space-x-3">
+                <input
+                  type="checkbox"
+                  id="agenticLoopEnabled"
+                  checked={formData.agenticLoopEnabled}
+                  onChange={(e) => setFormData({ ...formData, agenticLoopEnabled: e.target.checked })}
+                  disabled={isReadOnly}
+                  className="mt-1 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+                />
+                <div className="flex-1">
+                  <label htmlFor="agenticLoopEnabled" className="block text-sm font-medium text-gray-900 cursor-pointer">
+                    Enable Agentic Loop (Iterative Tool Usage)
+                  </label>
+                  <p className="text-xs text-gray-600 mt-1">
+                    Allows the agent to autonomously use tools in multiple iterations, seeing results and deciding next actions.
+                    Perfect for complex multi-step workflows like code reviews, research, or analysis tasks.
+                  </p>
+                </div>
+              </div>
+
+              {formData.agenticLoopEnabled && (
+                <div className="mt-4 space-y-4 pl-8">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Max Iterations
+                    </label>
+                    <input
+                      type="number"
+                      min="1"
+                      max="50"
+                      value={formData.agenticLoopMaxIterations}
+                      onChange={(e) => setFormData({ ...formData, agenticLoopMaxIterations: parseInt(e.target.value) || 10 })}
+                      className="w-32 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-primary-500"
+                      disabled={isReadOnly}
+                    />
+                    <p className="text-xs text-gray-500 mt-1">
+                      Maximum number of LLM calls (default: 10). Higher values allow more complex multi-step tasks.
+                    </p>
+                  </div>
+
+                  <div className="flex items-start space-x-3">
+                    <input
+                      type="checkbox"
+                      id="agenticLoopTrackCosts"
+                      checked={formData.agenticLoopTrackCosts}
+                      onChange={(e) => setFormData({ ...formData, agenticLoopTrackCosts: e.target.checked })}
+                      disabled={isReadOnly}
+                      className="mt-1 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+                    />
+                    <label htmlFor="agenticLoopTrackCosts" className="text-sm text-gray-700 cursor-pointer">
+                      Track total token usage and costs across all iterations
+                    </label>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
 
@@ -860,6 +933,12 @@ export default function AgentManagement() {
         decisionMaking: data.decisionMaking,
         modelId: data.modelId, // Include the selected model profile
         mcpTools: data.mcpTools, // Include MCP tool patterns
+        // Agentic loop configuration
+        agenticLoop: {
+          enabled: data.agenticLoopEnabled,
+          maxIterations: data.agenticLoopMaxIterations,
+          trackCosts: data.agenticLoopTrackCosts
+        },
         // Map realm associations using proper realmAccess structure
         realmAccess: (() => {
           if (data.type === 'elemental' && data.boundRealmId) {
@@ -873,12 +952,12 @@ export default function AgentManagement() {
           return undefined; // No realm assignment
         })()
       };
-      
+
       await agentApi.createAgent(createPayload);
       await fetchAgents();
     } catch (error: any) {
       console.error('Failed to create agent:', error);
-      
+
       // Show user-friendly error messages and re-throw to keep modal open
       if (error.response?.status === 409) {
         alert(`Agent name "${data.name}" already exists. Please choose a different name.`);
@@ -888,7 +967,7 @@ export default function AgentManagement() {
       } else {
         alert('Failed to create agent. Please check your input and try again.');
       }
-      
+
       // Re-throw the error so the modal stays open
       throw error;
     }
@@ -921,7 +1000,13 @@ export default function AgentManagement() {
           decisionMaking: data.decisionMaking
         },
         llmConfig: {
-          systemPrompt: data.systemPrompt
+          systemPrompt: data.systemPrompt,
+          // Agentic loop configuration
+          agenticLoop: {
+            enabled: data.agenticLoopEnabled,
+            maxIterations: data.agenticLoopMaxIterations,
+            trackCosts: data.agenticLoopTrackCosts
+          }
         },
         modelId: data.modelId, // Include the selected model profile
         mcpTools: data.mcpTools, // Include MCP tool patterns

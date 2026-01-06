@@ -169,7 +169,9 @@ router.post('/create', async (req: Request, res: Response) => {
       decisionMaking = 'analytical',
       // Realm assignment fields
       realmId,
-      realmAccess
+      realmAccess,
+      // Agentic loop configuration
+      agenticLoop
     } = req.body;
 
     // Validate required fields
@@ -248,10 +250,14 @@ router.post('/create', async (req: Request, res: Response) => {
       },
       mcpTools: [],
       toolPermissions: {},
-      llmConfig: modelRegistryService.resolveModelConfig(
-        req.body.modelId || 'analytical-researcher', 
-        systemPrompt
-      ),
+      llmConfig: {
+        ...modelRegistryService.resolveModelConfig(
+          req.body.modelId || 'analytical-researcher',
+          systemPrompt
+        ),
+        // Add agentic loop configuration if provided
+        ...(agenticLoop && { agenticLoop })
+      },
       resourceLimits: {
         maxMemoryMB: 512,
         maxCpuPercent: 50,
@@ -781,7 +787,11 @@ router.put('/:agentId', async (req: Request, res: Response) => {
           decisionMaking: updateData.personality?.decisionMaking || updateData.decisionMaking || existingAgent.personality?.decisionMaking || 'analytical'
         },
         llmConfig: updateData.modelId
-          ? modelRegistryService.resolveModelConfig(updateData.modelId, updateData.llmConfig?.systemPrompt || updateData.systemPrompt || existingAgent.llmConfig?.systemPrompt)
+          ? {
+              ...modelRegistryService.resolveModelConfig(updateData.modelId, updateData.llmConfig?.systemPrompt || updateData.systemPrompt || existingAgent.llmConfig?.systemPrompt),
+              // Preserve or add agentic loop configuration
+              ...(updateData.llmConfig?.agenticLoop && { agenticLoop: updateData.llmConfig.agenticLoop })
+            }
           : updateData.llmConfig
             ? {
                 ...(existingAgent.llmConfig || {}),

@@ -48,6 +48,13 @@ interface AgentExecutionResponse {
   };
   executionTime: number;
   toolCalls?: AgentToolCall[];
+  metadata?: {
+    agenticLoop?: {
+      enabled: boolean;
+      iterations: number;
+      maxIterations: number;
+    };
+  };
 }
 
 /**
@@ -693,7 +700,7 @@ export class AgentService {
   }
 
   /**
-   * Execute a prompt through an agent's LLM
+   * Execute a prompt through an agent's LLM with optional agentic loop for iterative tool usage
    */
   async executeAgentPrompt(agentId: AgentId, request: AgentExecutionRequest, requesterId?: string): Promise<AgentExecutionResponse> {
     const agent = await this.getAgent(agentId, requesterId);
@@ -722,7 +729,7 @@ export class AgentService {
 
     // Generate system prompt - use persona-aware prompt if collaboration context provided
     let baseSystemPrompt: string;
-    
+
     if (request.systemPrompt) {
       // Use explicit system prompt override
       baseSystemPrompt = request.systemPrompt;
@@ -745,83 +752,302 @@ export class AgentService {
 
     // Add realm context to the system prompt if agent is bound to a realm
     let systemPrompt = await this.generateRealmAwareSystemPrompt(agent, baseSystemPrompt);
-    
+
     // Add tool awareness to system prompt based on agent type and permissions
     const toolInformation = await this.generateToolAwarenessPrompt(agent);
     if (toolInformation) {
       systemPrompt += toolInformation;
     }
 
-    // Route to appropriate LLM provider based on agent configuration
+    // Check if agentic loop is enabled for this agent
+    const agenticLoopEnabled = agent.llmConfig.agenticLoop?.enabled ?? false;
+
+    if (agenticLoopEnabled) {
+      // Use agentic loop for iterative tool calling
+      return await this.executeAgentPromptWithAgenticLoop(
+        agent,
+        agentId,
+        request,
+        systemPrompt,
+        startTime
+      );
+    } else {
+      // Use traditional single-shot execution (backward compatibility)
+      return await this.executeAgentPromptSingleShot(
+        agent,
+        agentId,
+        request,
+        systemPrompt,
+        startTime
+      );
+    }
+  }
+
+  /**
+   * Optimize tool results for context - truncate or summarize large responses
+   */
+  private optimizeToolResults(
+    toolResults: string,
+    agent: Agent,
+    toolCalls: AgentToolCall[]
+  ): string {
+    const config = agent.llmConfig.agenticLoop;
+    const maxTokens = config?.maxToolResultTokens ?? 1000;
+    const shouldSummarize = config?.summarizeToolResults ?? true;
+
+    // Rough token estimate (4 chars ≈ 1 token)
+    const estimatedTokens = toolResults.length / 4;
+
+    if (estimatedTokens <= maxTokens) {
+      return toolResults; // Small enough, return as-is
+    }
+
+    // For GitHub/code review tools, extract key information instead of full JSON
+    if (shouldSummarize && toolCalls.some(tc => tc.tool.includes('github'))) {
+      return this.summarizeGitHubResults(toolResults, toolCalls);
+    }
+
+    // Fallback: truncate with ellipsis
+    const charLimit = maxTokens * 4;
+    if (toolResults.length > charLimit) {
+      return toolResults.substring(0, charLimit) + '\n\n... [truncated ' +
+        Math.round((toolResults.length - charLimit) / 1000) + 'KB of output]';
+    }
+
+    return toolResults;
+  }
+
+  /**
+   * Summarize GitHub API results to extract only relevant information for code review
+   */
+  private summarizeGitHubResults(toolResults: string, _toolCalls: AgentToolCall[]): string {
     try {
-      let response;
-      let usage;
-      
-      if (agent.llmConfig.provider === 'openai') {
-        if (!this.openaiClient) {
-          throw new Error('OpenAI client not available. Please configure OPENAI_API_KEY.');
-        }
-        
-        // Prepare OpenAI chat request
-        const openaiRequest: OpenAIChatRequest = {
-          model: agent.llmConfig.model,
-          messages: [
-            {
-              role: 'system',
-              content: systemPrompt
-            },
-            {
-              role: 'user',
-              content: request.prompt
-            }
-          ],
-          temperature: request.temperature || agent.llmConfig.temperature || 0.7,
-          ...(agent.llmConfig.maxTokens && { max_tokens: agent.llmConfig.maxTokens }),
-          ...(agent.llmConfig.topP && { top_p: agent.llmConfig.topP }),
-          ...(agent.llmConfig.frequencyPenalty && { frequency_penalty: agent.llmConfig.frequencyPenalty }),
-          ...(agent.llmConfig.presencePenalty && { presence_penalty: agent.llmConfig.presencePenalty })
-        };
-        
-        const openaiResponse = await this.openaiClient.chat(openaiRequest);
-        response = openaiResponse.choices[0]?.message?.content || '';
-        usage = {
-          promptTokens: openaiResponse.usage?.prompt_tokens || 0,
-          completionTokens: openaiResponse.usage?.completion_tokens || 0,
-          totalTokens: openaiResponse.usage?.total_tokens || 0
-        };
-      } else {
-        // Default to Ollama for 'ollama' provider and fallback
-        const chatRequest: ChatRequest = {
-          model: agent.llmConfig.model,
-          messages: [
-            {
-              role: 'system',
-              content: systemPrompt
-            },
-            {
-              role: 'user',
-              content: request.prompt
-            }
-          ],
-          options: {
-            temperature: request.temperature || agent.llmConfig.temperature || 0.7,
-            ...(agent.llmConfig.topP && { top_p: agent.llmConfig.topP }),
-            ...(agent.llmConfig.maxTokens && { num_predict: agent.llmConfig.maxTokens })
-          }
-        };
-        
-        const ollamaResponse = await this.ollamaClient.chat(chatRequest);
-        response = ollamaResponse.message.content;
-        usage = {
-          promptTokens: ollamaResponse.prompt_eval_count || 0,
-          completionTokens: ollamaResponse.eval_count || 0,
-          totalTokens: (ollamaResponse.prompt_eval_count || 0) + (ollamaResponse.eval_count || 0)
-        };
+      // Try to parse as JSON
+      const parsed = JSON.parse(toolResults);
+
+      // Handle array of PRs - ultra-compact format for agentic loop
+      if (Array.isArray(parsed) && parsed.length > 0 && parsed[0].number !== undefined) {
+        return `Found ${parsed.length} PR(s):\n` + parsed.map(pr =>
+          `#${pr.number}: ${pr.title.substring(0, 60)}${pr.title.length > 60 ? '...' : ''}`
+        ).join('\n');
       }
 
-      // Process tool calls in the response if agent has collaboration tools enabled
+      // Handle single PR details - minimal format
+      if (parsed.number !== undefined && parsed.title !== undefined) {
+        return `PR #${parsed.number}: ${parsed.title.substring(0, 80)}\n` +
+          `${parsed.state} | ${parsed.user?.login} | +${parsed.additions ?? 0}/-${parsed.deletions ?? 0} in ${parsed.changed_files ?? '?'} files`;
+      }
+
+      // Handle PR files - ultra-compact, max 20 files shown
+      if (Array.isArray(parsed) && parsed.length > 0 && parsed[0].filename !== undefined) {
+        const filesToShow = parsed.slice(0, 20);
+        const fileList = filesToShow.map(file =>
+          `${file.filename} (+${file.additions}/-${file.deletions})`
+        ).join(', ');
+        const truncated = parsed.length > 20 ? ` ... +${parsed.length - 20} more` : '';
+        return `Files (${parsed.length}): ${fileList}${truncated}`;
+      }
+
+      // Fallback: return truncated JSON
+      return JSON.stringify(parsed, null, 2).substring(0, 4000) + '\n... [truncated]';
+    } catch (e) {
+      // Not JSON, return truncated string
+      return toolResults.substring(0, 4000) + '\n... [truncated]';
+    }
+  }
+
+  /**
+   * Apply sliding window to conversation history to limit context size
+   */
+  private applySlidingWindow(
+    messages: Array<{ role: string; content: string }>,
+    windowSize: number
+  ): Array<{ role: string; content: string }> {
+    if (messages.length <= windowSize + 1) {
+      return messages; // +1 to always keep system message
+    }
+
+    // Always keep system message (first) + sliding window of recent messages
+    const systemMessage = messages[0];
+    if (!systemMessage) {
+      return messages; // Safety check
+    }
+
+    const recentMessages = messages.slice(-windowSize);
+    return [systemMessage, ...recentMessages];
+  }
+
+  /**
+   * Execute agent prompt with agentic loop - enables iterative tool calling
+   * The agent can make tool calls, see results, and decide on next actions in a loop
+   */
+  private async executeAgentPromptWithAgenticLoop(
+    agent: Agent,
+    agentId: AgentId,
+    request: AgentExecutionRequest,
+    systemPrompt: string,
+    startTime: number
+  ): Promise<AgentExecutionResponse> {
+    const maxIterations = agent.llmConfig.agenticLoop?.maxIterations ?? 10;
+    const trackCosts = agent.llmConfig.agenticLoop?.trackCosts ?? true;
+    const contextStrategy = agent.llmConfig.agenticLoop?.contextStrategy ?? 'summarized';
+    const slidingWindowSize = agent.llmConfig.agenticLoop?.slidingWindowSize ?? 5;
+
+    // Initialize conversation history
+    const messages: Array<{ role: string; content: string }> = [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: request.prompt }
+    ];
+
+    let totalUsage = {
+      promptTokens: 0,
+      completionTokens: 0,
+      totalTokens: 0
+    };
+
+    let allToolCalls: AgentToolCall[] = [];
+    let finalResponse = '';
+    let iteration = 0;
+
+    console.log(`🔄 Starting agentic loop for agent ${agentId} (max ${maxIterations} iterations)`);
+    console.log(`📋 Context strategy: ${contextStrategy}, Model: ${agent.llmConfig.model}`);
+
+    try {
+      while (iteration < maxIterations) {
+        iteration++;
+        console.log(`🔄 Agentic loop iteration ${iteration}/${maxIterations}`);
+
+        // Estimate current context size (rough approximation: 4 chars ≈ 1 token)
+        const totalChars = messages.reduce((sum, m) => sum + m.content.length, 0);
+        const estimatedTokens = Math.round(totalChars / 4);
+        console.log(`📊 Estimated context tokens: ~${estimatedTokens}`);
+
+        // Warn if approaching common context limits and auto-adjust
+        if (estimatedTokens > 6000 && agent.llmConfig.model.includes('3.5')) {
+          console.warn(`⚠️ Context size (${estimatedTokens} tokens) approaching GPT-3.5 limit (8K). Consider using gpt-4 (128K context) or enabling sliding-window strategy.`);
+
+          // If context is dangerously high, force sliding window to prevent failure
+          if (estimatedTokens > 5000 && contextStrategy !== 'sliding-window') {
+            console.warn(`⚠️ Auto-applying sliding window to prevent context overflow`);
+            const windowedMessages = this.applySlidingWindow(messages, 3);
+            messages.length = 0;
+            messages.push(...windowedMessages);
+
+            const newEstimate = Math.round(messages.reduce((sum, m) => sum + m.content.length, 0) / 4);
+            console.log(`📊 Context reduced from ~${estimatedTokens} to ~${newEstimate} tokens`);
+          }
+        }
+
+        // Call LLM with current conversation history
+        // Dynamically adjust max_tokens based on context size to prevent overflow
+        const dynamicTemperature = request.temperature;
+        const { response, usage } = await this.callLLM(agent, messages, dynamicTemperature);
+
+        // Accumulate token usage
+        if (trackCosts && usage) {
+          totalUsage.promptTokens += usage.promptTokens;
+          totalUsage.completionTokens += usage.completionTokens;
+          totalUsage.totalTokens += usage.totalTokens;
+        }
+
+        // Add assistant's response to conversation
+        messages.push({ role: 'assistant', content: response });
+
+        // Process any tool calls in the response
+        const processedResponse = await this.processAgentToolCalls(agent, response, agentId);
+        allToolCalls.push(...processedResponse.toolCalls);
+
+        // If no tool calls were made, this is the final response
+        if (processedResponse.toolCalls.length === 0) {
+          console.log(`✅ Agentic loop completed - no more tool calls (iteration ${iteration})`);
+          finalResponse = response;
+          break;
+        }
+
+        // Tool calls were made - add results to conversation for next iteration
+        console.log(`🔧 Processed ${processedResponse.toolCalls.length} tool call(s) in iteration ${iteration}`);
+
+        // Optimize tool results based on context strategy
+        let optimizedResults = processedResponse.finalResponse;
+        if (contextStrategy === 'summarized') {
+          const originalSize = optimizedResults.length;
+          optimizedResults = this.optimizeToolResults(
+            optimizedResults,
+            agent,
+            processedResponse.toolCalls
+          );
+          const savedBytes = originalSize - optimizedResults.length;
+          if (savedBytes > 0) {
+            console.log(`📉 Context optimization saved ~${Math.round(savedBytes / 1000)}KB (~${Math.round(savedBytes / 4)} tokens)`);
+          }
+        }
+
+        // Create a user message with tool results for the next iteration
+        const toolResultsMessage = `Tool execution results:\n${optimizedResults}`;
+        messages.push({ role: 'user', content: toolResultsMessage });
+
+        // Apply sliding window if configured
+        if (contextStrategy === 'sliding-window') {
+          const beforeCount = messages.length;
+          const windowedMessages = this.applySlidingWindow(messages, slidingWindowSize);
+          if (windowedMessages.length < beforeCount) {
+            console.log(`🪟 Sliding window reduced context from ${beforeCount} to ${windowedMessages.length} messages`);
+            messages.length = 0;
+            messages.push(...windowedMessages);
+          }
+        }
+
+        // Continue loop for next iteration
+      }
+
+      // If we exited due to max iterations, use the last response
+      if (iteration >= maxIterations && !finalResponse) {
+        console.warn(`⚠️ Agentic loop reached max iterations (${maxIterations})`);
+        finalResponse = messages[messages.length - 1]?.content || 'Max iterations reached';
+      }
+
+      return {
+        response: finalResponse,
+        usage: totalUsage,
+        executionTime: Date.now() - startTime,
+        toolCalls: allToolCalls,
+        metadata: {
+          agenticLoop: {
+            enabled: true,
+            iterations: iteration,
+            maxIterations
+          }
+        }
+      };
+
+    } catch (error) {
+      console.error(`❌ Agentic loop failed at iteration ${iteration}:`, error);
+      throw new Error(`Agentic loop execution failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
+
+  /**
+   * Execute agent prompt in single-shot mode (original behavior, no agentic loop)
+   */
+  private async executeAgentPromptSingleShot(
+    agent: Agent,
+    agentId: AgentId,
+    request: AgentExecutionRequest,
+    systemPrompt: string,
+    startTime: number
+  ): Promise<AgentExecutionResponse> {
+    const messages: Array<{ role: string; content: string }> = [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: request.prompt }
+    ];
+
+    try {
+      // Call LLM once
+      const { response, usage } = await this.callLLM(agent, messages, request.temperature);
+
+      // Process tool calls in the response
       const processedResponse = await this.processAgentToolCalls(agent, response, agentId);
-      
+
       return {
         response: processedResponse.finalResponse,
         usage,
@@ -830,6 +1056,82 @@ export class AgentService {
       };
     } catch (error) {
       throw new Error(`LLM execution failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
+
+  /**
+   * Call LLM with message history - abstracted to support both OpenAI and Ollama
+   */
+  private async callLLM(
+    agent: Agent,
+    messages: Array<{ role: string; content: string }>,
+    temperature?: number
+  ): Promise<{ response: string; usage: { promptTokens: number; completionTokens: number; totalTokens: number } }> {
+    if (agent.llmConfig.provider === 'openai') {
+      if (!this.openaiClient) {
+        throw new Error('OpenAI client not available. Please configure OPENAI_API_KEY.');
+      }
+
+      // Calculate dynamic max_tokens based on model context limits
+      let maxTokens = agent.llmConfig.maxTokens || 3000;
+
+      // Estimate current context size
+      const contextChars = messages.reduce((sum, m) => sum + m.content.length, 0);
+      const estimatedContextTokens = Math.round(contextChars / 4);
+
+      // Get model context limit
+      const modelContextLimit = agent.llmConfig.model.includes('gpt-4') ? 128000 :
+                                agent.llmConfig.model.includes('gpt-3.5') ? 8192 : 8192;
+
+      // Calculate safe max_tokens (leave buffer for model overhead)
+      const safeMaxTokens = Math.max(500, modelContextLimit - estimatedContextTokens - 200);
+
+      // Use the smaller of configured or safe limit
+      if (maxTokens > safeMaxTokens) {
+        console.log(`📉 Adjusting max_tokens from ${maxTokens} to ${safeMaxTokens} (context: ~${estimatedContextTokens} tokens, model limit: ${modelContextLimit})`);
+        maxTokens = safeMaxTokens;
+      }
+
+      const openaiRequest: OpenAIChatRequest = {
+        model: agent.llmConfig.model,
+        messages: messages.map(m => ({ role: m.role as any, content: m.content })),
+        temperature: temperature || agent.llmConfig.temperature || 0.7,
+        max_tokens: maxTokens,
+        ...(agent.llmConfig.topP && { top_p: agent.llmConfig.topP }),
+        ...(agent.llmConfig.frequencyPenalty && { frequency_penalty: agent.llmConfig.frequencyPenalty }),
+        ...(agent.llmConfig.presencePenalty && { presence_penalty: agent.llmConfig.presencePenalty })
+      };
+
+      const openaiResponse = await this.openaiClient.chat(openaiRequest);
+      return {
+        response: openaiResponse.choices[0]?.message?.content || '',
+        usage: {
+          promptTokens: openaiResponse.usage?.prompt_tokens || 0,
+          completionTokens: openaiResponse.usage?.completion_tokens || 0,
+          totalTokens: openaiResponse.usage?.total_tokens || 0
+        }
+      };
+    } else {
+      // Default to Ollama for 'ollama' provider and fallback
+      const chatRequest: ChatRequest = {
+        model: agent.llmConfig.model,
+        messages: messages.map(m => ({ role: m.role as any, content: m.content })),
+        options: {
+          temperature: temperature || agent.llmConfig.temperature || 0.7,
+          ...(agent.llmConfig.topP && { top_p: agent.llmConfig.topP }),
+          ...(agent.llmConfig.maxTokens && { num_predict: agent.llmConfig.maxTokens })
+        }
+      };
+
+      const ollamaResponse = await this.ollamaClient.chat(chatRequest);
+      return {
+        response: ollamaResponse.message.content,
+        usage: {
+          promptTokens: ollamaResponse.prompt_eval_count || 0,
+          completionTokens: ollamaResponse.eval_count || 0,
+          totalTokens: (ollamaResponse.prompt_eval_count || 0) + (ollamaResponse.eval_count || 0)
+        }
+      };
     }
   }
 
@@ -1412,6 +1714,47 @@ Your responses and behavior should be appropriate to this realm's context and ch
   }
 
   /**
+   * Extract and parse MCP response content from nested JSON structure
+   * MCP responses come in format: { content: [{ type: "text", text: "..." }] }
+   * The text field may contain escaped JSON that needs to be parsed
+   */
+  private extractMCPContent(mcpResponse: any): any {
+    // If there's an error flag, return the error content
+    if (mcpResponse?.isError) {
+      return mcpResponse;
+    }
+
+    // Check if this is an MCP-formatted response
+    if (mcpResponse?.content && Array.isArray(mcpResponse.content)) {
+      // Extract the text from the first content item
+      const firstContent = mcpResponse.content[0];
+      if (firstContent?.type === 'text' && firstContent.text) {
+        const textContent = firstContent.text;
+
+        // Try to parse the text as JSON if it looks like JSON
+        if (typeof textContent === 'string' &&
+            (textContent.trim().startsWith('[') || textContent.trim().startsWith('{'))) {
+          try {
+            const parsed = JSON.parse(textContent);
+            console.log(`✅ Successfully parsed MCP content JSON`);
+            return parsed;
+          } catch (parseError) {
+            // Not valid JSON, return as-is
+            console.log(`⚠️ MCP content text is not valid JSON, returning as string`);
+            return textContent;
+          }
+        }
+
+        // Return text content directly
+        return textContent;
+      }
+    }
+
+    // Not an MCP response format, return as-is
+    return mcpResponse;
+  }
+
+  /**
    * Process tool calls in an agent's response and execute them
    */
   private async processAgentToolCalls(agent: Agent, response: string, agentId: AgentId): Promise<ProcessedAgentResponse> {
@@ -1447,7 +1790,11 @@ Your responses and behavior should be appropriate to this realm's context and ch
 
         try {
           // Execute the tool call through internal MCP interface
-          toolResult = await this.executeAgentTool(agent, toolName, params);
+          const rawToolResult = await this.executeAgentTool(agent, toolName, params);
+
+          // Extract and parse MCP response content for better agent consumption
+          toolResult = this.extractMCPContent(rawToolResult);
+
         } catch (error) {
           console.error(`❌ Tool call failed for agent ${agentId}:`, error);
           toolResult = { error: error instanceof Error ? error.message : 'Tool execution failed' };
@@ -1465,10 +1812,32 @@ Your responses and behavior should be appropriate to this realm's context and ch
         toolCalls.push(toolCall);
 
         // Replace the tool call in the response with the result
-        const toolResultText = success 
-          ? `TOOL_RESULT: ${JSON.stringify(toolResult, null, 2)}`
-          : `TOOL_ERROR: ${toolResult.error}`;
-        
+        // Apply optimization for agentic loop to prevent token explosion
+        let toolResultText: string;
+        if (!success) {
+          toolResultText = `TOOL_ERROR: ${toolResult.error}`;
+        } else {
+          // Check if agentic loop is enabled and should optimize
+          const shouldOptimize = agent.llmConfig.agenticLoop?.enabled &&
+            (agent.llmConfig.agenticLoop?.contextStrategy === 'summarized' ||
+             agent.llmConfig.agenticLoop?.contextStrategy === undefined);
+
+          if (shouldOptimize) {
+            // Optimize tool results before adding to context
+            const stringified = JSON.stringify(toolResult, null, 2);
+            const optimized = this.optimizeToolResults(stringified, agent, [toolCall]);
+            toolResultText = `TOOL_RESULT: ${optimized}`;
+
+            const savedTokens = Math.round((stringified.length - optimized.length) / 4);
+            if (savedTokens > 100) {
+              console.log(`📉 Tool result optimized: saved ~${savedTokens} tokens`);
+            }
+          } else {
+            // No optimization - original behavior
+            toolResultText = `TOOL_RESULT: ${JSON.stringify(toolResult, null, 2)}`;
+          }
+        }
+
         processedResponse = processedResponse.replace(match[0], toolResultText);
 
       } catch (parseError) {

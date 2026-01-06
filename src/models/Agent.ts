@@ -49,9 +49,23 @@ export interface LLMConfiguration {
   systemPrompt?: string;
   contextWindow?: number;
   additionalParameters?: Record<string, any>;
-  
+
   // Named model configuration support
   modelConfigId?: string; // Reference to a named model configuration
+
+  // Agentic loop configuration for iterative tool usage
+  agenticLoop?: {
+    enabled: boolean;
+    maxIterations?: number; // Default: 10
+    stopOnNoTools?: boolean; // Default: true - stop when no tool calls are made
+    trackCosts?: boolean; // Default: true - track total tokens/costs across iterations
+
+    // Token optimization strategies
+    contextStrategy?: 'full' | 'sliding-window' | 'summarized'; // Default: 'summarized'
+    slidingWindowSize?: number; // Default: 5 - only keep last N messages
+    maxToolResultTokens?: number; // Default: 1000 - truncate tool results
+    summarizeToolResults?: boolean; // Default: true - use LLM to summarize large results
+  };
 }
 
 /**
