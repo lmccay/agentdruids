@@ -95,6 +95,7 @@ router.get('/', async (req: Request, res: Response) => {
           systemPrompt: fullAgent.llmConfig?.systemPrompt || 'Default system prompt',
           realmId: fullAgent.deployment?.realmId || 'default-realm', // Use actual realm if available
           realmAccess: fullAgent.realmAccess, // Include realm access information
+          mcpTools: fullAgent.mcpTools, // Include MCP tools configuration
           createdAt: fullAgent.createdAt,
           updatedAt: fullAgent.updatedAt
         };
@@ -566,6 +567,7 @@ router.get('/:agentId', async (req: Request, res: Response) => {
       systemPrompt: agent.llmConfig?.systemPrompt || 'Default system prompt',
       realmId: agent.deployment?.realmId || 'default-realm',
       realmAccess: agent.realmAccess, // Include realm access information
+      mcpTools: agent.mcpTools, // Include MCP tools configuration
       createdAt: agent.createdAt,
       updatedAt: agent.updatedAt
     };
@@ -677,7 +679,8 @@ router.put('/:agentId', async (req: Request, res: Response) => {
       'name', 'description', 'type', 'domain', 'systemPrompt', 'realmId', 'status',
       'capabilities', 'expertise', 'knowledgeNamespaces', 'maxConcurrentTasks',
       'personalityTraits', 'communicationStyle', 'decisionMaking', 'modelId', 'realmAccess',
-      'llmConfig'  // Allow direct llmConfig updates
+      'llmConfig',  // Allow direct llmConfig updates
+      'mcpTools'    // Allow MCP tool configuration updates
     ];
     const allowedWrappedFields = ['configuration', 'metadata'];
     const updateFields = Object.keys(updateData);
@@ -777,9 +780,9 @@ router.put('/:agentId', async (req: Request, res: Response) => {
           communicationStyle: updateData.personality?.communicationStyle || updateData.communicationStyle || existingAgent.personality?.communicationStyle || 'professional',
           decisionMaking: updateData.personality?.decisionMaking || updateData.decisionMaking || existingAgent.personality?.decisionMaking || 'analytical'
         },
-        llmConfig: updateData.modelId 
+        llmConfig: updateData.modelId
           ? modelRegistryService.resolveModelConfig(updateData.modelId, updateData.llmConfig?.systemPrompt || updateData.systemPrompt || existingAgent.llmConfig?.systemPrompt)
-          : updateData.llmConfig 
+          : updateData.llmConfig
             ? {
                 ...(existingAgent.llmConfig || {}),
                 ...updateData.llmConfig
@@ -790,6 +793,8 @@ router.put('/:agentId', async (req: Request, res: Response) => {
               },
         // Handle realmAccess directly
         realmAccess: updateData.realmAccess || existingAgent.realmAccess,
+        // Handle mcpTools configuration
+        mcpTools: updateData.mcpTools !== undefined ? updateData.mcpTools : (existingAgent.mcpTools || []),
         updatedAt: new Date().toISOString(),
         lastActive: new Date().toISOString()
       };
@@ -835,7 +840,8 @@ router.put('/:agentId', async (req: Request, res: Response) => {
           decisionMaking: updatedAgent.personality?.decisionMaking
         },
         llmConfig: updatedAgent.llmConfig, // Use the already resolved llmConfig
-        realmAccess: updatedAgent.realmAccess // Pass through realmAccess directly
+        realmAccess: updatedAgent.realmAccess, // Pass through realmAccess directly
+        mcpTools: updateData.mcpTools || updatedAgent.mcpTools // Include MCP tools configuration
       };
       
       console.log(`🔄 Attempting to update agent ${agentId} in AgentService with:`, {

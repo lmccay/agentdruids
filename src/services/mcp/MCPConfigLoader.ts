@@ -17,16 +17,8 @@ export interface MCPServerConfig {
   tools: string[];
 }
 
-export interface ElementalBinding {
-  serverId: string;
-  allowedTools: string[];
-}
-
 export interface RealmBinding {
   servers: string[];
-  elementals: {
-    [elementalId: string]: ElementalBinding;
-  };
 }
 
 export interface MCPConfig {
@@ -147,34 +139,6 @@ export class MCPConfigLoader {
       throw new Error('MCP config not loaded. Call load() first.');
     }
     return this.config.realmBindings[realmId] || null;
-  }
-
-  /**
-   * Get elemental's MCP server binding
-   */
-  getElementalBinding(
-    realmId: string,
-    elementalId: string
-  ): ElementalBinding | null {
-    const realmBinding = this.getRealmBinding(realmId);
-    if (!realmBinding) return null;
-
-    return realmBinding.elementals[elementalId] || null;
-  }
-
-  /**
-   * Validate that elemental can use tool
-   */
-  canElementalUseTool(
-    realmId: string,
-    elementalId: string,
-    toolName: string
-  ): boolean {
-    const binding = this.getElementalBinding(realmId, elementalId);
-    if (!binding) return false;
-
-    return binding.allowedTools.includes(toolName) ||
-           binding.allowedTools.includes('*');
   }
 
   /**

@@ -44,14 +44,21 @@ export class DruidApp {
    * Configure service dependencies
    */
   private configureServices(): void {
-    // Wire up AgentService dependency for coordination
-    // This is imported dynamically to avoid circular dependencies
-    import('./services/AgentService').then(({ AgentService }) => {
-      const agentService = new AgentService();
+    // Use shared service instances to avoid state duplication
+    import('./services/SharedServices').then(({ agentService, realmService }) => {
+      // Wire shared RealmService into shared AgentService
+      agentService.setRealmService(realmService);
+      console.log('🔗 Shared RealmService injected into shared AgentService');
+
+      // Wire shared AgentService into coordination
       coordinationService.setAgentService(agentService);
-      console.log('🔗 AgentService dependency wired to CoordinationService');
+      console.log('🔗 Shared AgentService wired to CoordinationService');
+
+      // Wire shared RealmService into coordination
+      coordinationService.setRealmService(realmService);
+      console.log('🔗 Shared RealmService wired to CoordinationService');
     }).catch(error => {
-      console.error('❌ Failed to wire AgentService dependency:', error);
+      console.error('❌ Failed to wire shared service dependencies:', error);
     });
   }
 

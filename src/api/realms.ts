@@ -1,8 +1,7 @@
 import { Router, Request, Response } from 'express';
-import { RealmService } from '../services/RealmService';
+import { realmService } from '../services/SharedServices';
 
 const router = Router();
-const realmService = new RealmService();
 
 // GET /realms - List all realms
 router.get('/', async (_req: Request, res: Response) => {
@@ -235,7 +234,7 @@ router.get('/:realmId/elementals', async (req: Request, res: Response) => {
     const realmTravelService = new RealmTravelService(agentService, realmService);
 
     const elementals = await realmTravelService.getElementalsInRealm(realmId);
-    
+
     return res.json({
       elementals,
       count: elementals.length
@@ -245,6 +244,134 @@ router.get('/:realmId/elementals', async (req: Request, res: Response) => {
     return res.status(500).json({
       error: error instanceof Error ? error.message : 'Unknown error'
     });
+  }
+});
+
+/**
+ * GET /realms/:realmId/mcp-servers
+ * Get MCP servers assigned to a realm
+ */
+router.get('/:realmId/mcp-servers', async (req: Request, res: Response) => {
+  try {
+    const { realmId } = req.params;
+
+    if (!realmId) {
+      return res.status(400).json({ error: 'Realm ID is required' });
+    }
+
+    const mcpServers = await realmService.getMCPServers(realmId);
+
+    return res.json({
+      realmId,
+      mcpServers,
+      count: mcpServers.length
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message.includes('not found')) {
+      return res.status(404).json({ error: error.message });
+    }
+    console.error('Error getting realm MCP servers:', error);
+    return res.status(500).json({ error: 'Failed to get realm MCP servers' });
+  }
+});
+
+/**
+ * PUT /realms/:realmId/mcp-servers
+ * Replace MCP servers for a realm (replaces entire list)
+ */
+router.put('/:realmId/mcp-servers', async (req: Request, res: Response) => {
+  try {
+    const { realmId } = req.params;
+    const { serverIds } = req.body;
+
+    if (!realmId) {
+      return res.status(400).json({ error: 'Realm ID is required' });
+    }
+
+    if (!Array.isArray(serverIds)) {
+      return res.status(400).json({ error: 'serverIds must be an array' });
+    }
+
+    await realmService.assignMCPServers(realmId, serverIds);
+
+    return res.json({
+      message: 'MCP servers updated successfully',
+      realmId,
+      mcpServers: serverIds
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message.includes('not found')) {
+      return res.status(404).json({ error: error.message });
+    }
+    if (error instanceof Error && error.message.includes('Invalid MCP server')) {
+      return res.status(400).json({ error: error.message });
+    }
+    console.error('Error updating realm MCP servers:', error);
+    return res.status(500).json({ error: 'Failed to update realm MCP servers' });
+  }
+});
+
+/**
+ * POST /realms/:realmId/mcp-servers
+ * Add a single MCP server to a realm
+ */
+router.post('/:realmId/mcp-servers', async (req: Request, res: Response) => {
+  try {
+    const { realmId } = req.params;
+    const { serverId } = req.body;
+
+    if (!realmId) {
+      return res.status(400).json({ error: 'Realm ID is required' });
+    }
+
+    if (!serverId || typeof serverId !== 'string') {
+      return res.status(400).json({ error: 'serverId is required and must be a string' });
+    }
+
+    await realmService.addMCPServer(realmId, serverId);
+
+    return res.json({
+      message: 'MCP server added successfully',
+      realmId,
+      serverId
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message.includes('not found')) {
+      return res.status(404).json({ error: error.message });
+    }
+    if (error instanceof Error && error.message.includes('Invalid MCP server')) {
+      return res.status(400).json({ error: error.message });
+    }
+    console.error('Error adding MCP server to realm:', error);
+    return res.status(500).json({ error: 'Failed to add MCP server to realm' });
+  }
+});
+
+/**
+ * DELETE /realms/:realmId/mcp-servers/:serverId
+ * Remove an MCP server from a realm
+ */
+router.delete('/:realmId/mcp-servers/:serverId', async (req: Request, res: Response) => {
+  try {
+    const { realmId, serverId } = req.params;
+
+    if (!realmId || !serverId) {
+      return res.status(400).json({ error: 'Realm ID and Server ID are required' });
+    }
+
+    await realmService.removeMCPServer(realmId, serverId);
+
+    return res.json({
+      message: 'MCP server removed successfully',
+      realmId,
+      serverId
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message.includes('not found')) {
+      return res.status(404).json({ error: error.message });
+    }
+    console.error('Error removing MCP server from realm:', error);
+    return res.status(500).json({ error: 'Failed to remove MCP server from realm' });
   }
 });
 

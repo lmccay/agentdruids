@@ -33,6 +33,7 @@ export interface Agent {
     boundRealmId?: string; // For Elementals
     accessibleRealms?: string[]; // For Druids - simplified to just realm IDs
   };
+  mcpTools?: string[]; // MCP tool patterns with wildcard support (e.g., "github:*", "github:list_*")
   createdAt: string;
   updatedAt: string;
 }
@@ -67,6 +68,7 @@ export interface CreateAgentRequest {
   communicationStyle?: string;
   decisionMaking?: string;
   modelId?: string; // Named model configuration ID
+  mcpTools?: string[]; // MCP tool patterns with wildcard support
 }
 
 export interface UpdateAgentRequest {
@@ -95,6 +97,7 @@ export interface UpdateAgentRequest {
     accessibleRealms?: string[];
   };
   modelId?: string; // Named model configuration ID
+  mcpTools?: string[]; // MCP tool patterns with wildcard support
 }
 
 export interface CreateRealmRequest {
@@ -122,6 +125,7 @@ export interface Realm {
   agents?: Agent[];
   agentIds?: string[];
   agentCount: number;
+  mcpServers?: string[]; // Array of MCP server IDs available to this realm
   createdAt?: string;
   updatedAt?: string;
 }
@@ -321,6 +325,27 @@ export const realmApi = {
 
   async removeAgentFromRealm(realmId: string, agentId: string): Promise<void> {
     await api.delete(`/realms/${realmId}/agents/${agentId}`);
+  },
+
+  // MCP Server Methods
+  async getMCPServers(realmId: string): Promise<{ realmId: string; mcpServers: string[]; count: number }> {
+    const response = await api.get(`/realms/${realmId}/mcp-servers`);
+    return response.data;
+  },
+
+  async updateMCPServers(realmId: string, serverIds: string[]): Promise<{ message: string; realmId: string; mcpServers: string[] }> {
+    const response = await api.put(`/realms/${realmId}/mcp-servers`, { serverIds });
+    return response.data;
+  },
+
+  async addMCPServer(realmId: string, serverId: string): Promise<{ message: string; realmId: string; serverId: string }> {
+    const response = await api.post(`/realms/${realmId}/mcp-servers`, { serverId });
+    return response.data;
+  },
+
+  async removeMCPServer(realmId: string, serverId: string): Promise<{ message: string; realmId: string; serverId: string }> {
+    const response = await api.delete(`/realms/${realmId}/mcp-servers/${serverId}`);
+    return response.data;
   }
 };
 

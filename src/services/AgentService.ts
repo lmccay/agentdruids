@@ -17,6 +17,7 @@ import { RealmService } from './RealmService';
 import { generateUUID, AgentIdMapper } from '../utils/uuidUtils';
 import { MCPConfigLoader } from './mcp/MCPConfigLoader';
 import { HttpMCPClient } from './mcp/HttpMCPClient';
+import { SSEMCPClient } from './mcp/SSEMCPClient';
 
 /**
  * Agent execution request for LLM operations
@@ -88,7 +89,7 @@ export class AgentService {
   private policyEngine: PolicyEngine;
   private realmService: RealmService;
   private mcpConfigLoader: MCPConfigLoader;
-  private mcpClients: Map<string, HttpMCPClient> = new Map();
+  private mcpClients: Map<string, HttpMCPClient | SSEMCPClient> = new Map();
 
   constructor(ollamaClient?: OllamaClient, policyEngine?: PolicyEngine, openaiClient?: OpenAIClient) {
     this.ollamaClient = ollamaClient || new OllamaClient(createDefaultOllamaConfig());
@@ -131,6 +132,14 @@ export class AgentService {
       console.error('❌ Failed to initialize MCP config:', error);
       // Continue without MCP support
     }
+  }
+
+  /**
+   * Set the RealmService instance (for shared service injection)
+   */
+  public setRealmService(realmService: RealmService): void {
+    this.realmService = realmService;
+    console.log('✅ RealmService instance injected into AgentService');
   }
 
   private async initializeService(): Promise<void> {
@@ -518,7 +527,7 @@ export class AgentService {
         ...agent.personality,
         ...(updateData.personality || {})
       },
-      mcpTools: updateData.mcpTools || agent.mcpTools,
+      mcpTools: updateData.mcpTools !== undefined ? updateData.mcpTools : agent.mcpTools,
       toolPermissions: updateData.toolPermissions || agent.toolPermissions,
       llmConfig: {
         ...agent.llmConfig,
@@ -912,15 +921,124 @@ Available tools:
       // Add tools from agent's MCP configuration
       // These will be validated and routed through the MCP Gateway
       for (const mcpTool of agent.mcpTools) {
-        tools.push({
-          name: mcpTool,
-          description: `Specialized tool: ${mcpTool} (routed via MCP Gateway)`,
-          parameters: { /* Parameters will be validated by MCP Gateway */ }
-        });
+        // Check if this is a wildcard pattern (e.g., "github:*")
+        if (mcpTool.endsWith(':*')) {
+          // Extract server prefix and discover actual tools
+          const serverPrefix = mcpTool.slice(0, -2); // Remove ":*"
+          const discoveredTools = await this.discoverMCPTools(agent, serverPrefix);
+          tools.push(...discoveredTools);
+        } else {
+          // Static tool name
+          tools.push({
+            name: mcpTool,
+            description: `Specialized tool: ${mcpTool} (routed via MCP Gateway)`,
+            parameters: { /* Parameters will be validated by MCP Gateway */ }
+          });
+        }
       }
     }
 
     return tools;
+  }
+
+  /**
+   * Discover available tools from an MCP server for dynamic tool resolution
+   */
+  private async discoverMCPTools(agent: Agent, serverPrefix: string): Promise<Array<{name: string, description: string, parameters?: any}>> {
+    try {
+      // Get agent's realm
+      const realmId = agent.realmAccess?.boundRealmId || (agent as any).realmId;
+      if (!realmId) {
+        console.warn(`Cannot discover MCP tools for agent ${agent.id}: no realm binding`);
+        return [];
+      }
+
+      // Get realm's MCP servers
+      let realmServers: string[] = [];
+      try {
+        realmServers = await this.realmService.getMCPServers(realmId);
+      } catch (error) {
+        // Try config fallback
+        const realmBinding = this.mcpConfigLoader.getRealmBinding(realmId);
+        if (realmBinding && realmBinding.servers) {
+          realmServers = realmBinding.servers;
+        }
+      }
+
+      // Find the MCP server matching the prefix
+      const targetServerId = realmServers.find(serverId => serverId === serverPrefix);
+      if (!targetServerId) {
+        console.warn(`MCP server ${serverPrefix} not found in realm ${realmId}`);
+        return [];
+      }
+
+      // Get server config
+      const serverConfig = this.mcpConfigLoader.getServer(targetServerId);
+      if (!serverConfig || !serverConfig.baseUrl) {
+        console.warn(`No config found for MCP server ${targetServerId}`);
+        return [];
+      }
+
+      // Get authentication token
+      let token: string | null = null;
+      if (serverConfig.authentication.tokenSource === 'env' && serverConfig.authentication.envVar) {
+        token = process.env[serverConfig.authentication.envVar] || null;
+      }
+
+      // Create appropriate MCP client
+      let client: any;
+      if (serverConfig.transport === 'sse') {
+        const { SSEMCPClient } = await import('./mcp/SSEMCPClient');
+        client = new SSEMCPClient(
+          serverConfig.baseUrl,
+          token,
+          serverConfig.authentication.header,
+          serverConfig.authentication.prefix,
+          (serverConfig as any).customHeaders || {}
+        );
+      } else {
+        const { HttpMCPClient } = await import('./mcp/HttpMCPClient');
+        client = new HttpMCPClient(
+          serverConfig.baseUrl,
+          token,
+          serverConfig.authentication.header,
+          serverConfig.authentication.prefix
+        );
+      }
+
+      // Call tools/list to discover available tools
+      console.log(`🔍 Discovering tools from MCP server ${targetServerId}...`);
+      const mcpResponse: any = await client.listTools();
+
+      // Convert MCP tools to our format
+      const tools: Array<{name: string, description: string, parameters?: any}> = [];
+      if (Array.isArray(mcpResponse)) {
+        // Response is directly an array of tools
+        for (const tool of mcpResponse) {
+          tools.push({
+            name: `${serverPrefix}:${tool.name}`,
+            description: tool.description || `Tool: ${tool.name}`,
+            parameters: tool.inputSchema?.properties || {}
+          });
+        }
+      } else if (mcpResponse && Array.isArray(mcpResponse.tools)) {
+        // Response has a tools property
+        for (const tool of mcpResponse.tools) {
+          tools.push({
+            name: `${serverPrefix}:${tool.name}`,
+            description: tool.description || `Tool: ${tool.name}`,
+            parameters: tool.inputSchema?.properties || {}
+          });
+        }
+      }
+
+      console.log(`✅ Discovered ${tools.length} tools from ${targetServerId}`);
+      return tools;
+
+    } catch (error) {
+      console.error(`Failed to discover MCP tools for ${serverPrefix}:`, error instanceof Error ? error.message : 'Unknown error');
+      return [];
+    }
   }
 
   /**
@@ -1280,13 +1398,16 @@ Your responses and behavior should be appropriate to this realm's context and ch
    */
   async refreshAgentCache(): Promise<void> {
     console.log('🔄 Refreshing agent cache from database...');
-    
+
     // Clear current cache
     this.agents.clear();
-    
+
+    // Clear ID mappings
+    AgentIdMapper.clearMappings();
+
     // Reload from database
     await this.loadAgentsFromDatabase();
-    
+
     console.log(`✅ Agent cache refreshed - now contains ${this.agents.size} agents`);
   }
 
@@ -1637,14 +1758,15 @@ Your responses and behavior should be appropriate to this realm's context and ch
       prompt: `SIMPLE TASK ASSIGNMENT from ${fromAgentId}: ${params.task}
 
 IMPORTANT: This is a simple task assignment that should be completed in a single response. Please:
-1. Complete the requested task fully
-2. Provide your final result/deliverable
-3. Do not ask questions or request further input
-4. Consider this task complete when you finish your response
+1. Use your own available tools and capabilities to complete this task
+2. Complete the requested task fully
+3. Provide your final result/deliverable
+4. Do not ask questions or request further input
+5. Consider this task complete when you finish your response
 
 Task: ${params.task}
 
-Please execute this task now and provide your complete result.`,
+Please use your available tools to execute this task now and provide your complete result.`,
       collaborationContext: {
         scenarioName: 'Simple Task Assignment',
         agentRole: 'task_executor',
@@ -1741,10 +1863,24 @@ Please execute this task now and provide your complete result.`,
     const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(params.target_realm);
     
     if (!isUUID) {
-      // Try to find realm by name
+      // Try to find realm by name (case-insensitive, handle common variations)
       const realms = await this.realmService.listRealms();
-      const targetRealm = realms.find(realm => realm.name === params.target_realm);
-      
+
+      // Normalize the search term: lowercase, remove common suffixes like " realm"
+      const normalizeRealmName = (name: string) => {
+        return name
+          .toLowerCase()
+          .replace(/\s+realm\s*$/i, '') // Remove " realm" suffix
+          .replace(/\s+/g, ' ') // Normalize spaces
+          .trim();
+      };
+
+      const normalizedSearch = normalizeRealmName(params.target_realm);
+
+      const targetRealm = realms.find(realm =>
+        normalizeRealmName(realm.name) === normalizedSearch
+      );
+
       if (targetRealm) {
         targetRealmId = targetRealm.id;
       }
@@ -1839,73 +1975,165 @@ Please execute this task now and provide your complete result.`,
         );
       }
 
-      // 3. Validate agent has tool permission
-      if (!agent.mcpTools || !agent.mcpTools.includes(toolName)) {
-        throw new Error(
-          `Agent ${agentId} not authorized for tool ${toolName}. ` +
-          `Available: ${agent.mcpTools?.join(', ') || 'none'}`
-        );
-      }
-
-      // 4. Get realm ID
-      const realmId = (agent as any).realmId;
+      // 3. Get realm ID - elementals should have boundRealmId
+      const realmId = agent.realmAccess?.boundRealmId || (agent as any).realmId;
       if (!realmId) {
-        throw new Error(`Elemental ${agentId} has no realmId`);
+        throw new Error(`Elemental ${agentId} has no realmId (checked realmAccess.boundRealmId and realmId)`);
       }
 
-      // 5. Get MCP binding from config
-      const binding = this.mcpConfigLoader.getElementalBinding(realmId, agentId);
-      if (!binding) {
+      // 4. Get realm binding - check which MCP servers are available in this realm
+      // First try database, then fall back to config
+      let realmServers: string[] = [];
+
+      try {
+        // Try to get from database first (primary source)
+        realmServers = await this.realmService.getMCPServers(realmId);
+        console.log(`🔍 MCP: Got ${realmServers.length} servers from database for realm ${realmId}:`, realmServers);
+      } catch (error) {
+        // Realm not found in database or error - try config fallback
+        console.log(`⚠️ Could not get realm MCP servers from database, trying config fallback. Error:`, error);
+      }
+
+      // If no servers in database, try config fallback
+      if (realmServers.length === 0) {
+        console.log(`🔍 MCP: No servers from database, trying config fallback for realm ${realmId}`);
+        const realmBinding = this.mcpConfigLoader.getRealmBinding(realmId);
+        console.log(`🔍 MCP: Config realm binding for ${realmId}:`, realmBinding);
+        if (realmBinding && realmBinding.servers) {
+          realmServers = realmBinding.servers;
+          console.log(`🔍 MCP: Using config servers:`, realmServers);
+        }
+      }
+
+      console.log(`🔍 MCP: Final realmServers array:`, realmServers);
+      if (realmServers.length === 0) {
         throw new Error(
-          `No MCP binding for elemental ${agentId} in realm ${realmId}`
+          `No MCP servers configured for realm ${realmId}. ` +
+          `Add MCP servers to the realm via the UI or config file.`
         );
       }
 
-      // 6. Validate tool access in binding
-      if (!binding.allowedTools.includes(toolName) &&
-          !binding.allowedTools.includes('*')) {
+      // 5. Find which server provides this tool (with wildcard support)
+      let targetServerId: string | null = null;
+      let targetServerConfig: any = null;
+
+      for (const serverId of realmServers) {
+        const serverConfig = this.mcpConfigLoader.getServer(serverId);
+        if (serverConfig) {
+          // Check if tool is available (support wildcards)
+          const toolAvailable = serverConfig.tools.some((toolPattern: string) => {
+            if (toolPattern === '*') {
+              return true; // Wildcard matches all tools
+            }
+            if (toolPattern.includes('*')) {
+              // Pattern matching (e.g., "get_*", "*_commit")
+              const regex = new RegExp('^' + toolPattern.replace(/\*/g, '.*') + '$');
+              return regex.test(toolName);
+            }
+            return toolPattern === toolName; // Exact match
+          });
+
+          if (toolAvailable) {
+            targetServerId = serverId;
+            targetServerConfig = serverConfig;
+            break;
+          }
+        }
+      }
+
+      if (!targetServerId || !targetServerConfig) {
         throw new Error(
-          `Tool ${toolName} not allowed by MCP binding for elemental ${agentId}`
+          `Tool ${toolName} not available in any MCP server for realm ${realmId}. ` +
+          `Available servers: ${realmServers.join(', ')}`
         );
       }
 
-      // 7. Get server config
-      const serverConfig = this.mcpConfigLoader.getServer(binding.serverId);
-      if (!serverConfig) {
-        throw new Error(`MCP server ${binding.serverId} not found in config`);
-      }
+      // 6. Validate agent has permission using wildcard pattern matching
+      const hasPermission = agent.mcpTools?.some(pattern => {
+        // Support both legacy format ("tool_name") and namespaced format ("server:tool_name")
+        if (pattern.includes(':')) {
+          // Namespaced format: check server and tool pattern
+          const [patternServer, toolPattern] = pattern.split(':', 2);
 
-      // 8. Get service credential from environment
-      const token = this.mcpConfigLoader.getServerToken(binding.serverId);
-      if (!token && serverConfig.authentication.type !== 'none') {
+          if (patternServer !== targetServerId) {
+            return false; // Server doesn't match
+          }
+
+          // Check tool pattern (supports wildcards)
+          if (toolPattern === '*') {
+            return true; // All tools from this server
+          }
+
+          if (toolPattern && toolPattern.includes('*')) {
+            // Wildcard pattern matching
+            const regex = new RegExp('^' + toolPattern.replace(/\*/g, '.*') + '$');
+            return regex.test(toolName);
+          }
+
+          return toolPattern === toolName;
+        } else {
+          // Legacy format: exact tool name match (backward compatibility)
+          return pattern === toolName;
+        }
+      });
+
+      if (!hasPermission) {
         throw new Error(
-          `No token found for MCP server ${binding.serverId}. ` +
-          `Set ${serverConfig.authentication.envVar} in environment.`
+          `Agent ${agent.name || agentId} not authorized for ${targetServerId}:${toolName}. ` +
+          `Agent mcpTools: ${agent.mcpTools?.join(', ') || 'none'}`
         );
       }
 
-      // 9. Get or create HTTP client
-      const clientKey = binding.serverId; // One client per server (service credential)
+      // 7. Get service credential from environment
+      const token = this.mcpConfigLoader.getServerToken(targetServerId);
+      if (!token && targetServerConfig.authentication.type !== 'none') {
+        throw new Error(
+          `No token found for MCP server ${targetServerId}. ` +
+          `Set ${targetServerConfig.authentication.envVar} in environment.`
+        );
+      }
+
+      // 8. Get or create MCP client (HTTP or SSE based on transport)
+      const clientKey = targetServerId; // One client per server (service credential)
       let client = this.mcpClients.get(clientKey);
 
       if (!client) {
-        client = new HttpMCPClient(
-          serverConfig.baseUrl!,
-          token,
-          serverConfig.authentication.header,
-          serverConfig.authentication.prefix
-        );
+        // Create appropriate client based on transport type
+        if (targetServerConfig.transport === 'sse') {
+          console.log(`🔌 Creating SSE MCP client for ${targetServerId}`);
+          client = new SSEMCPClient(
+            targetServerConfig.baseUrl!,
+            token,
+            targetServerConfig.authentication.header,
+            targetServerConfig.authentication.prefix,
+            targetServerConfig.customHeaders || {}
+          );
+        } else {
+          // Default to HTTP transport
+          console.log(`🔌 Creating HTTP MCP client for ${targetServerId}`);
+          client = new HttpMCPClient(
+            targetServerConfig.baseUrl!,
+            token,
+            targetServerConfig.authentication.header,
+            targetServerConfig.authentication.prefix
+          );
+        }
         this.mcpClients.set(clientKey, client);
       }
 
-      // 10. Call MCP tool
+      // 9. Strip server prefix from tool name before sending to MCP server
+      // Tool names come in as "github:get_commit" but MCP servers expect just "get_commit"
+      const actualToolName = toolName.includes(':')
+        ? toolName.split(':')[1]!
+        : toolName;
+
       console.log(
-        `🌐 MCP Routing: agent=${agentId}, tool=${toolName}, server=${binding.serverId}`
+        `🌐 MCP Routing: agent=${agent.name || agentId}, tool=${targetServerId}:${actualToolName}, realm=${realmId}`
       );
 
-      const result = await client.callTool(toolName, params);
+      const result = await client.callTool(actualToolName, params);
 
-      console.log(`✅ MCP tool ${toolName} completed for agent ${agentId}`);
+      console.log(`✅ MCP tool ${targetServerId}:${toolName} completed for agent ${agent.name || agentId}`);
       return result;
 
     } catch (error) {

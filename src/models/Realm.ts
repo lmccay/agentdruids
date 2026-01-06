@@ -199,7 +199,12 @@ export interface Realm extends BaseEntity {
   
   // Configuration and policies
   configuration: RealmConfiguration;
-  
+
+  // MCP Server Access
+  // Array of MCP server IDs that this realm has access to
+  // Example: ["github", "jira", "slack"]
+  mcpServers?: string[];
+
   // Agent management
   agents: AgentId[];
   agentLimits: {

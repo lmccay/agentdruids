@@ -2,6 +2,7 @@ import { v4 as uuidv4 } from 'uuid';
 import fs from 'fs/promises';
 import path from 'path';
 import { AgentService } from './AgentService';
+import { RealmService } from './RealmService';
 import { KnowledgeService } from './KnowledgeService';
 import { OpenAIClient, OpenAIChatRequest, createDefaultOpenAIConfig } from './OpenAIClient';
 import { OllamaClient, ChatRequest, createDefaultOllamaConfig } from './OllamaClient';
@@ -93,18 +94,24 @@ export interface OrchestrationStep {
   stepNumber: number;
   description: string;
   agentId: string;
-  actionType: 'travel' | 'delegate' | 'message' | 'collect' | 'synthesize' | 'travel_and_collaborate';
+  actionType: 'travel' | 'delegate' | 'message' | 'collect' | 'synthesize' | 'travel_and_collaborate' | 'execute_task';
   parameters: {
     realmId?: string;
     realmName?: string;
     targetAgentId?: string;
     taskDescription?: string;
+    taskPrompt?: string;
     contentReferences?: string[]; // References to previous step outputs
     requiresPrevious?: string[];
     elementals?: Array<{
       agentId: string;
       name: string;
       domain: string;
+    }>;
+    collaborationTargets?: Array<{
+      agentId: string;
+      agentName: string;
+      role: string;
     }>;
     collaborationPrompt?: string;
     expectedDeliverable?: string;
@@ -146,6 +153,7 @@ export class CoordinationService {
   private sessions: Map<string, CoordinationSession> = new Map();
   private coordinators: Map<string, Coordinator> = new Map();
   private agentService: AgentService | null = null;
+  private realmService: RealmService | null = null;
   // private knowledgeService: KnowledgeService | null = null;
   private openaiClient: OpenAIClient | null = null;
   private ollamaClient: OllamaClient;
@@ -168,6 +176,13 @@ export class CoordinationService {
    */
   setAgentService(agentService: AgentService): void {
     this.agentService = agentService;
+  }
+
+  /**
+   * Configure RealmService after construction
+   */
+  setRealmService(realmService: RealmService): void {
+    this.realmService = realmService;
   }
 
   /**
@@ -270,40 +285,119 @@ export class CoordinationService {
   private async createOrchestrationPlan(session: CoordinationSession): Promise<OrchestrationPlan> {
     if (!this.agentService) throw new Error('AgentService not configured');
 
-    // Built-in coordinator orchestrates, but assigns a druid to do the actual travel and collaboration
-    const druid = await this.findAvailableDruid();
-    if (!druid) {
-      throw new Error('No druid agents available for orchestration');
+    console.log(`🎯 Coordinator ${session.coordinatorId} creating orchestration plan for ${session.participantIds.length} participants`);
+
+    // Get detailed agent and realm information to help LLM make informed decisions
+    const participantDetails = await Promise.all(
+      session.participantIds.map(async (id) => {
+        try {
+          const agent = await this.agentService!.getAgent(id);
+          let realmInfo = '';
+
+          if (agent.realmAccess?.boundRealmId) {
+            // Elemental bound to a realm
+            try {
+              const realm = await this.realmService?.getRealm(agent.realmAccess.boundRealmId);
+              realmInfo = ` (Elemental bound to realm: ${realm?.name || 'unknown'}, ID: ${agent.realmAccess.boundRealmId})`;
+            } catch (e) {
+              realmInfo = ` (Elemental bound to realm ID: ${agent.realmAccess.boundRealmId})`;
+            }
+          } else if (agent.type === 'druid') {
+            realmInfo = ' (Druid - can travel between realms)';
+          }
+
+          return `- ${agent.name} (ID: ${id})${realmInfo} - ${agent.specialization?.domain || 'general'}`;
+        } catch (error) {
+          return `- ${id} (agent not found)`;
+        }
+      })
+    );
+
+    // Get all available realms
+    let realmsList = '';
+    if (this.realmService) {
+      try {
+        const realms = await this.realmService.listRealms();
+        realmsList = realms.map(realm =>
+          `- ${realm.name} (ID: ${realm.id})`
+        ).join('\n');
+      } catch (error) {
+        console.warn('Failed to load realms for orchestration planning:', error);
+      }
     }
 
-    console.log(`🎯 Coordinator ${session.coordinatorId} assigning druid ${druid.name} (${druid.agentId}) for travel and collaboration`);
+    const coordinatorPrompt = `You are the built-in coordinator orchestrating a collaboration scenario.
 
-    const coordinatorPrompt = `Create simple coordination instructions for this scenario:
+IMPORTANT CONSTRAINT: You can ONLY assign tasks to DRUID agents. You CANNOT directly assign tasks to ELEMENTAL agents.
+- DRUIDS can travel between realms and collaborate with agents in those realms
+- ELEMENTALS are bound to specific realms and can only be accessed by Druids who travel to their realm
+
+SCENARIO:
 ${session.scenarioPrompt}
 
-Participants: ${session.participantIds.join(', ')}
+AVAILABLE PARTICIPANTS:
+${participantDetails.join('\n')}
 
-Create ONE instruction step. Output as JSON:
+AVAILABLE REALMS:
+${realmsList}
+
+ORCHESTRATION GUIDELINES:
+- Analyze the scenario to identify distinct tasks
+- Create ONE instruction step for EACH distinct task (not just one step total)
+- If the scenario mentions sequential work (e.g., "then", "after", "next"), create multiple steps
+- ONLY assign tasks to DRUID participants (never directly to Elementals)
+- For each task that requires Elemental expertise:
+  * Assign the task to a DRUID
+  * Specify which ELEMENTALS in the target realm the Druid should collaborate with
+  * The Druid will travel to the realm and work with those Elementals
+- Match realm names from the scenario to the available realms listed above
+- Use the EXACT realm ID from the list above
+
+Create instruction steps as JSON:
 {
   "instructions": [
     {
       "stepNumber": 1,
       "action": "travel_and_collaborate",
-      "realmId": "d92bab7c-8183-42ce-9c64-062f8c5acba0",
-      "realmName": "a galaxy far, far away",
-      "elementals": [
+      "assignedDruidId": "<DRUID agent ID from AVAILABLE PARTICIPANTS>",
+      "assignedDruidName": "<DRUID agent name>",
+      "realmId": "<exact UUID from AVAILABLE REALMS list>",
+      "realmName": "<exact name from AVAILABLE REALMS list>",
+      "collaborationTargets": [
         {
-          "agentId": "lucas",
-          "name": "Lucas", 
-          "domain": "star wars"
+          "agentId": "<ELEMENTAL or DRUID agent ID to collaborate with>",
+          "agentName": "<agent name>",
+          "role": "<what this agent contributes>"
         }
       ],
-      "collaborationPrompt": "Create content based on the scenario above",
-      "expectedDeliverable": "Creative content",
-      "publishKey": "content"
+      "taskPrompt": "<specific task for the Druid - describe what they should achieve through collaboration>",
+      "expectedDeliverable": "Task output",
+      "publishKey": "step1_content",
+      "requiresPrevious": []
+    },
+    {
+      "stepNumber": 2,
+      "action": "travel_and_collaborate",
+      "assignedDruidId": "<DRUID agent ID for second task>",
+      "assignedDruidName": "<DRUID agent name>",
+      "realmId": "<realm UUID>",
+      "realmName": "<realm name>",
+      "collaborationTargets": [
+        {
+          "agentId": "<agent to collaborate with, if any>",
+          "agentName": "<agent name>",
+          "role": "<contribution>"
+        }
+      ],
+      "taskPrompt": "<task description - can reference step 1 output using get_step_content tool>",
+      "expectedDeliverable": "Final output",
+      "publishKey": "step2_content",
+      "requiresPrevious": [1]
     }
   ]
-}`;
+}
+
+CRITICAL: Only assign tasks to DRUIDs. If an Elemental's expertise is needed, assign a Druid to collaborate with that Elemental in their realm.`;
 
     console.log(`🔍 Creating druid orchestration plan with LLM...`);
     
@@ -339,35 +433,42 @@ Create ONE instruction step. Output as JSON:
       throw new Error(`Failed to create orchestration plan: ${error}`);
     }
 
-    // Create orchestration steps for the druid
+    // Create orchestration steps from coordinator's plan
     console.log(`🔍 Creating orchestration steps from ${planData.instructions.length} instructions`);
-    
+
     const steps: OrchestrationStep[] = planData.instructions.map((instruction: any, index: number) => {
       console.log(`🔍 Processing instruction ${index + 1}:`, JSON.stringify(instruction, null, 2));
-      
-      if (!instruction.elementals || !Array.isArray(instruction.elementals)) {
-        console.error(`❌ Invalid instruction structure at index ${index}: missing or invalid elementals array`);
-        throw new Error(`Invalid instruction structure at index ${index}: elementals must be an array`);
+
+      if (!instruction.assignedDruidId) {
+        console.error(`❌ Invalid instruction structure at index ${index}: missing assignedDruidId`);
+        throw new Error(`Invalid instruction structure at index ${index}: assignedDruidId is required`);
       }
-      
+
+      // Validate that assigned agent is actually a Druid
+      const isDruid = session.participantIds.includes(instruction.assignedDruidId);
+      if (!isDruid) {
+        console.warn(`⚠️ Warning: assignedDruidId ${instruction.assignedDruidId} not found in participants`);
+      }
+
+      const collabTargets = instruction.collaborationTargets || [];
       const step = {
         stepId: `${session.id}-step-${instruction.stepNumber}`,
         stepNumber: instruction.stepNumber,
-        description: `Travel to ${instruction.realmName} and collaborate with ${instruction.elementals.map((e: any) => e.name).join(', ')}`,
-        agentId: druid.agentId,
+        description: `${instruction.assignedDruidName || instruction.assignedDruidId} travels to ${instruction.realmName} and collaborates with ${collabTargets.map((t: any) => t.agentName).join(', ')}`,
+        agentId: instruction.assignedDruidId,
         actionType: 'travel_and_collaborate',
         parameters: {
           realmId: instruction.realmId,
           realmName: instruction.realmName,
-          elementals: instruction.elementals,
-          collaborationPrompt: instruction.collaborationPrompt,
+          collaborationTargets: instruction.collaborationTargets,
+          taskPrompt: instruction.taskPrompt,
           expectedDeliverable: instruction.expectedDeliverable,
           publishKey: instruction.publishKey,
           requiresPrevious: instruction.requiresPrevious || []
         },
         status: 'pending'
       };
-      
+
       console.log(`✅ Created step ${index + 1}:`, JSON.stringify(step, null, 2));
       return step;
     });
@@ -482,6 +583,10 @@ Create ONE instruction step. Output as JSON:
   private async executeOrchestrationStep(step: OrchestrationStep, context: string): Promise<string> {
     if (!this.agentService) throw new Error('AgentService not configured');
 
+    if (step.actionType === 'execute_task') {
+      return await this.executeTaskStep(step, context);
+    }
+
     if (step.actionType === 'travel_and_collaborate') {
       return await this.executeTravelAndCollaborate(step, context);
     }
@@ -502,76 +607,146 @@ Create ONE instruction step. Output as JSON:
   }
 
   /**
-   * Execute travel and collaboration step for druid
+   * Execute a task step - coordinator directly assigns task to participant
    */
-  private async executeTravelAndCollaborate(step: OrchestrationStep, _context: string): Promise<string> {
+  private async executeTaskStep(step: OrchestrationStep, context: string): Promise<string> {
+    if (!this.agentService) throw new Error('AgentService not configured');
+
+    console.log(`🎯 Executing task step ${step.stepNumber}: ${step.description}`);
+    console.log(`🔍 Assigned to agent: ${step.agentId}`);
+    console.log(`🔍 Realm: ${step.parameters.realmName} (${step.parameters.realmId})`);
+
+    // Get the assigned agent
+    const agent = await this.agentService.getAgent(step.agentId);
+    if (!agent) {
+      throw new Error(`Agent ${step.agentId} not found`);
+    }
+
+    // Check if agent needs to travel to the realm
+    const needsTravel = agent.type === 'druid' &&
+                       agent.realmAccess?.currentRealmId !== step.parameters.realmId;
+
+    if (needsTravel) {
+      console.log(`🚶 Agent ${agent.name} needs to travel to realm ${step.parameters.realmName}`);
+      // Travel first by asking agent to use the travel tool
+      try {
+        const travelPrompt = `Travel to realm "${step.parameters.realmName}" (realm ID: ${step.parameters.realmId}). Use the travel_to_realm tool.`;
+        await this.agentService.executeAgentPrompt(step.agentId, {
+          prompt: travelPrompt,
+          collaborationContext: {
+            scenarioName: 'Orchestrated Coordination',
+            scenarioType: 'realm_travel',
+            agentRole: 'traveler'
+          }
+        });
+        console.log(`✅ Agent ${agent.name} traveled to ${step.parameters.realmName}`);
+      } catch (error) {
+        console.error(`❌ Travel failed:`, error);
+        throw new Error(`Failed to travel to realm: ${error}`);
+      }
+    }
+
+    // Build the task prompt with context from previous steps
+    let fullPrompt = '';
+    if (context && context !== "This is the first step in the coordination plan.") {
+      fullPrompt += `${context}\n\n`;
+    }
+    fullPrompt += `${step.parameters.taskPrompt}`;
+
+    console.log(`📝 Executing task for agent ${agent.name}...`);
+
+    // Execute the task
+    const result = await this.agentService.executeAgentPrompt(step.agentId, {
+      prompt: fullPrompt,
+      collaborationContext: {
+        scenarioName: 'Orchestrated Coordination',
+        scenarioType: 'coordinated_task',
+        agentRole: 'contributor'
+      }
+    });
+
+    console.log(`✅ Task completed by ${agent.name}`);
+    return result.response;
+  }
+
+  /**
+   * Execute travel and collaboration step for druid
+   * Druid travels to realm and collaborates with specified agents (respecting realm boundaries)
+   */
+  private async executeTravelAndCollaborate(step: OrchestrationStep, context: string): Promise<string> {
     if (!this.agentService) throw new Error('AgentService not configured');
 
     console.log(`🚀 Starting travel and collaborate for step: ${step.stepId}`);
     console.log(`🔍 Step parameters:`, JSON.stringify(step.parameters, null, 2));
 
-    // Build prompt for druid that includes collaboration instructions
-    let prompt = `URGENT: You must execute TWO mandatory tool calls in sequence. Do not stop after the first one.
+    // Get the Druid agent
+    const druid = await this.agentService.getAgent(step.agentId);
+    if (!druid) {
+      throw new Error(`Druid agent ${step.agentId} not found`);
+    }
 
-REQUIRED ACTIONS:
-1. Travel to realm: ${step.parameters.realmId}  
-2. Delegate task to: ${step.parameters.elementals?.[0]?.agentId || 'unknown'}
+    // Check if druid needs to travel
+    const needsTravel = druid.realmAccess?.currentRealmId !== step.parameters.realmId;
 
-EXACT TOOL CALLS TO EXECUTE:
-TOOL_CALL: {"tool": "travel_to_realm", "params": {"target_realm": "${step.parameters.realmId}"}}
-TOOL_CALL: {"tool": "assign_simple_task", "params": {"agent_id": "${step.parameters.elementals?.[0]?.agentId || 'unknown'}", "task": "${step.parameters.collaborationPrompt}"}}
+    // Build collaboration instructions
+    const collaborationTargets = step.parameters.collaborationTargets || [];
+    const hasCollaborators = collaborationTargets.length > 0;
 
-CRITICAL: Execute BOTH tool calls. Do not stop after traveling.`;
+    let prompt = '';
 
-    console.log(`🎯 Executing travel and collaborate step for druid: ${step.description}`);
-    console.log(`📝 Full prompt being sent to druid:`, prompt);
+    // Add context from previous steps if available
+    if (context && context !== "This is the first step in the coordination plan.") {
+      prompt += `${context}\n\n`;
+    }
+
+    // Build a natural task prompt with context, letting the agent decide which tools to use
+    prompt += `Task: ${step.parameters.taskPrompt}\n\n`;
+
+    // Add context about the situation without being prescriptive
+    if (needsTravel) {
+      prompt += `Note: You need to travel to realm "${step.parameters.realmName}" (ID: ${step.parameters.realmId}) to complete this task.\n`;
+    }
+
+    if (hasCollaborators) {
+      const collabList = collaborationTargets.map(t => `${t.agentName} (${t.agentId}) specializes in ${t.role}`).join('; ');
+      prompt += `Available collaborators in this realm: ${collabList}\n`;
+    }
+
+    prompt += `\nUse your available tools as needed to accomplish this task.`;
+
+    console.log(`🎯 Executing step for druid ${druid.name}: ${step.description}`);
+    console.log(`📝 Prompt:`, prompt);
 
     const result = await this.agentService.executeAgentPrompt(step.agentId, {
       prompt,
       collaborationContext: {
         scenarioName: 'Orchestrated Coordination',
-        scenarioType: 'druid_collaboration',
-        agentRole: 'traveling_coordinator',
-        usePersonaPrompt: true
+        scenarioType: 'druid_coordination',
+        agentRole: 'druid_coordinator'
       }
     });
 
-    console.log(`✅ Druid execution result:`, result.response);
-    
-    // Validate that both travel and delegation occurred
-    const hasTravel = result.response.includes('travel_to_realm') || result.response.includes('travel_time');
-    const hasDelegation = result.response.includes('assign_simple_task') || result.response.includes('DELEGATION') || result.response.includes('delegated');
-    
-    if (!hasTravel) {
-      console.warn(`⚠️ Travel operation not detected in druid response`);
-    }
-    if (!hasDelegation) {
-      console.warn(`⚠️ Task delegation not detected in druid response - coordination may be incomplete`);
-    }
-    
-    console.log(`🔍 Step validation - Travel: ${hasTravel ? '✅' : '❌'}, Delegation: ${hasDelegation ? '✅' : '❌'}`);
-    
+    console.log(`✅ Druid ${druid.name} completed step`);
     return result.response;
   }
 
   /**
-   * Find the druid agent that can travel between realms
-   */
-  /**
    * Find an available druid agent for orchestration
+   * NOTE: Currently unused as coordinator handles orchestration directly
    */
+  /*
   private async findAvailableDruid(): Promise<{agentId: string, name: string} | null> {
     if (!this.agentService) return null;
-    
+
     try {
       const agents = await this.agentService.listAgents({ type: 'druid', status: 'active' });
-      
+
       if (agents.length > 0) {
         const druidAgent = agents[0]!; // Use first available druid (we know it exists)
         console.log(`✅ Found available druid agent: ${druidAgent.name} (${druidAgent.id})`);
         return { agentId: druidAgent.id, name: druidAgent.name };
       }
-      
+
       console.warn(`⚠️ No active druid agents found`);
       return null;
     } catch (error) {
@@ -579,6 +754,7 @@ CRITICAL: Execute BOTH tool calls. Do not stop after traveling.`;
       return null;
     }
   }
+  */
 
   /**
    * Get elementals organized by realm - only from session participants
@@ -709,8 +885,9 @@ CRITICAL: Execute BOTH tool calls. Do not stop after traveling.`;
     }
     
     // Look for simple task assignment results in the final step
-    const simpleTaskMatches = finalStep.output.match(/"completion_type":\s*"simple_assignment"[^}]*"result":\s*"([^"]+(?:\\.[^"]*)*)"/) || 
-                             finalStep.output.match(/"result":\s*"([^"]+(?:\\.[^"]*)*)"[^}]*"completion_type":\s*"simple_assignment"/);
+    // Fixed regex to avoid catastrophic backtracking
+    const simpleTaskMatches = finalStep.output.match(/"completion_type":\s*"simple_assignment"[^}]*"result":\s*"((?:[^"\\]|\\.)*)"/)||
+                             finalStep.output.match(/"result":\s*"((?:[^"\\]|\\.)*)"[^}]*"completion_type":\s*"simple_assignment"/);
     
     if (simpleTaskMatches && simpleTaskMatches[1]) {
       // Extract and clean the final creative deliverable
@@ -726,8 +903,9 @@ CRITICAL: Execute BOTH tool calls. Do not stop after traveling.`;
     }
     
     // Fallback: Look for delegate_task results in the final step
-    const delegateTaskMatches = finalStep.output.match(/"task_delegated":[^}]*"result":\s*"([^"]+(?:\\.[^"]*)*)"/) ||
-                               finalStep.output.match(/"result":\s*"([^"]+(?:\\.[^"]*)*)"[^}]*"execution_time":\s*\d+\s*\}/);
+    // Fixed regex to avoid catastrophic backtracking
+    const delegateTaskMatches = finalStep.output.match(/"task_delegated":[^}]*"result":\s*"((?:[^"\\]|\\.)*)"/) ||
+                               finalStep.output.match(/"result":\s*"((?:[^"\\]|\\.)*)"[^}]*"execution_time":\s*\d+\s*\}/);
     
     if (delegateTaskMatches && delegateTaskMatches[1]) {
       const finalDeliverable = delegateTaskMatches[1]

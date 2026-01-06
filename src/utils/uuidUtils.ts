@@ -45,7 +45,16 @@ export function stringToUUID(str: string): string {
 export class AgentIdMapper {
   private static stringToUuidMap: Map<string, string> = new Map();
   private static uuidToStringMap: Map<string, string> = new Map();
-  
+
+  /**
+   * Clear all mappings (useful for cache refresh)
+   */
+  static clearMappings(): void {
+    this.stringToUuidMap.clear();
+    this.uuidToStringMap.clear();
+    console.log('🧹 Cleared all AgentIdMapper mappings');
+  }
+
   /**
    * Get or create a UUID for a string ID
    */

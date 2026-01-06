@@ -5,6 +5,7 @@
  */
 
 import { AgentService } from './AgentService';
+import { RealmService } from './RealmService';
 
 // Singleton AgentService instance
 let sharedAgentService: AgentService | null = null;
@@ -16,5 +17,16 @@ export function getSharedAgentService(): AgentService {
   return sharedAgentService;
 }
 
-// Export the shared instance for convenience
+// Singleton RealmService instance
+let sharedRealmService: RealmService | null = null;
+
+export function getSharedRealmService(): RealmService {
+  if (!sharedRealmService) {
+    sharedRealmService = new RealmService();
+  }
+  return sharedRealmService;
+}
+
+// Export the shared instances for convenience
 export const agentService = getSharedAgentService();
+export const realmService = getSharedRealmService();

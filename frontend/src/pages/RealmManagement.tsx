@@ -23,6 +23,7 @@ interface RealmFormData {
     allowExternalAccess: boolean;
     leyLineEndpoint?: string;
   };
+  mcpServers?: string[];
 }
 
 function RealmCard({ 
@@ -78,7 +79,7 @@ function RealmCard({
                 {realm.agents?.length || 0} / {realm.configuration.maxAgents}
               </span>
             </div>
-            
+
             {realm.configuration.leyLineEndpoint && (
               <div>
                 <span className="text-xs font-medium text-gray-500">Ley Line:</span>
@@ -87,17 +88,30 @@ function RealmCard({
                 </span>
               </div>
             )}
-            
+
             <div className="flex items-center justify-between">
               <span className="text-xs font-medium text-gray-500">External Access:</span>
               <span className={`text-xs px-2 py-1 rounded ${
-                realm.configuration.allowExternalAccess 
-                  ? 'bg-green-100 text-green-800' 
+                realm.configuration.allowExternalAccess
+                  ? 'bg-green-100 text-green-800'
                   : 'bg-gray-100 text-gray-800'
               }`}>
                 {realm.configuration.allowExternalAccess ? 'Enabled' : 'Disabled'}
               </span>
             </div>
+
+            {realm.mcpServers && realm.mcpServers.length > 0 && (
+              <div>
+                <span className="text-xs font-medium text-gray-500">MCP Servers:</span>
+                <div className="flex flex-wrap gap-1 mt-1">
+                  {realm.mcpServers.map((serverId) => (
+                    <span key={serverId} className="px-2 py-1 text-xs bg-purple-100 text-purple-800 rounded">
+                      {serverId}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         </div>
         
@@ -173,7 +187,8 @@ function RealmModal({
       maxAgents: realm?.configuration.maxAgents || 10,
       allowExternalAccess: realm?.configuration.allowExternalAccess || false,
       leyLineEndpoint: realm?.configuration.leyLineEndpoint || ''
-    }
+    },
+    mcpServers: realm?.mcpServers || []
   });
 
   // Update form data when realm prop changes
@@ -187,7 +202,8 @@ function RealmModal({
           maxAgents: realm.configuration?.maxAgents || 10,
           allowExternalAccess: realm.configuration?.allowExternalAccess || false,
           leyLineEndpoint: realm.configuration?.leyLineEndpoint || ''
-        }
+        },
+        mcpServers: realm.mcpServers || []
       });
     } else {
       // Reset form for create mode
@@ -199,7 +215,8 @@ function RealmModal({
           maxAgents: 10,
           allowExternalAccess: false,
           leyLineEndpoint: ''
-        }
+        },
+        mcpServers: []
       });
     }
   }, [realm]);
@@ -330,11 +347,11 @@ function RealmModal({
               <input
                 type="url"
                 value={formData.configuration.leyLineEndpoint || ''}
-                onChange={(e) => setFormData({ 
-                  ...formData, 
-                  configuration: { 
-                    ...formData.configuration, 
-                    leyLineEndpoint: e.target.value 
+                onChange={(e) => setFormData({
+                  ...formData,
+                  configuration: {
+                    ...formData.configuration,
+                    leyLineEndpoint: e.target.value
                   }
                 })}
                 placeholder="https://example.com/leyline"
@@ -343,6 +360,42 @@ function RealmModal({
               />
             </div>
           )}
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              MCP Servers
+            </label>
+            <div className="space-y-2 border border-gray-300 rounded-md p-3">
+              {/* Available MCP servers - hardcoded for now, can be fetched from API later */}
+              {['github'].map((serverId) => (
+                <div key={serverId} className="flex items-center">
+                  <input
+                    type="checkbox"
+                    id={`mcp-${serverId}`}
+                    checked={formData.mcpServers?.includes(serverId) || false}
+                    onChange={(e) => {
+                      const currentServers = formData.mcpServers || [];
+                      const newServers = e.target.checked
+                        ? [...currentServers, serverId]
+                        : currentServers.filter(id => id !== serverId);
+                      setFormData({ ...formData, mcpServers: newServers });
+                    }}
+                    className="h-4 w-4 text-primary-600 focus:ring-primary-500 border-gray-300 rounded"
+                    disabled={isReadOnly}
+                  />
+                  <label htmlFor={`mcp-${serverId}`} className="ml-2 block text-sm text-gray-900">
+                    {serverId === 'github' ? 'GitHub MCP Server' : serverId}
+                  </label>
+                </div>
+              ))}
+              {formData.mcpServers?.length === 0 && (
+                <p className="text-xs text-gray-500 italic">No MCP servers selected</p>
+              )}
+            </div>
+            <p className="mt-1 text-xs text-gray-500">
+              Select which MCP servers this realm can access
+            </p>
+          </div>
 
           {realm && mode === 'view' && (
             <div className="bg-gray-50 p-4 rounded-md">

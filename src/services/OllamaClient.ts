@@ -544,32 +544,49 @@ export class OllamaClient {
 
       const decoder = new TextDecoder();
 
-      while (true) {
-        const { done, value } = await reader.read();
-        
-        if (done) {
-          break;
-        }
+      // Timeout for streaming response (5 minutes for long generations)
+      const timeoutMs = 300000;
+      let timeoutHandle: NodeJS.Timeout;
+      const timeoutPromise = new Promise((_, reject) => {
+        timeoutHandle = setTimeout(() => reject(new Error('Ollama streaming timeout after 5 minutes')), timeoutMs);
+      });
 
-        const chunk = decoder.decode(value);
-        const lines = chunk.split('\n').filter(line => line.trim());
+      try {
+        await Promise.race([
+          (async () => {
+            while (true) {
+              const { done, value } = await reader.read();
 
-        for (const line of lines) {
-          try {
-            const parsed = JSON.parse(line);
-            callback(parsed);
-            
-            if (parsed.done) {
-              return;
+              if (done) {
+                break;
+              }
+
+              const chunk = decoder.decode(value);
+              const lines = chunk.split('\n').filter(line => line.trim());
+
+              for (const line of lines) {
+                try {
+                  const parsed = JSON.parse(line);
+                  callback(parsed);
+
+                  if (parsed.done) {
+                    return;
+                  }
+                } catch (error) {
+                  // Skip malformed JSON lines
+                  console.warn('Failed to parse streaming response line:', line);
+                }
+              }
             }
-          } catch (error) {
-            // Skip malformed JSON lines
-            console.warn('Failed to parse streaming response line:', line);
-          }
-        }
+          })(),
+          timeoutPromise
+        ]);
+      } finally {
+        reader.releaseLock();
+        clearTimeout(timeoutHandle!);
       }
-    } finally {
-      clearTimeout(timeout);
+    } catch (error) {
+      throw error;
     }
   }
 

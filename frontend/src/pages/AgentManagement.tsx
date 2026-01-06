@@ -37,6 +37,8 @@ interface AgentFormData {
   decisionMaking: string;
   // Named model configuration
   modelId: string; // Reference to named model like "creative-writer"
+  // MCP tool patterns
+  mcpTools: string[]; // MCP tool patterns with wildcard support (e.g., "github:*", "github:list_*")
 }
 
 function AgentCard({ 
@@ -225,7 +227,9 @@ function AgentModal({
     communicationStyle: agent?.personality?.communicationStyle || 'formal',
     decisionMaking: agent?.personality?.decisionMaking || 'analytical',
     // Named model configuration
-    modelId: agent?.llmConfig?.modelConfigId || 'analytical-researcher' // Default model
+    modelId: agent?.llmConfig?.modelConfigId || 'analytical-researcher', // Default model
+    // MCP tool patterns
+    mcpTools: agent?.mcpTools || []
   });
 
     // Update form data when agent prop changes
@@ -246,7 +250,8 @@ function AgentModal({
         personalityTraits: agent.personality?.traits || [],
         communicationStyle: agent.personality?.communicationStyle || 'formal',
         decisionMaking: agent.personality?.decisionMaking || 'analytical',
-        modelId: agent.llmConfig?.modelConfigId || 'analytical-researcher'
+        modelId: agent.llmConfig?.modelConfigId || 'analytical-researcher',
+        mcpTools: agent.mcpTools || []
       });
     } else {
       // Reset form for create mode
@@ -265,7 +270,8 @@ function AgentModal({
         personalityTraits: ['helpful'], // Default personality traits
         communicationStyle: 'formal',
         decisionMaking: 'analytical',
-        modelId: 'analytical-researcher' // Default model
+        modelId: 'analytical-researcher', // Default model
+        mcpTools: []
       });
     }
   }, [agent]);
@@ -519,6 +525,19 @@ function AgentModal({
                 placeholder="e.g., worldtree://public/docs, agent://team-lead/private"
                 disabled={isReadOnly}
                 helpText="Knowledge sources this agent can access, separated by commas"
+              />
+            </div>
+
+            <div className="mt-4">
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                MCP Tool Patterns
+              </label>
+              <CommaInput
+                value={formData.mcpTools}
+                onChange={(values) => setFormData({ ...formData, mcpTools: values })}
+                placeholder="e.g., github:*, github:list_*, jira:create_issue"
+                disabled={isReadOnly}
+                helpText="MCP tool patterns with wildcard support. Format: server:tool or server:pattern*"
               />
             </div>
 
@@ -840,6 +859,7 @@ export default function AgentManagement() {
         communicationStyle: data.communicationStyle,
         decisionMaking: data.decisionMaking,
         modelId: data.modelId, // Include the selected model profile
+        mcpTools: data.mcpTools, // Include MCP tool patterns
         // Map realm associations using proper realmAccess structure
         realmAccess: (() => {
           if (data.type === 'elemental' && data.boundRealmId) {
@@ -904,6 +924,7 @@ export default function AgentManagement() {
           systemPrompt: data.systemPrompt
         },
         modelId: data.modelId, // Include the selected model profile
+        mcpTools: data.mcpTools, // Include MCP tool patterns
         // Map realm associations using new realmAccess structure
         realmAccess: (() => {
           if (data.type === 'elemental') {

@@ -14,32 +14,37 @@ export class RealmRepository extends BaseRepository<Realm> {
 
   /**
    * Convert Realm entity to database row format
+   * Handles partial realm objects (for updates) by only including defined fields
    */
-  protected entityToRow(realm: Realm): Record<string, any> {
-    return {
-      id: realm.id,
-      name: realm.name,
-      description: realm.description,
-      type: realm.type,
-      status: realm.status,
-      configuration: JSON.stringify(realm.configuration || {}),
-      agents: JSON.stringify(realm.agents || []),
-      agent_limits: JSON.stringify(realm.agentLimits || {}),
-      ley_line_connections: JSON.stringify(realm.leyLineConnections || []),
-      usage: JSON.stringify(realm.usage || {}),
-      health: JSON.stringify(realm.health || {}),
-      security: JSON.stringify(realm.security || {}),
-      tags: JSON.stringify(realm.tags || []),
-      metadata: JSON.stringify(realm.metadata || {}),
-      parent_realm_id: realm.parentRealmId || null,
-      child_realm_ids: JSON.stringify(realm.childRealmIds || []),
-      lifecycle: JSON.stringify(realm.lifecycle || {}),
-      created_by: realm.createdBy,
-      created_at: realm.createdAt,
-      updated_at: realm.updatedAt,
-      last_modified_by: realm.lastModifiedBy,
-      version: realm.version || 1
-    };
+  protected entityToRow(realm: Partial<Realm>): Record<string, any> {
+    const row: Record<string, any> = {};
+
+    // Only include fields that are actually defined
+    if (realm.id !== undefined) row['id'] = realm.id;
+    if (realm.name !== undefined) row['name'] = realm.name;
+    if (realm.description !== undefined) row['description'] = realm.description;
+    if (realm.type !== undefined) row['type'] = realm.type;
+    if (realm.status !== undefined) row['status'] = realm.status;
+    if (realm.configuration !== undefined) row['configuration'] = JSON.stringify(realm.configuration || {});
+    if (realm.agents !== undefined) row['agents'] = JSON.stringify(realm.agents || []);
+    if (realm.agentLimits !== undefined) row['agent_limits'] = JSON.stringify(realm.agentLimits || {});
+    if (realm.leyLineConnections !== undefined) row['ley_line_connections'] = JSON.stringify(realm.leyLineConnections || []);
+    if (realm.mcpServers !== undefined) row['mcp_servers'] = JSON.stringify(realm.mcpServers || []);
+    if (realm.usage !== undefined) row['usage'] = JSON.stringify(realm.usage || {});
+    if (realm.health !== undefined) row['health'] = JSON.stringify(realm.health || {});
+    if (realm.security !== undefined) row['security'] = JSON.stringify(realm.security || {});
+    if (realm.tags !== undefined) row['tags'] = JSON.stringify(realm.tags || []);
+    if (realm.metadata !== undefined) row['metadata'] = JSON.stringify(realm.metadata || {});
+    if (realm.parentRealmId !== undefined) row['parent_realm_id'] = realm.parentRealmId || null;
+    if (realm.childRealmIds !== undefined) row['child_realm_ids'] = JSON.stringify(realm.childRealmIds || []);
+    if (realm.lifecycle !== undefined) row['lifecycle'] = JSON.stringify(realm.lifecycle || {});
+    if (realm.createdBy !== undefined) row['created_by'] = realm.createdBy;
+    if (realm.createdAt !== undefined) row['created_at'] = realm.createdAt;
+    if (realm.updatedAt !== undefined) row['updated_at'] = realm.updatedAt;
+    if (realm.lastModifiedBy !== undefined) row['last_modified_by'] = realm.lastModifiedBy;
+    if (realm.version !== undefined) row['version'] = realm.version || 1;
+
+    return row;
   }
 
   /**
@@ -56,6 +61,7 @@ export class RealmRepository extends BaseRepository<Realm> {
       agents: safeJsonParse(row['agents'], []),
       agentLimits: safeJsonParse(row['agent_limits'], {}),
       leyLineConnections: safeJsonParse(row['ley_line_connections'], []),
+      mcpServers: safeJsonParse(row['mcp_servers'], []),
       usage: safeJsonParse(row['usage'], {}),
       health: safeJsonParse(row['health'], {}),
       security: safeJsonParse(row['security'], {}),
