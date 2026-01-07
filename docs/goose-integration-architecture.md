@@ -21,11 +21,11 @@ This document outlines the technical architecture for integrating external Goose
 │               │                   │                    │        │
 ├───────────────┼───────────────────┼────────────────────┼────────┤
 │   Realm A     │     Realm B       │     Realm C        │        │
-│  ┌────────┐   │    ┌────────┐    │   ┌────────┐       │        │
-│  │ Goose  │   │    │ Goose  │    │   │ In-Proc│       │        │
-│  │ Agent  │   │    │ Agent  │    │   │ Druid  │       │        │
-│  │(GitHub)│   │    │(Slack) │    │   │(Data)  │       │        │
-│  └────────┘   │    └────────┘    │   └────────┘       │        │
+│  ┌────────┐   │    ┌────────┐     │   ┌────────┐       │        │
+│  │ Goose  │   │    │ Goose  │     │   │ In-Proc│       │        │
+│  │ Agent  │   │    │ Agent  │     │   │ Druid  │       │        │
+│  │(GitHub)│   │    │(Slack) │     │   │(Data)  │       │        │
+│  └────────┘   │    └────────┘     │   └────────┘       │        │
 │  External     │    External       │   Internal         │        │
 └───────────────┴───────────────────┴────────────────────┴────────┘
          ▲                   ▲                    ▲
@@ -348,14 +348,14 @@ agent.mcpTools = response.result.tools.map(t => t.name);
 │                  Druids Coordination Service                    │
 │  ┌──────────────────────────────────────────────────────────┐   │
 │  │  In-Proc Agent (Coordinator)                             │   │
-│  │    - Calls delegate_task("goose-agent-1", taskDetails)  │   │
+│  │    - Calls delegate_task("goose-agent-1", taskDetails)   │   │
 │  └──────────────────────┬───────────────────────────────────┘   │
 │                         │                                       │
 │                         ▼                                       │
 │  ┌──────────────────────────────────────────────────────────┐   │
 │  │  ExternalAgentBridge                                     │   │
-│  │    - Translates delegate_task → MCP tools/call          │   │
-│  │    - Manages session state for external agents          │   │
+│  │    - Translates delegate_task → MCP tools/call           │   │
+│  │    - Manages session state for external agents           │   │
 │  └──────────────────────┬───────────────────────────────────┘   │
 └─────────────────────────┼───────────────────────────────────────┘
                           │ MCP HTTP/SSE
@@ -365,13 +365,13 @@ agent.mcpTools = response.result.tools.map(t => t.name);
 │  ┌──────────────────────────────────────────────────────────┐   │
 │  │  MCP Server (port 3100)                                  │   │
 │  │    - Receives MCP tools/call requests                    │   │
-│  │    - Exposes tools: execute_task, check_status          │   │
+│  │    - Exposes tools: execute_task, check_status           │   │
 │  └──────────────────────┬───────────────────────────────────┘   │
 │                         │                                       │
 │                         ▼                                       │
 │  ┌──────────────────────────────────────────────────────────┐   │
 │  │  Goose Autonomous Execution                              │   │
-│  │    - Executes task with full Goose capabilities         │   │
+│  │    - Executes task with full Goose capabilities          │   │
 │  │    - Returns results via MCP response                    │   │
 │  └──────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────┘
@@ -798,12 +798,12 @@ Druids frontend fetches UI components from multiple agents and composes them int
 ├─────────────────────────────────────────────────────────────────┤
 │  Step 1: GitHub PR Review                   [goose-github]      │
 │  ┌────────────────────────────────────────────────────────────┐ │
-│  │ <iframe src="goose-agent-1:3100/ui/pr-review" />          │ │
+│  │ <iframe src="goose-agent-1:3100/ui/pr-review" />           │ │
 │  │   - 15 files changed                                       │ │
 │  │   - 3 security issues found                                │ │
-│  │   [View Details] [Approve] [Request Changes]              │ │
+│  │   [View Details] [Approve] [Request Changes]               │ │
 │  └────────────────────────────────────────────────────────────┘ │
-│                                                                  │
+│                                                                 │
 │  Step 2: Security Analysis                  [security-element]  │
 │  ┌────────────────────────────────────────────────────────────┐ │
 │  │ <SecurityMetrics from="step-1" />                          │ │
@@ -811,10 +811,10 @@ Druids frontend fetches UI components from multiple agents and composes them int
 │  │   - XSS vulnerability: Low                                 │ │
 │  │   [Mitigate] [Ignore] [Escalate]                           │ │
 │  └────────────────────────────────────────────────────────────┘ │
-│                                                                  │
+│                                                                 │
 │  Step 3: Notify Team                        [goose-slack]       │
 │  ┌────────────────────────────────────────────────────────────┐ │
-│  │ <iframe src="goose-agent-2:3100/ui/slack-notification" /> │ │
+│  │ <iframe src="goose-agent-2:3100/ui/slack-notification" />  │ │
 │  │   Message drafted, awaiting approval                       │ │
 │  │   [Edit Message] [Send Now] [Schedule]                     │ │
 │  └────────────────────────────────────────────────────────────┘ │
