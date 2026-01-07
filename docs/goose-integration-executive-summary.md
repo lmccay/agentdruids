@@ -12,7 +12,7 @@
 ┌─────────────────────────────────────────────────────────────────┐
 │                    DRUIDS ORCHESTRATION LAYER                   │
 │                   "The Project Manager"                         │
-│                                                                  │
+│                                                                 │
 │   • Coordinates multiple agents across domains                  │
 │   • Plans and delegates complex workflows                       │
 │   • Synthesizes results from specialized agents                 │
@@ -20,7 +20,7 @@
 └──────────────┬─────────────────┬────────────────┬───────────────┘
                │                 │                │
                ▼                 ▼                ▼
-┌──────────────────────┐  ┌──────────────┐  ┌──────────────────┐
+┌──────────────────────┐  ┌─────────────-─┐  ┌─────────────────┐
 │   GOOSE AGENT #1     │  │ GOOSE AGENT #2│  │ IN-PROC AGENTS  │
 │   "The Worker"       │  │ "The Worker"  │  │ "Specialists"   │
 │                      │  │               │  │                 │
