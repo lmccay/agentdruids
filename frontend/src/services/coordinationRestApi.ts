@@ -154,12 +154,63 @@ class CoordinationRestAPI {
           contentType: 'text'
         };
       }
-      
+
       return null;
     } catch (error) {
       console.error('Failed to get content details:', error);
       return null;
     }
+  }
+
+  // Action methods for completed sessions
+  async rerunExecution(sessionId: string) {
+    const response = await fetch(`${this.baseURL}/coordinators/sessions/${sessionId}/rerun`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      }
+    });
+
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.details || error.error || `Failed to rerun session: ${response.statusText}`);
+    }
+
+    return response.json();
+  }
+
+  async deleteExecution(sessionId: string) {
+    const response = await fetch(`${this.baseURL}/coordinators/sessions/${sessionId}`, {
+      method: 'DELETE'
+    });
+
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.details || error.error || `Failed to delete session: ${response.statusText}`);
+    }
+
+    // 204 No Content response won't have a body
+    if (response.status === 204) {
+      return { success: true };
+    }
+
+    return response.json();
+  }
+
+  async purgeExecutionResults(sessionId: string) {
+    const response = await fetch(`${this.baseURL}/coordinators/sessions/${sessionId}/results`, {
+      method: 'DELETE',
+      headers: {
+        'Content-Type': 'application/json'
+      }
+    });
+
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.details || error.error || `Failed to purge session results: ${response.statusText}`);
+    }
+
+    return response.json();
   }
 }
 

@@ -1160,7 +1160,7 @@ CRITICAL: Only assign tasks to DRUIDs. If an Elemental's expertise is needed, as
   listSessions(status?: string): any[] {
     const sessions = Array.from(this.sessions.values());
     const filteredSessions = status ? sessions.filter(session => session.status === status) : sessions;
-    
+
     // Create serializable copies without circular references
     return filteredSessions.map(session => ({
       id: session.id,
@@ -1175,6 +1175,112 @@ CRITICAL: Only assign tasks to DRUIDs. If an Elemental's expertise is needed, as
       participantTasks: session.participantTasks || [],
       finalResult: session.finalResult
     }));
+  }
+
+  /**
+   * Rerun a coordination session with the same configuration
+   */
+  async rerunSession(sessionId: string): Promise<{ newSessionId: string; newSession: any }> {
+    const originalSession = this.sessions.get(sessionId);
+
+    if (!originalSession) {
+      throw new Error(`Session ${sessionId} not found`);
+    }
+
+    if (originalSession.status !== 'completed' && originalSession.status !== 'failed' && originalSession.status !== 'timeout') {
+      throw new Error('Can only rerun completed, failed, or timed out sessions');
+    }
+
+    // Create new session with same configuration
+    const newSessionId = `session-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    const newSession: CoordinationSession = {
+      id: newSessionId,
+      coordinatorId: originalSession.coordinatorId,
+      scenarioPrompt: originalSession.scenarioPrompt,
+      participantIds: [...originalSession.participantIds],
+      status: 'pending',
+      startedAt: new Date(),
+      timeoutMinutes: originalSession.timeoutMinutes,
+      coordinationStyle: originalSession.coordinationStyle,
+      participantTasks: [],
+      sessionAgentManager: new SessionAgentManagerImpl(newSessionId),
+      sessionContentManager: new SessionContentManagerImpl({
+        baseDirectory: `./data/published_content/sessions`,
+        useSessionDirectories: true
+      })
+    };
+
+    this.sessions.set(newSessionId, newSession);
+
+    // Start the coordination asynchronously
+    const coordinator = this.getBuiltInCoordinator();
+    this.executeSimpleCoordination(newSession, coordinator).catch((error: Error) => {
+      console.error('Error executing rerun session:', error);
+      newSession.status = 'failed';
+    });
+
+    return {
+      newSessionId,
+      newSession: {
+        id: newSession.id,
+        coordinatorId: newSession.coordinatorId,
+        scenarioPrompt: newSession.scenarioPrompt,
+        participantIds: newSession.participantIds,
+        status: newSession.status,
+        startedAt: newSession.startedAt?.toISOString(),
+        timeoutMinutes: newSession.timeoutMinutes,
+        coordinationStyle: newSession.coordinationStyle
+      }
+    };
+  }
+
+  /**
+   * Delete a coordination session
+   */
+  async deleteSession(sessionId: string): Promise<void> {
+    const session = this.sessions.get(sessionId);
+
+    if (!session) {
+      throw new Error(`Session ${sessionId} not found`);
+    }
+
+    if (session.status === 'in_progress' || session.status === 'pending') {
+      throw new Error('Cannot delete running or pending session. Please wait for it to complete or fail.');
+    }
+
+    this.sessions.delete(sessionId);
+  }
+
+  /**
+   * Purge session results while keeping the session record
+   */
+  async purgeSessionResults(sessionId: string): Promise<any> {
+    const session = this.sessions.get(sessionId);
+
+    if (!session) {
+      throw new Error(`Session ${sessionId} not found`);
+    }
+
+    if (session.status === 'in_progress' || session.status === 'pending') {
+      throw new Error('Cannot purge results of running or pending session');
+    }
+
+    // Clear results while keeping metadata
+    delete session.finalResult;
+    session.participantTasks = [];
+
+    return {
+      id: session.id,
+      coordinatorId: session.coordinatorId,
+      scenarioPrompt: session.scenarioPrompt,
+      participantIds: session.participantIds,
+      status: session.status,
+      startedAt: session.startedAt?.toISOString(),
+      completedAt: session.completedAt?.toISOString(),
+      timeoutMinutes: session.timeoutMinutes,
+      coordinationStyle: session.coordinationStyle,
+      participantTasks: session.participantTasks
+    };
   }
 
   /**
@@ -2416,6 +2522,9 @@ INTEGRATED RESULT:`;
     if (!this.agentService) throw new Error('AgentService not configured');
 
     console.log(`🔄 Starting simple coordination fallback...`);
+
+    // Mark session as in progress
+    session.status = 'in_progress';
     
     // Direct task assignment to each participant
     const participantContributions: Array<{
@@ -2497,6 +2606,12 @@ Please create a well-structured, integrated response that combines these perspec
       session.finalResult.summary = 'Simple coordination completed but no contributions received';
       session.finalResult.integratedContent = 'No contributions were successfully collected from participants.';
     }
+
+    // Mark session as completed
+    session.status = 'completed';
+    session.completedAt = new Date();
+
+    console.log(`✅ Simple coordination session ${session.id} completed`);
   }
 
   /**

@@ -1383,22 +1383,30 @@ Your responses and behavior should be appropriate to this realm's context and ch
    * specialization, and collaboration context
    */
   private generatePersonaSystemPrompt(
-    agent: Agent, 
+    agent: Agent,
     collaborationContext?: string,
     agentRole?: string
   ): string {
     const personality = agent.personality;
     const specialization = agent.specialization;
     const agentTypeGuidance = this.getAgentTypePromptSuffix(agent.type);
-    
+
     let prompt = `You are a ${agent.type} agent named "${agent.name}"`;
-    
+
     if (collaborationContext) {
       prompt += ` ${collaborationContext}`;
     }
-    
+
     prompt += `.\n\n`;
-    
+
+    // Include agent's custom system prompt if configured
+    // This allows agent-specific guidance (e.g., github-elemental-oss thoroughness requirements)
+    if (agent.llmConfig?.systemPrompt) {
+      prompt += `AGENT-SPECIFIC INSTRUCTIONS:\n`;
+      prompt += agent.llmConfig.systemPrompt;
+      prompt += `\n\n`;
+    }
+
     // Role and Specialization Section
     prompt += `ROLE & SPECIALIZATION:\n`;
     if (agentRole) {
@@ -1410,7 +1418,7 @@ Your responses and behavior should be appropriate to this realm's context and ch
       prompt += `- Skill Level: ${specialization.skillLevel}\n`;
     }
     prompt += `\n`;
-    
+
     // Personality Section
     prompt += `PERSONALITY TRAITS:\n`;
     prompt += `- Communication Style: ${personality.communicationStyle}\n`;
@@ -1423,17 +1431,17 @@ Your responses and behavior should be appropriate to this realm's context and ch
       prompt += `- Collaboration Style: ${personality.collaborationPreference}\n`;
     }
     prompt += `\n`;
-    
+
     // Behavior Guidelines Section
     prompt += `BEHAVIOR GUIDELINES:\n`;
     prompt += this.generateBehaviorGuidelines(personality);
     prompt += `\n`;
-    
+
     // Agent Type Specific Guidance
     prompt += `AGENT TYPE SPECIALIZATION:\n`;
     prompt += agentTypeGuidance;
     prompt += `\n`;
-    
+
     // Task Approach Section
     prompt += `TASK APPROACH:\n`;
     prompt += `- Apply your ${agent.type} capabilities systematically\n`;
@@ -1443,7 +1451,7 @@ Your responses and behavior should be appropriate to this realm's context and ch
     if (specialization.expertise.length > 0) {
       prompt += `- Leverage your expertise in: ${specialization.expertise.join(', ')}\n`;
     }
-    
+
     return prompt;
   }
   

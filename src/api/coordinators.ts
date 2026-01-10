@@ -427,6 +427,126 @@ router.post('/coordinate', async (req: Request, res: Response) => {
   }
 });
 
+/**
+ * POST /coordinators/sessions/:sessionId/rerun - Rerun a coordination session
+ */
+router.post('/sessions/:sessionId/rerun', async (req: Request, res: Response) => {
+  try {
+    const { sessionId } = req.params;
+
+    if (!sessionId || typeof sessionId !== 'string') {
+      res.status(400).json({
+        error: 'Validation error',
+        details: 'Session ID is required'
+      });
+      return;
+    }
+
+    console.log('🔄 Rerunning session:', sessionId);
+
+    const result = await coordinationService.rerunSession(sessionId);
+
+    res.status(201).json({
+      message: 'Session restarted successfully',
+      originalSessionId: sessionId,
+      newExecutionId: result.newSessionId,
+      execution: result.newSession
+    });
+  } catch (error) {
+    console.error('Error rerunning session:', error);
+    res.status(500).json({
+      error: 'Failed to rerun session',
+      details: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
+/**
+ * DELETE /coordinators/sessions/:sessionId - Delete a coordination session
+ */
+router.delete('/sessions/:sessionId', async (req: Request, res: Response) => {
+  try {
+    const { sessionId } = req.params;
+
+    if (!sessionId || typeof sessionId !== 'string') {
+      res.status(400).json({
+        error: 'Validation error',
+        details: 'Session ID is required'
+      });
+      return;
+    }
+
+    console.log('🗑️ Deleting session:', sessionId);
+
+    await coordinationService.deleteSession(sessionId);
+
+    res.status(204).send();
+  } catch (error) {
+    console.error('Error deleting session:', error);
+    if (error instanceof Error && error.message.includes('not found')) {
+      res.status(404).json({
+        error: 'Session not found',
+        details: error.message
+      });
+    } else if (error instanceof Error && error.message.includes('Cannot delete running')) {
+      res.status(409).json({
+        error: 'Cannot delete running session',
+        details: error.message
+      });
+    } else {
+      res.status(500).json({
+        error: 'Failed to delete session',
+        details: error instanceof Error ? error.message : 'Unknown error'
+      });
+    }
+  }
+});
+
+/**
+ * DELETE /coordinators/sessions/:sessionId/results - Purge session results
+ */
+router.delete('/sessions/:sessionId/results', async (req: Request, res: Response) => {
+  try {
+    const { sessionId } = req.params;
+
+    if (!sessionId || typeof sessionId !== 'string') {
+      res.status(400).json({
+        error: 'Validation error',
+        details: 'Session ID is required'
+      });
+      return;
+    }
+
+    console.log('🧹 Purging results for session:', sessionId);
+
+    const updatedSession = await coordinationService.purgeSessionResults(sessionId);
+
+    res.json({
+      message: 'Session results purged successfully',
+      sessionId: sessionId,
+      session: updatedSession
+    });
+  } catch (error) {
+    console.error('Error purging session results:', error);
+    if (error instanceof Error && error.message.includes('not found')) {
+      res.status(404).json({
+        error: 'Session not found',
+        details: error.message
+      });
+    } else if (error instanceof Error && error.message.includes('Cannot purge')) {
+      res.status(409).json({
+        error: 'Cannot purge running session',
+        details: error.message
+      });
+    } else {
+      res.status(500).json({
+        error: 'Failed to purge session results',
+        details: error instanceof Error ? error.message : 'Unknown error'
+      });
+    }
+  }
+});
+
 // Export coordination service for dependency injection
 export { coordinationService };
 export default router;

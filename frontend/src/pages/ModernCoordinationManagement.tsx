@@ -1,10 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { 
-  Play, 
-  Clock, 
-  CheckCircle, 
-  XCircle, 
+import {
+  Play,
+  Clock,
+  CheckCircle,
+  XCircle,
   Users,
   Search,
   Filter,
@@ -14,7 +14,11 @@ import {
   Activity,
   FileText,
   AlertCircle,
-  ChevronRight
+  ChevronRight,
+  Trash2,
+  RotateCcw,
+  Eraser,
+  Edit
 } from 'lucide-react';
 import { agentApi, Agent } from '../services/api';
 import coordinationRestApi from '../services/coordinationRestApi';
@@ -98,6 +102,7 @@ export default function ModernCoordinationManagement() {
   const [selectedSession, setSelectedSession] = useState<string | null>(null);
   const [sessionDetails, setSessionDetails] = useState<CoordinationSession | null>(null);
   const [publishedContent, setPublishedContent] = useState<PublishedContent[]>([]);
+  const [initialFormData, setInitialFormData] = useState<CoordinationRequest | null>(null);
 
   useEffect(() => {
     loadData();
@@ -164,7 +169,10 @@ export default function ModernCoordinationManagement() {
               <p className="mt-2 text-gray-600">Manage multi-agent coordination sessions with concurrent session support</p>
             </div>
             <button
-              onClick={() => setShowNewSessionForm(true)}
+              onClick={() => {
+                setInitialFormData(null);
+                setShowNewSessionForm(true);
+              }}
               className="bg-primary-600 text-white px-4 py-2 rounded-lg hover:bg-primary-700 transition-colors flex items-center space-x-2"
             >
               <Plus className="h-5 w-5" />
@@ -255,12 +263,58 @@ export default function ModernCoordinationManagement() {
           {/* Session Details Panel */}
           <div className="lg:col-span-1">
             {selectedSession && sessionDetails ? (
-              <SessionDetailsPanel 
-                session={sessionDetails} 
+              <SessionDetailsPanel
+                session={sessionDetails}
                 content={publishedContent}
                 onRefresh={() => loadSessionDetails(selectedSession)}
                 agents={agents}
                 onNavigateToContent={() => navigate('/content')}
+                onEdit={() => {
+                  // Pre-populate form with session configuration
+                  setInitialFormData({
+                    coordinatorId: sessionDetails.coordinatorId,
+                    scenarioPrompt: sessionDetails.scenarioPrompt,
+                    participantIds: sessionDetails.participantIds,
+                    timeoutMinutes: 30, // Default, as original timeout isn't stored
+                    coordinationStyle: 'collaborative' // Default, as original style isn't stored
+                  });
+                  setShowNewSessionForm(true);
+                }}
+                onRerun={async () => {
+                  try {
+                    const result = await coordinationRestApi.rerunExecution(selectedSession);
+                    alert(`Session restarted successfully! New session ID: ${result.newExecutionId}`);
+                    loadData(); // Refresh the data
+                    setSelectedSession(result.newExecutionId); // Switch to new session
+                    loadSessionDetails(result.newExecutionId);
+                  } catch (error: any) {
+                    alert(`Failed to rerun session: ${error.message}`);
+                  }
+                }}
+                onDelete={async () => {
+                  if (confirm('Are you sure you want to delete this session? This action cannot be undone.')) {
+                    try {
+                      await coordinationRestApi.deleteExecution(selectedSession);
+                      alert('Session deleted successfully');
+                      setSelectedSession(null);
+                      setSessionDetails(null);
+                      loadData(); // Refresh the data
+                    } catch (error: any) {
+                      alert(`Failed to delete session: ${error.message}`);
+                    }
+                  }
+                }}
+                onPurgeResults={async () => {
+                  if (confirm('Are you sure you want to purge the results? This will remove all output data but keep the session record.')) {
+                    try {
+                      await coordinationRestApi.purgeExecutionResults(selectedSession);
+                      alert('Session results purged successfully');
+                      loadSessionDetails(selectedSession); // Refresh to show updated session
+                    } catch (error: any) {
+                      alert(`Failed to purge results: ${error.message}`);
+                    }
+                  }
+                }}
               />
             ) : (
               <div className="bg-white rounded-lg shadow p-6">
@@ -276,9 +330,13 @@ export default function ModernCoordinationManagement() {
 
         {/* New Session Form Modal */}
         {showNewSessionForm && (
-          <NewSessionForm 
+          <NewSessionForm
             agents={agents}
-            onClose={() => setShowNewSessionForm(false)}
+            initialData={initialFormData}
+            onClose={() => {
+              setShowNewSessionForm(false);
+              setInitialFormData(null);
+            }}
             onSubmit={async (request, useNaturalLanguage = false) => {
               try {
                 if (useNaturalLanguage) {
@@ -379,24 +437,34 @@ function SessionCard({
 }
 
 // Session Details Panel Component
-function SessionDetailsPanel({ 
-  session, 
-  content, 
+function SessionDetailsPanel({
+  session,
+  content,
   onRefresh,
   agents,
-  onNavigateToContent
-}: { 
+  onNavigateToContent,
+  onEdit,
+  onRerun,
+  onDelete,
+  onPurgeResults
+}: {
   session: CoordinationSession;
   content: PublishedContent[];
   onRefresh: () => void;
   agents: Agent[];
   onNavigateToContent: () => void;
+  onEdit: () => void;
+  onRerun: () => void;
+  onDelete: () => void;
+  onPurgeResults: () => void;
 }) {
   // Create agent name lookup
   const agentNames = agents.reduce((acc, agent) => {
     acc[agent.id] = agent.name;
     return acc;
   }, {} as { [agentId: string]: string });
+
+  const isCompleted = session.status === 'completed' || session.status === 'failed';
 
   return (
     <div className="bg-white rounded-lg shadow">
@@ -409,7 +477,44 @@ function SessionDetailsPanel({
           <RefreshCw className="h-4 w-4 text-gray-500" />
         </button>
       </div>
-      
+
+      {/* Action Buttons for Completed Sessions */}
+      {isCompleted && (
+        <div className="px-6 py-4 border-b border-gray-200 bg-gray-50">
+          <h4 className="text-sm font-medium text-gray-700 mb-3">Actions</h4>
+          <div className="flex flex-col space-y-2">
+            <button
+              onClick={onEdit}
+              className="flex items-center justify-center space-x-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors text-sm font-medium"
+            >
+              <Edit className="h-4 w-4" />
+              <span>Edit & Rerun</span>
+            </button>
+            <button
+              onClick={onRerun}
+              className="flex items-center justify-center space-x-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm font-medium"
+            >
+              <RotateCcw className="h-4 w-4" />
+              <span>Rerun Session</span>
+            </button>
+            <button
+              onClick={onPurgeResults}
+              className="flex items-center justify-center space-x-2 px-4 py-2 bg-yellow-600 text-white rounded-lg hover:bg-yellow-700 transition-colors text-sm font-medium"
+            >
+              <Eraser className="h-4 w-4" />
+              <span>Purge Results</span>
+            </button>
+            <button
+              onClick={onDelete}
+              className="flex items-center justify-center space-x-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors text-sm font-medium"
+            >
+              <Trash2 className="h-4 w-4" />
+              <span>Delete Session</span>
+            </button>
+          </div>
+        </div>
+      )}
+
       <div className="px-6 py-4 space-y-6">
         {/* Session Info */}
         <div>
@@ -538,22 +643,26 @@ function SessionDetailsPanel({
 }
 
 // New Session Form Component
-function NewSessionForm({ 
-  agents, 
-  onClose, 
-  onSubmit 
-}: { 
+function NewSessionForm({
+  agents,
+  initialData,
+  onClose,
+  onSubmit
+}: {
   agents: Agent[];
+  initialData?: CoordinationRequest | null;
   onClose: () => void;
   onSubmit: (request: CoordinationRequest, useNaturalLanguage?: boolean) => Promise<void>;
 }) {
-  const [formData, setFormData] = useState<CoordinationRequest>({
-    coordinatorId: 'built-in-coordinator',
-    scenarioPrompt: '',
-    participantIds: [],
-    timeoutMinutes: 30,
-    coordinationStyle: 'collaborative'
-  });
+  const [formData, setFormData] = useState<CoordinationRequest>(
+    initialData || {
+      coordinatorId: 'built-in-coordinator',
+      scenarioPrompt: '',
+      participantIds: [],
+      timeoutMinutes: 30,
+      coordinationStyle: 'collaborative'
+    }
+  );
 
   const [naturalLanguageMode, setNaturalLanguageMode] = useState(true); // Default to natural mode
   const activeAgents = agents.filter(agent => agent.status === 'active');
@@ -583,7 +692,9 @@ function NewSessionForm({
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
       <div className="bg-white rounded-lg p-6 w-full max-w-2xl max-h-screen overflow-y-auto">
-        <h2 className="text-2xl font-semibold text-gray-900 mb-6">Start New Coordination Session</h2>
+        <h2 className="text-2xl font-semibold text-gray-900 mb-6">
+          {initialData ? 'Edit & Start New Session' : 'Start New Coordination Session'}
+        </h2>
         
         {/* Natural Language Mode Toggle */}
         <div className="mb-6 p-4 bg-blue-50 rounded-lg border border-blue-200">

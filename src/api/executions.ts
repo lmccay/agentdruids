@@ -626,4 +626,180 @@ router.delete('/:executionId', async (req: Request, res: Response) => {
   }
 });
 
+/**
+ * POST /executions/:executionId/rerun
+ * Rerun a completed execution with the same configuration
+ */
+router.post('/:executionId/rerun', async (req: Request, res: Response) => {
+  try {
+    const { executionId } = req.params;
+
+    if (!executionId || typeof executionId !== 'string') {
+      res.status(400).json({
+        error: 'Validation error',
+        message: 'Execution ID is required'
+      });
+      return;
+    }
+
+    const originalExecution = executions.get(executionId);
+    if (!originalExecution) {
+      res.status(404).json({
+        error: 'Not found',
+        message: `Execution with ID '${executionId}' not found`
+      });
+      return;
+    }
+
+    // Only allow rerun of completed or failed executions
+    if (originalExecution.status !== 'completed' && originalExecution.status !== 'failed') {
+      res.status(409).json({
+        error: 'Conflict',
+        message: 'Can only rerun completed or failed executions'
+      });
+      return;
+    }
+
+    // Create a new execution with the same configuration
+    const newExecutionId = generateExecutionId();
+    const now = Date.now().toString();
+
+    const newExecution: Execution = {
+      executionId: newExecutionId,
+      scenarioId: originalExecution.scenarioId,
+      status: 'starting',
+      startedAt: now,
+      participants: originalExecution.participants.map(p => ({
+        ...p,
+        status: 'active',
+        performance: {
+          responseTimes: [],
+          successRate: 0,
+          errorCount: 0
+        }
+      })),
+      configuration: { ...originalExecution.configuration },
+      metrics: {
+        executionTime: 0,
+        messagesExchanged: 0,
+        tasksCompleted: 0,
+        errors: 0,
+        warnings: 0
+      },
+      progress: {
+        percentage: 0,
+        currentPhase: 'Initialization',
+        estimatedTimeRemaining: originalExecution.estimatedDuration || 1800
+      },
+      ...(originalExecution.estimatedDuration && { estimatedDuration: originalExecution.estimatedDuration })
+    };
+
+    // Copy benchmark or self-play specific fields
+    if (originalExecution.benchmarkResults) {
+      newExecution.benchmarkResults = {
+        averageLatency: 0,
+        throughput: 0,
+        accuracy: 0,
+        iterations: 0
+      };
+    }
+
+    if (originalExecution.learningProgress) {
+      newExecution.learningProgress = {
+        currentEpisode: 0,
+        totalEpisodes: originalExecution.learningProgress.totalEpisodes,
+        averageReward: 0,
+        improvementRate: 0
+      };
+    }
+
+    executions.set(newExecutionId, newExecution);
+
+    // Simulate execution start
+    setTimeout(() => {
+      const updatedExecution = executions.get(newExecutionId);
+      if (updatedExecution && updatedExecution.status === 'starting') {
+        updatedExecution.status = 'running';
+        updatedExecution.progress = {
+          percentage: 5,
+          currentPhase: 'Agent Initialization',
+          estimatedTimeRemaining: (newExecution.estimatedDuration || 1800) - 30
+        };
+        executions.set(newExecutionId, updatedExecution);
+      }
+    }, 100);
+
+    res.status(201).json({
+      message: 'Execution restarted successfully',
+      originalExecutionId: executionId,
+      newExecutionId: newExecutionId,
+      execution: newExecution
+    });
+  } catch (error) {
+    console.error('Error rerunning execution:', error);
+    res.status(500).json({
+      error: 'Internal server error',
+      message: 'Failed to rerun execution'
+    });
+  }
+});
+
+/**
+ * DELETE /executions/:executionId/results
+ * Purge execution results while keeping the execution record
+ */
+router.delete('/:executionId/results', async (req: Request, res: Response) => {
+  try {
+    const { executionId } = req.params;
+
+    if (!executionId || typeof executionId !== 'string') {
+      res.status(400).json({
+        error: 'Validation error',
+        message: 'Execution ID is required'
+      });
+      return;
+    }
+
+    const execution = executions.get(executionId);
+    if (!execution) {
+      res.status(404).json({
+        error: 'Not found',
+        message: `Execution with ID '${executionId}' not found`
+      });
+      return;
+    }
+
+    // Only allow purging results of completed or failed executions
+    if (execution.status !== 'completed' && execution.status !== 'failed') {
+      res.status(409).json({
+        error: 'Conflict',
+        message: 'Can only purge results of completed or failed executions'
+      });
+      return;
+    }
+
+    // Clear results and logs while keeping execution metadata
+    delete execution.results;
+    delete execution.logs;
+    delete execution.summary;
+    delete execution.benchmarkResults;
+    delete execution.learningProgress;
+
+    // Keep basic metadata and metrics for historical tracking
+    executions.set(executionId, execution);
+
+    res.json({
+      message: 'Execution results purged successfully',
+      executionId: executionId,
+      execution: execution
+    });
+  } catch (error) {
+    console.error('Error purging execution results:', error);
+    res.status(500).json({
+      error: 'Internal server error',
+      message: 'Failed to purge execution results'
+    });
+  }
+});
+
 export default router;
