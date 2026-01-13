@@ -1,0 +1,567 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Project Overview
+
+Druids is a sophisticated multi-agent system featuring four agent types (Druids, Elementals, Gaia, Worldtree) working together in a federated architecture with FULLY COMPLIANT Model Context Protocol (MCP) integration and a comprehensive web-based management interface.
+
+**Key Architecture:** Production-ready concurrent session support with complete isolation between coordination sessions, enforced through a constitutional architecture documented in `CONCURRENT_SESSION_CONSTITUTION.md`.
+
+**Development Philosophy:** This project is Docker-first. All development, testing, and deployment workflows assume services run in Docker containers. This ensures consistent environments, proper service isolation, and eliminates "works on my machine" issues. Local npm commands are available but are NOT the primary workflow.
+
+## Common Development Commands
+
+**IMPORTANT:** This project uses Docker and docker-compose for all development and testing. All services run in containers with proper isolation, networking, and dependency management. Local npm commands are documented for reference but Docker is the primary workflow.
+
+### Quick Reference (Most Common Commands)
+```bash
+# Start everything
+./scripts/dev.sh start
+
+# View logs
+docker logs druids-app -f
+docker logs druids-mcp -f
+
+# Run tests
+docker-compose exec druids-app npm test
+
+# Type check
+docker-compose exec druids-app npm run type-check
+
+# Rebuild after code changes
+docker-compose build druids-app --no-cache && docker-compose --env-file .env up -d druids-app
+
+# Health check
+./scripts/health.sh check
+```
+
+### Docker Environment Management (PRIMARY WORKFLOW)
+```bash
+# Start all services (auto-downloads Ollama model on first run)
+./scripts/dev.sh start
+
+# Stop all services
+./scripts/dev.sh stop
+
+# Restart specific service after code changes
+docker-compose restart druids-app
+docker-compose restart druids-mcp
+docker-compose restart druids-ui
+
+# Rebuild and restart service with code changes (use --no-cache if changes not appearing)
+docker-compose build druids-app --no-cache
+docker-compose --env-file .env up -d druids-app
+
+docker-compose build druids-mcp --no-cache
+docker-compose --env-file .env up -d druids-mcp
+
+docker-compose build druids-ui --no-cache
+docker-compose --env-file .env up -d druids-ui
+
+# View service logs
+./scripts/dev.sh logs [service-name]
+docker logs druids-app -f
+docker logs druids-mcp -f
+docker logs druids-ui -f
+
+# Check system health
+./scripts/health.sh check
+./scripts/health.sh detailed
+
+# View running containers
+docker-compose ps
+
+# Execute commands inside containers
+docker-compose exec druids-app npm run type-check
+docker-compose exec druids-app npm run lint
+```
+
+**IMPORTANT:** All `docker-compose up` commands MUST include `--env-file .env` to load environment variables properly. The `./scripts/dev.sh` helper script handles this automatically.
+
+### Testing (Docker-based)
+```bash
+# Run tests in Docker containers (recommended)
+docker-compose exec druids-app npm test
+docker-compose exec druids-app npm run test:contract
+docker-compose exec druids-app npm run test:integration
+docker-compose exec druids-app npm run test:unit
+docker-compose exec druids-app npm run test:performance
+docker-compose exec druids-app npm run test:session-protection
+
+# Test coverage
+docker-compose exec druids-app npm run test:coverage
+
+# Alternative: Use test script (starts containers if needed)
+./scripts/test.sh
+```
+
+### Development Inside Containers
+```bash
+# Type checking
+docker-compose exec druids-app npm run type-check
+
+# Linting
+docker-compose exec druids-app npm run lint
+docker-compose exec druids-app npm run lint:fix
+
+# Build TypeScript
+docker-compose exec druids-app npm run build
+
+# Frontend build
+docker-compose exec druids-ui npm run build
+
+# Agent/Realm Management CLI (inside container)
+docker-compose exec druids-app npm run agent:create
+docker-compose exec druids-app npm run realm:create
+docker-compose exec druids-app npm run scenario:run
+```
+
+### Local Development (Outside Docker - Advanced Use Cases Only)
+These commands are for development outside Docker containers, which is NOT the recommended workflow:
+
+```bash
+# Install dependencies locally
+npm install
+
+# Run development server locally (requires Redis, Postgres, Ollama locally)
+npm run dev
+
+# Type checking locally
+npm run type-check
+
+# Linting locally
+npm run lint
+
+# Run tests locally (requires all services running)
+npm test
+
+# Note: The MCP server is designed to run in Docker (druids-mcp container)
+# Standalone mode is not the primary workflow
+npm run mcp:server  # Only for special debugging scenarios
+```
+
+## High-Level Architecture
+
+### Triple-Server Architecture
+The system runs three independent servers:
+
+1. **Main API Server** (port 3000): Internal REST API for system management (CRUD operations on agents, realms, coordination sessions)
+2. **MCP Server** (port 3003): External client integration via JSON-RPC 2.0 over HTTP/SSE - FULLY COMPLIANT with MCP specification
+3. **Frontend UI** (port 3004): React-based management interface with Tailwind CSS
+
+### Agent Types and Coordination
+Four distinct agent types work in federated realms:
+
+- **Druids**: Coordination agents with persona-driven decision making, can travel between realms
+- **Elementals**: Domain specialists bound to a single realm with configurable expertise profiles
+- **Gaia**: Meta-agents for ecosystem health monitoring and optimization
+- **Worldtree**: Collective knowledge repository with namespace-based access control
+
+### Concurrent Session Architecture (CONSTITUTIONAL)
+The system enforces mandatory session isolation through three-layer architecture:
+
+1. **SessionAgentManager**: Agent state isolation per coordination session
+2. **TaskQueueManager**: Task and concurrency management per session
+3. **SessionContentManager**: Content storage isolation per session
+
+**CRITICAL**: Any changes to coordination, agent state, or content management MUST preserve session isolation. See `CONCURRENT_SESSION_CONSTITUTION.md` for immutable architectural principles.
+
+### Service Layer Design
+Services follow a stateless pattern - NO session-specific state stored in service classes. All session state must exist in session-scoped managers created during coordination.
+
+Pattern:
+```typescript
+// CORRECT - session creation with isolation
+const sessionAgentManager = new SessionAgentManagerImpl(sessionId);
+const sessionContentManager = new SessionContentManagerImpl(config);
+
+if (!coordinatorConcurrencyManager.canStartSession(coordinatorId)) {
+  throw new Error('Coordinator at maximum concurrent sessions');
+}
+coordinatorConcurrencyManager.startSession(sessionId, coordinatorId, ...);
+```
+
+### LLM Integration
+Agents support two LLM providers:
+- **Ollama** (default): Local LLM with qwen2.5:1.5b model (~1.5GB)
+- **OpenAI**: Cloud-based integration via API
+
+LLM configuration includes:
+- Agentic loop support (iterative tool calling with max iterations)
+- Token optimization strategies (summarization, sliding window, result truncation)
+- Named model configurations via ModelRegistryService
+
+### Knowledge Namespace Security
+Hierarchical access control:
+```
+agent://{agentId}/private/     # Agent-only access
+agent://{agentId}/public/      # Read-only for others
+worldtree://public/           # Shared knowledge base
+worldtree://private/{agentId}/ # Private agent storage in shared system
+```
+
+### MCP Protocol Compliance
+
+**CRITICAL MCP ENDPOINT RULE:**
+- ALL MCP requests MUST use `/mcp` endpoint: `http://localhost:3003/mcp`
+- NEVER use root endpoint `/` - returns HTML error pages
+- Session IDs returned in `Mcp-Session-Id` response header, NOT in JSON body
+
+**MCP Response Format Standards:**
+- `tools/call` must return `{ content: [{ type: "text", text: "..." }] }`
+- Tool handlers return plain data, not wrapper objects with metadata
+- Errors thrown in tool handlers, not returned as error objects
+
+**Testing MCP Changes:**
+- Always test with curl commands before external client integration
+- Use test scripts: `test_mcp_session.sh` and `test_enhanced_coordination.sh`
+- Monitor logs: `docker logs druids-mcp -f`
+
+### Frontend Architecture
+React 18 + TypeScript + Vite + Tailwind CSS with:
+
+**Dual API Integration:**
+- REST API for CRUD operations (agents, realms, models)
+- MCP protocol for coordination execution via JSON-RPC 2.0
+
+**Component Pattern:**
+- Page components handle state and API calls
+- UI components focus on presentation
+- Shared API client in `frontend/src/services/api.ts`
+
+**Data Mapping:**
+Frontend uses flat structures, backend expects nested:
+```typescript
+// Frontend form data
+{ name, description, domain, systemPrompt }
+
+// Backend expects
+{
+  name,
+  description,
+  specialization: { domain },  // Nested
+  llmConfig: { systemPrompt }   // Nested
+}
+```
+
+### Docker Services
+Core services in Docker Compose:
+- **druids-app** (port 3000): Main API server
+- **druids-mcp** (port 3003): MCP server for external clients
+- **druids-ui** (port 3004): Frontend React app
+- **druids-redis** (port 6379): Cache and session storage
+- **druids-postgres** (port 5432): Persistent data storage
+- **druids-ollama** (port 11434): Local LLM (qwen2.5:1.5b)
+- **druids-prometheus** (port 9090): Metrics collection
+- **druids-grafana** (port 3002): Monitoring dashboards
+
+### Testing Strategy
+Four test categories with different timeout configurations:
+
+1. **Contract Tests** (`tests/contract/`): MCP protocol compliance, 5s timeout
+2. **Integration Tests** (`tests/integration/`): Multi-agent scenarios, 15s timeout
+3. **Unit Tests** (`tests/unit/`): Component isolation, 10s timeout
+4. **Performance Tests** (`tests/performance/`): Load/scalability, 30s timeout
+
+All tests use `tests/setup.ts` for environment configuration and mocked console methods.
+
+## Critical Development Rules
+
+### 1. Concurrent Session Architecture (CONSTITUTIONAL)
+**NEVER VIOLATE THESE PRINCIPLES:**
+
+- Session isolation is MANDATORY - no shared mutable state between sessions
+- All coordination MUST use session-scoped managers (SessionAgentManager, TaskQueueManager, SessionContentManager)
+- Services MUST be stateless - no session data in service instance variables
+- Session creation MUST go through CoordinatorConcurrencyManager
+- Every session MUST have proper cleanup in success/failure paths
+
+Protected core files (REGRESSION FORBIDDEN):
+- `src/models/SessionAgentState.ts`
+- `src/models/TaskQueueState.ts`
+- `src/models/SessionContentState.ts`
+- `src/models/CoordinatorSessionState.ts`
+- `src/services/SessionAgentManager.ts`
+- `src/services/TaskQueueManager.ts`
+- `src/services/SessionContentManager.ts`
+- `src/services/CoordinatorConcurrencyManager.ts`
+
+### 2. MCP Server Development
+When modifying MCP server code:
+
+1. **Always use `/mcp` endpoint** - this is a recurring issue
+2. Code changes require no-cache Docker rebuild: `docker-compose build druids-mcp --no-cache`
+3. Test with curl before external client integration
+4. Monitor logs during testing: `docker logs druids-mcp -f`
+5. Validate JSON-RPC 2.0 format in all responses
+6. Session IDs come from response headers, not JSON body
+
+### 3. Agent Service Integration
+ALL LLM interactions MUST use `AgentService.executeAgentPrompt()`:
+```typescript
+const result = await agentService.executeAgentPrompt(agentId, {
+  prompt: message,
+  conversationContext?: string,
+  sessionId?: string  // For session-scoped operations
+});
+```
+
+### 4. TypeScript Strictness
+Project uses strict TypeScript configuration:
+- `noImplicitAny: true`
+- `noUnusedLocals: true`
+- `noUnusedParameters: true`
+- `exactOptionalPropertyTypes: true`
+- `noUncheckedIndexedAccess: true`
+
+All code MUST pass type checking:
+```bash
+# In Docker (recommended)
+docker-compose exec druids-app npm run type-check
+
+# Or locally if developing outside Docker
+npm run type-check
+```
+
+### 5. Async Result Management
+Long-running agent tasks use async result system:
+- Auto-detection based on complexity, length, or `force_async` flag
+- Results stored in WorldTree namespace: `worldtree://public/async_results`
+- Pattern: `{agentId}/{requestId}/status.json`
+
+### 6. Realm Travel Pattern
+Only Druids can travel between realms:
+```typescript
+// Elementals are bound to single realm
+realmAccess: { boundRealmId: 'realm-123' }
+
+// Druids can travel with permissions
+realmAccess: {
+  accessibleRealms: [...],
+  allowRealmTravel: true,
+  currentRealmId: 'current-realm'
+}
+```
+
+### 7. Docker Development Requirements and Gotchas
+**CRITICAL:** This project REQUIRES Docker for development. Do not attempt to run services directly with npm commands on your host machine - you will encounter missing dependencies (Redis, Postgres, Ollama).
+
+Common Docker issues:
+- **Code changes not appearing:** Rebuild with `--no-cache` flag: `docker-compose build druids-app --no-cache`
+- **Service name errors:** Verify service names with `docker-compose ps` before restart commands
+- **First startup slow:** Downloads 1.5GB Ollama model (5-15 minutes on first run)
+- **Performance degradation:** Check container resource usage with `docker stats`
+- **Port conflicts:** Ensure ports 3000-3004, 5432, 6379, 9090, 11434 are available
+- **Stale containers:** Use `docker-compose down -v` to remove volumes and start fresh
+
+**Best Practice:** When in doubt, full restart with rebuild:
+```bash
+./scripts/dev.sh stop
+docker-compose build --no-cache
+./scripts/dev.sh start  # Handles --env-file .env automatically
+```
+
+**Environment Variables:** The `.env` file contains critical configuration (database URLs, API keys, etc.). Always use `--env-file .env` with `docker-compose up` commands, or use the `./scripts/dev.sh` script which handles this automatically.
+
+### 8. Frontend-Backend Communication
+- Frontend makes REST calls for CRUD operations
+- Frontend uses MCP JSON-RPC 2.0 for coordination execution
+- Always map frontend flat structures to backend nested structures
+- CORS configured for localhost ports 3000-3005
+
+## Project Structure Reference
+
+```
+src/
+├── app.ts                      # Main Express app with dual-server setup
+├── index.ts                    # Entry point with graceful shutdown
+├── models/                     # Data models and interfaces
+│   ├── Agent.ts                # Agent types and configurations
+│   ├── Realm.ts                # Realm federation model
+│   ├── SessionAgentState.ts    # 🛡️ PROTECTED: Agent session isolation
+│   ├── TaskQueueState.ts       # 🛡️ PROTECTED: Task queue management
+│   ├── SessionContentState.ts  # 🛡️ PROTECTED: Content isolation
+│   └── CoordinatorSessionState.ts # 🛡️ PROTECTED: Coordinator concurrency
+├── services/                   # Business logic and integrations
+│   ├── AgentService.ts         # Agent lifecycle, LLM integration, policy
+│   ├── CoordinationService.ts  # Multi-agent workflow coordination
+│   ├── SessionAgentManager.ts  # 🛡️ PROTECTED: Agent state isolation impl
+│   ├── TaskQueueManager.ts     # 🛡️ PROTECTED: Task queue impl
+│   ├── SessionContentManager.ts # 🛡️ PROTECTED: Content storage impl
+│   ├── CoordinatorConcurrencyManager.ts # 🛡️ PROTECTED: Concurrency tracking
+│   ├── OllamaClient.ts         # Ollama LLM integration
+│   ├── OpenAIClient.ts         # OpenAI LLM integration
+│   └── RealmService.ts         # Federated realm management
+├── mcp/                        # MCP-compliant servers
+│   ├── SimpleMCPServer.ts      # External client integration (JSON-RPC 2.0)
+│   └── start-mcp-server.ts     # Standalone MCP server launcher
+└── api/                        # REST API routes
+    ├── agents.ts               # Agent CRUD endpoints
+    ├── coordinators.ts         # Coordination session endpoints
+    ├── realms.ts               # Realm management endpoints
+    └── models.ts               # Model registry endpoints
+
+frontend/
+├── src/
+│   ├── pages/                  # React page components
+│   │   ├── AgentManagement.tsx
+│   │   ├── RealmManagement.tsx
+│   │   ├── ModernCoordinationManagement.tsx
+│   │   └── Dashboard.tsx
+│   ├── components/             # Reusable UI components
+│   ├── services/api.ts         # Axios client (REST + MCP)
+│   └── App.tsx                 # Main React app with routing
+└── package.json                # React 18 + Vite + Tailwind
+
+tests/
+├── contract/                   # MCP protocol compliance (5s timeout)
+├── integration/                # Multi-agent scenarios (15s timeout)
+├── unit/                       # Component isolation (10s timeout)
+├── performance/                # Load/scalability (30s timeout)
+├── concurrent_session/         # 🛡️ PROTECTED: Session isolation tests
+└── setup.ts                    # Test environment configuration
+
+scripts/
+├── dev.sh                      # Docker development management
+├── test.sh                     # Testing script
+└── health.sh                   # System health checks
+
+docs/
+├── CONCURRENT_SESSION_CONSTITUTION.md  # 🛡️ Architectural constitution
+├── MCP_CLIENT_CONFIGURATION.md         # MCP integration guide
+├── BORIS_CHERNY_WORKFLOW_DESIGN.md    # Multi-project workflow design
+└── OpenAI-Integration.md               # OpenAI LLM setup
+```
+
+## Development Workflow Best Practices
+
+### When Making Changes to Coordination
+1. Read `CONCURRENT_SESSION_CONSTITUTION.md` first
+2. Ensure changes preserve session isolation
+3. Run session protection tests:
+   ```bash
+   docker-compose exec druids-app npm run test:session-protection
+   ```
+4. Test with concurrent coordination scenarios
+5. Verify cleanup in both success and failure paths
+
+### When Modifying MCP Server
+1. Use `/mcp` endpoint for all testing (NOT `/`)
+2. Make code changes
+3. Rebuild without cache: `docker-compose build druids-mcp --no-cache`
+4. Restart service: `docker-compose --env-file .env up -d druids-mcp`
+5. Test with curl before external client
+6. Monitor logs: `docker logs druids-mcp -f`
+
+### When Adding New Agent Types
+1. Update `AgentType` enum in `src/models/Types.ts`
+2. Add type-specific configuration models
+3. Update `AgentService` validation logic
+4. Add UI components in frontend
+5. Update API routes and validation schemas
+6. Add integration tests for new agent behavior
+
+### When Changing LLM Integration
+1. Changes to `AgentService.executeAgentPrompt()` affect entire system
+2. Test with both Ollama and OpenAI providers
+3. Verify agentic loop behavior if modified
+4. Check token optimization strategies
+5. Update model registry if adding new models
+
+### Docker Development Iteration Workflow
+Standard development cycle when making code changes:
+
+```bash
+# 1. Make code changes in your editor
+
+# 2. For hot-reload changes (if supported by service):
+docker-compose restart druids-app
+
+# 3. For changes requiring rebuild:
+docker-compose build druids-app --no-cache
+docker-compose --env-file .env up -d druids-app
+
+# 4. Verify changes:
+docker logs druids-app -f
+./scripts/health.sh check
+
+# 5. Run type checking:
+docker-compose exec druids-app npm run type-check
+
+# 6. Run tests:
+docker-compose exec druids-app npm run test:unit
+docker-compose exec druids-app npm run test:integration
+
+# Complete iteration cycle with all services:
+./scripts/dev.sh stop
+docker-compose build --no-cache  # Rebuild all services
+./scripts/dev.sh start            # Handles .env automatically
+./scripts/health.sh check
+docker-compose exec druids-app npm test
+```
+
+**Key Principles:**
+- Never run `npm start`, `npm run dev`, or `npm test` directly on your host machine. Always use Docker containers via `docker-compose exec` or `docker-compose run`.
+- Always include `--env-file .env` flag when using `docker-compose up` directly (the `./scripts/dev.sh` script handles this automatically).
+
+## Common Issues and Solutions
+
+### Issue: Services failing to start or environment variables not loaded
+**Root Cause:** Missing or incorrect `.env` file, or `docker-compose up` called without `--env-file .env`
+**Solution:**
+```bash
+# Ensure .env file exists in project root
+ls -la .env
+
+# Always use --env-file flag with docker-compose up
+docker-compose --env-file .env up -d
+
+# Or use the helper script which handles this automatically
+./scripts/dev.sh start
+```
+
+### Issue: Code changes not appearing in containers
+**Solution:** Rebuild with `--no-cache` flag and verify service name with `docker-compose ps`
+
+### Issue: MCP client serialization errors
+**Root Cause:** Incorrect `tools/call` response format
+**Solution:** Return `{ content: [{ type: "text", text: JSON.stringify(data) }] }` not raw data
+
+### Issue: Session isolation failures
+**Root Cause:** Shared mutable state or bypassing session managers
+**Solution:** Review `CONCURRENT_SESSION_CONSTITUTION.md` and use session-scoped managers
+
+### Issue: Frontend data mapping errors
+**Root Cause:** Flat frontend structure vs nested backend structure
+**Solution:** Always map form data to nested backend structure (see Data Mapping Pattern above)
+
+### Issue: Test timeouts
+**Root Cause:** Wrong test category or expensive operations
+**Solution:** Use correct test directory (contract=5s, unit=10s, integration=15s, performance=30s)
+
+### Issue: Ollama model not loading
+**Solution:**
+```bash
+./scripts/health.sh detailed
+./scripts/dev.sh logs druids-ollama
+./scripts/dev.sh pull-model  # Manually pull if needed
+```
+
+## Access Points When Running
+
+- Main API: http://localhost:3000
+- MCP Server: http://localhost:3003/mcp
+- Frontend UI: http://localhost:3004
+- Grafana: http://localhost:3002 (admin:druids_admin)
+- Prometheus: http://localhost:9090
+
+## Documentation References
+
+For detailed information, see:
+- `README.md` - Comprehensive project overview and setup
+- `CONCURRENT_SESSION_CONSTITUTION.md` - Session isolation principles (MANDATORY reading for coordination changes)
+- `.github/copilot-instructions.md` - Additional development guidelines
+- `docs/MCP_CLIENT_CONFIGURATION.md` - MCP integration guide
+- `docs/BORIS_CHERNY_WORKFLOW_DESIGN.md` - Multi-project workflow patterns
+- `docs/OpenAI-Integration.md` - OpenAI LLM configuration
