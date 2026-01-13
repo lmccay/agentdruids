@@ -14,6 +14,91 @@ Druids is a sophisticated multi-agent system featuring four agent types (Druids,
 
 **IMPORTANT:** This project uses Docker and docker-compose for all development and testing. All services run in containers with proper isolation, networking, and dependency management. Local npm commands are documented for reference but Docker is the primary workflow.
 
+### First-Time Setup (Fresh Clone)
+
+When you first clone the repository, the setup is automatic:
+
+```bash
+# 1. Clone the repo
+git clone <repo-url>
+cd druids
+
+# 2. Copy environment template (if needed)
+cp .env.example .env
+
+# 3. Start everything - database initializes automatically
+./scripts/dev.sh start
+
+# 4. Verify health
+./scripts/health.sh check
+```
+
+**What happens automatically:**
+- PostgreSQL initializes with current schema from `docker/init.sql`
+- Migrations run on app startup (if any are pending)
+- Sample data is created (default realm and system coordinator)
+- All services start and become healthy
+
+### Database Management
+
+**Reset to Clean State (if needed):**
+```bash
+# Complete database reset (DELETES ALL DATA)
+./scripts/db-reset.sh
+
+# This will:
+# 1. Stop all services
+# 2. Delete PostgreSQL volume
+# 3. Restart with fresh database from docker/init.sql
+```
+
+**When to reset:**
+- After pulling schema changes from another developer
+- When database is in an inconsistent state
+- When testing fresh installation flow
+- When you want to start completely clean
+
+For detailed database management, see [DATABASE_SETUP.md](docs/DATABASE_SETUP.md).
+
+### Database Migrations
+
+**Automatic Migration System:**
+- Database migrations run automatically on app startup
+- Migrations are versioned (001, 002, 003, etc.)
+- System tracks which migrations have been applied
+- Only pending migrations run
+
+**Creating a New Migration:**
+```bash
+# 1. Create migration file
+touch src/database/migrations/002_add_feature.sql
+
+# 2. Write SQL (use transactions!)
+cat > src/database/migrations/002_add_feature.sql << 'EOF'
+-- Migration 002: Add feature X
+
+BEGIN;
+
+ALTER TABLE druids_core.agents
+  ADD COLUMN IF NOT EXISTS new_field TEXT;
+
+COMMIT;
+EOF
+
+# 3. Restart app - migration runs automatically
+docker-compose restart druids-app
+
+# 4. Check logs to verify
+docker logs druids-app | grep Migration
+```
+
+**Migration Best Practices:**
+- Use transactions (`BEGIN;` / `COMMIT;`)
+- Use `IF NOT EXISTS` for idempotency
+- Keep migrations small and focused
+- Never modify migrations after they're applied
+- See `src/database/migrations/README.md` for full guide
+
 ### Quick Reference (Most Common Commands)
 ```bash
 # Start everything

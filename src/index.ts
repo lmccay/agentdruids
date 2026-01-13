@@ -2,6 +2,7 @@
 
 import { DruidApp } from './app';
 import * as dotenv from 'dotenv';
+import { migrationService } from './services/MigrationService';
 
 // Load environment variables
 dotenv.config();
@@ -11,25 +12,47 @@ dotenv.config();
  */
 async function main(): Promise<void> {
   try {
+    console.log('🌟 Starting Druids Multi-Agent System...');
+    console.log(`📍 Environment: ${process.env['NODE_ENV'] || 'development'}`);
+
+    // Run database migrations before starting application
+    console.log('');
+    console.log('🔧 Database Initialization');
+    console.log('─────────────────────────');
+    try {
+      await migrationService.runPendingMigrations();
+    } catch (error) {
+      console.error('❌ Database migration failed. Cannot start application.');
+      console.error('');
+      console.error('To reset database to clean state:');
+      console.error('  ./scripts/db-reset.sh');
+      console.error('');
+      console.error('For more help, see docs/DATABASE_SETUP.md');
+      throw error;
+    }
+
+    console.log('');
+    console.log('🚀 Application Startup');
+    console.log('─────────────────────────');
+
     // Create and start the application
     const app = new DruidApp();
     const port = parseInt(process.env['PORT'] || '3000');
     const mcpPort = parseInt(process.env['MCP_PORT'] || '3003');
-    
-    console.log('🌟 Starting Druids Multi-Agent System...');
-    console.log(`📍 Environment: ${process.env['NODE_ENV'] || 'development'}`);
+
     console.log(`🔧 API Port: ${port}`);
     console.log(`🔧 MCP Port: ${mcpPort}`);
-    
+
     // Start main API server
     await app.start(port);
-    
+
     // Start MCP-compliant server for external clients
     await app.startMCPServer(mcpPort);
-    
+
+    console.log('');
     console.log('✅ Druids system started successfully!');
     console.log('🔗 External MCP clients (Goose, VS Code) can connect to the MCP server');
-    
+
   } catch (error) {
     console.error('❌ Failed to start Druids system:', error);
     process.exit(1);
