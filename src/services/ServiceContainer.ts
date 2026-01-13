@@ -49,10 +49,13 @@ class ServiceContainer {
    */
   public initializeServices(): void {
     // Services are automatically wired when created
-    this.getAgentService();
+    const agentService = this.getAgentService();
+    const coordinationService = this.getCoordinationService();
     this.getScenarioService();
-    this.getCoordinationService();
-    
+
+    // Wire up circular dependencies
+    agentService.setCoordinationService(coordinationService);
+
     console.log('🔗 Service dependencies initialized');
   }
 }

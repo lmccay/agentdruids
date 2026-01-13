@@ -27,6 +27,8 @@ interface AgentExecutionRequest {
   context?: any;
   systemPrompt?: string;
   temperature?: number;
+  // Session ID for session-scoped state management (realm tracking, task queues)
+  sessionId?: string;
   // Collaboration context for enhanced persona prompts
   collaborationContext?: {
     scenarioName?: string;
@@ -97,6 +99,7 @@ export class AgentService {
   private realmService: RealmService;
   private mcpConfigLoader: MCPConfigLoader;
   private mcpClients: Map<string, HttpMCPClient | SSEMCPClient> = new Map();
+  private coordinationService?: any; // Avoid circular import, set via setter
 
   constructor(ollamaClient?: OllamaClient, policyEngine?: PolicyEngine, openaiClient?: OpenAIClient) {
     this.ollamaClient = ollamaClient || new OllamaClient(createDefaultOllamaConfig());
@@ -147,6 +150,14 @@ export class AgentService {
   public setRealmService(realmService: RealmService): void {
     this.realmService = realmService;
     console.log('✅ RealmService instance injected into AgentService');
+  }
+
+  /**
+   * Set the CoordinationService instance (for session-scoped realm tracking)
+   */
+  public setCoordinationService(coordinationService: any): void {
+    this.coordinationService = coordinationService;
+    console.log('✅ CoordinationService instance injected into AgentService');
   }
 
   private async initializeService(): Promise<void> {
@@ -750,8 +761,8 @@ export class AgentService {
       baseSystemPrompt = agent.llmConfig.systemPrompt || `You are ${agent.name}. ${agent.description}`;
     }
 
-    // Add realm context to the system prompt if agent is bound to a realm
-    let systemPrompt = await this.generateRealmAwareSystemPrompt(agent, baseSystemPrompt);
+    // Add realm context to the system prompt if agent is bound to a realm (session-aware)
+    let systemPrompt = await this.generateRealmAwareSystemPrompt(agent, baseSystemPrompt, request.sessionId);
 
     // Add tool awareness to system prompt based on agent type and permissions
     const toolInformation = await this.generateToolAwarenessPrompt(agent);
@@ -1046,7 +1057,7 @@ export class AgentService {
       const { response, usage } = await this.callLLM(agent, messages, request.temperature);
 
       // Process tool calls in the response
-      const processedResponse = await this.processAgentToolCalls(agent, response, agentId);
+      const processedResponse = await this.processAgentToolCalls(agent, response, agentId, request.sessionId);
 
       return {
         response: processedResponse.finalResponse,
@@ -1346,17 +1357,35 @@ Available tools:
   /**
    * Generate a realm-aware system prompt that includes realm context when agent is bound to a specific realm
    */
-  private async generateRealmAwareSystemPrompt(agent: Agent, baseSystemPrompt: string): Promise<string> {
-    // Check if agent is bound to a specific realm
-    const boundRealmId = agent.realmAccess?.boundRealmId;
-    if (!boundRealmId) {
+  private async generateRealmAwareSystemPrompt(agent: Agent, baseSystemPrompt: string, sessionId?: string): Promise<string> {
+    // Determine which realm the agent is in
+    let currentRealmId: string | undefined;
+
+    // Check session-scoped realm state first (takes precedence for concurrent sessions)
+    if (sessionId && this.coordinationService) {
+      const sessionAgentManager = this.coordinationService.getSessionAgentManager(sessionId);
+      if (sessionAgentManager) {
+        const sessionState = sessionAgentManager.getAgentSessionState(agent.id);
+        if (sessionState) {
+          currentRealmId = sessionState.currentRealm;
+          console.log(`🔍 Using session-scoped realm for agent ${agent.id} in session ${sessionId}: ${currentRealmId}`);
+        }
+      }
+    }
+
+    // Fall back to global agent realm state if no session context
+    if (!currentRealmId) {
+      currentRealmId = agent.realmAccess?.currentRealmId || agent.realmAccess?.boundRealmId;
+    }
+
+    if (!currentRealmId) {
       // No realm binding, return original system prompt
       return baseSystemPrompt;
     }
 
     try {
       // Get realm information
-      const realm = await this.realmService.getRealm(boundRealmId);
+      const realm = await this.realmService.getRealm(currentRealmId);
       if (!realm || !realm.description) {
         // Realm not found or no description, return original system prompt
         return baseSystemPrompt;
@@ -1765,7 +1794,7 @@ Your responses and behavior should be appropriate to this realm's context and ch
   /**
    * Process tool calls in an agent's response and execute them
    */
-  private async processAgentToolCalls(agent: Agent, response: string, agentId: AgentId): Promise<ProcessedAgentResponse> {
+  private async processAgentToolCalls(agent: Agent, response: string, agentId: AgentId, sessionId?: string): Promise<ProcessedAgentResponse> {
     const toolCalls: AgentToolCall[] = [];
     let processedResponse = response;
 
@@ -1797,8 +1826,8 @@ Your responses and behavior should be appropriate to this realm's context and ch
         let success = true;
 
         try {
-          // Execute the tool call through internal MCP interface
-          const rawToolResult = await this.executeAgentTool(agent, toolName, params);
+          // Execute the tool call through internal MCP interface (with session context if available)
+          const rawToolResult = await this.executeAgentTool(agent, toolName, params, sessionId);
 
           // Extract and parse MCP response content for better agent consumption
           toolResult = this.extractMCPContent(rawToolResult);
@@ -1863,18 +1892,18 @@ Your responses and behavior should be appropriate to this realm's context and ch
   /**
    * Execute a specific tool call for an agent
    */
-  private async executeAgentTool(agent: Agent, toolName: string, params: any): Promise<any> {
+  private async executeAgentTool(agent: Agent, toolName: string, params: any, sessionId?: string): Promise<any> {
     // Define built-in tools that are handled internally (not via MCP Gateway)
     const builtInTools = [
       'message_agent', 'delegate_task', 'assign_simple_task', 'get_step_content',      // Communication tools (all agents)
       'travel_to_realm', 'get_current_realm', 'get_realm_elementals'  // Realm tools (druids only)
     ];
-    
+
     // Check if this is a built-in tool
     if (builtInTools.includes(toolName)) {
-      return await this.executeBuiltInTool(agent, toolName, params);
+      return await this.executeBuiltInTool(agent, toolName, params, sessionId);
     }
-    
+
     // All other tools are MCP tools that must go through the gateway
     console.log(`🌐 Routing MCP tool ${toolName} for agent ${agent.id} through MCP Gateway`);
     return await this.routeToolThroughMCPGateway(agent.id, toolName, params);
@@ -1883,13 +1912,13 @@ Your responses and behavior should be appropriate to this realm's context and ch
   /**
    * Execute built-in tools (communication and realm navigation)
    */
-  private async executeBuiltInTool(agent: Agent, toolName: string, params: any): Promise<any> {
+  private async executeBuiltInTool(agent: Agent, toolName: string, params: any, sessionId?: string): Promise<any> {
     // Define inter-agent communication tools that all agents can access
     const communicationTools = ['message_agent', 'delegate_task', 'assign_simple_task', 'get_step_content'];
-    
+
     // Define realm navigation tools (for druids)
     const realmTools = ['travel_to_realm', 'get_current_realm', 'get_realm_elementals'];
-    
+
     // Check access permissions based on agent type and tool category
     if (communicationTools.includes(toolName)) {
       // All agents can use inter-agent communication tools
@@ -1919,8 +1948,8 @@ Your responses and behavior should be appropriate to this realm's context and ch
         return await this.toolGetStepContent(params);
       
       case 'travel_to_realm':
-        return await this.toolTravelToRealm(agent.id, params);
-      
+        return await this.toolTravelToRealm(agent.id, params, sessionId);
+
       case 'get_current_realm':
         return await this.toolGetCurrentRealm(agent.id);
       
@@ -2225,9 +2254,9 @@ Please use your available tools to execute this task now and provide your comple
   /**
    * Tool: Travel to a different realm (Druid agents only)
    */
-  private async toolTravelToRealm(agentId: AgentId, params: { target_realm: string }): Promise<any> {
+  private async toolTravelToRealm(agentId: AgentId, params: { target_realm: string }, sessionId?: string): Promise<any> {
     const agent = await this.getAgent(agentId);
-    
+
     // Check if agent is a druid (druids inherently have realm travel abilities)
     if (agent.type !== 'druid') {
       throw new Error(`Agent ${agentId} is not a druid and cannot travel between realms`);
@@ -2235,10 +2264,10 @@ Please use your available tools to execute this task now and provide your comple
 
     // Resolve target realm name to UUID if needed
     let targetRealmId = params.target_realm;
-    
+
     // Check if the target_realm is a name (not a UUID)
     const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(params.target_realm);
-    
+
     if (!isUUID) {
       // Try to find realm by name (case-insensitive, handle common variations)
       const realms = await this.realmService.listRealms();
@@ -2275,17 +2304,40 @@ Please use your available tools to execute this task now and provide your comple
       throw new Error(`Agent ${agentId} does not have access to realm ${params.target_realm} (resolved: ${targetRealmId})`);
     }
 
-    // Update agent's current realm (use resolved UUID)
-    await this.updateAgent(agentId, {
-      realmAccess: {
-        ...agent.realmAccess,
-        currentRealmId: targetRealmId
+    // Determine previous realm
+    const previousRealmId = agent.realmAccess?.currentRealmId || agent.realmAccess?.boundRealmId || 'default';
+
+    // Update realm location - session-aware for concurrent sessions
+    if (sessionId && this.coordinationService) {
+      // Session-scoped travel: Update SessionAgentManager state only (doesn't affect agent's global state)
+      const sessionAgentManager = this.coordinationService.getSessionAgentManager(sessionId);
+      if (sessionAgentManager) {
+        sessionAgentManager.updateAgentRealmState(agentId, targetRealmId, previousRealmId);
+        console.log(`🌍 Session-scoped realm travel: Agent ${agentId} moved to ${targetRealmId} in session ${sessionId}`);
+      } else {
+        console.warn(`⚠️ SessionAgentManager not found for session ${sessionId}, falling back to global state update`);
+        // Fallback to global update if session manager not available
+        await this.updateAgent(agentId, {
+          realmAccess: {
+            ...agent.realmAccess,
+            currentRealmId: targetRealmId
+          }
+        });
       }
-    });
+    } else {
+      // Non-session travel: Update agent's global current realm (original behavior)
+      await this.updateAgent(agentId, {
+        realmAccess: {
+          ...agent.realmAccess,
+          currentRealmId: targetRealmId
+        }
+      });
+      console.log(`🌍 Global realm travel: Agent ${agentId} moved to ${targetRealmId}`);
+    }
 
     return {
       agent_id: agentId,
-      previous_realm: agent.realmAccess?.currentRealmId || agent.realmAccess?.boundRealmId || 'default',
+      previous_realm: previousRealmId,
       current_realm: targetRealmId,
       realm_name: params.target_realm,
       travel_time: new Date().toISOString()

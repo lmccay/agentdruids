@@ -210,6 +210,14 @@ export class CoordinationService {
   }
 
   /**
+   * Get SessionAgentManager for a given session (for session-scoped agent state)
+   */
+  getSessionAgentManager(sessionId: string): SessionAgentManagerImpl | null {
+    const session = this.sessions.get(sessionId);
+    return session ? session.sessionAgentManager : null;
+  }
+
+  /**
    * NEW ORCHESTRATED WORKFLOW: Start coordination with LLM-driven task decomposition
    */
   async startOrchestatedCoordination(request: CoordinationRequest): Promise<string> {
@@ -506,9 +514,9 @@ CRITICAL: Only assign tasks to DRUIDs. If an Elemental's expertise is needed, as
 
         // Build step context from previous outputs
         const stepContext = await this.buildStepContext(plan, step);
-        
-        // Execute the step
-        const stepOutput = await this.executeOrchestrationStep(step, stepContext);
+
+        // Execute the step with session context
+        const stepOutput = await this.executeOrchestrationStep(step, stepContext, session.id);
         
         // Store step output in session-isolated storage
         step.contentId = await this.storeStepContent(step, stepOutput, session);
@@ -580,21 +588,22 @@ CRITICAL: Only assign tasks to DRUIDs. If an Elemental's expertise is needed, as
   /**
    * Execute a single orchestration step
    */
-  private async executeOrchestrationStep(step: OrchestrationStep, context: string): Promise<string> {
+  private async executeOrchestrationStep(step: OrchestrationStep, context: string, sessionId?: string): Promise<string> {
     if (!this.agentService) throw new Error('AgentService not configured');
 
     if (step.actionType === 'execute_task') {
-      return await this.executeTaskStep(step, context);
+      return await this.executeTaskStep(step, context, sessionId);
     }
 
     if (step.actionType === 'travel_and_collaborate') {
-      return await this.executeTravelAndCollaborate(step, context);
+      return await this.executeTravelAndCollaborate(step, context, sessionId);
     }
 
     // Fallback for any other action types
     const prompt = `${context}\n\nExecute this action: ${step.description}`;
     const result = await this.agentService.executeAgentPrompt(step.agentId, {
       prompt,
+      ...(sessionId && { sessionId }),
       collaborationContext: {
         scenarioName: 'Orchestrated Coordination',
         scenarioType: 'step_execution',
@@ -609,7 +618,7 @@ CRITICAL: Only assign tasks to DRUIDs. If an Elemental's expertise is needed, as
   /**
    * Execute a task step - coordinator directly assigns task to participant
    */
-  private async executeTaskStep(step: OrchestrationStep, context: string): Promise<string> {
+  private async executeTaskStep(step: OrchestrationStep, context: string, sessionId?: string): Promise<string> {
     if (!this.agentService) throw new Error('AgentService not configured');
 
     console.log(`🎯 Executing task step ${step.stepNumber}: ${step.description}`);
@@ -633,6 +642,7 @@ CRITICAL: Only assign tasks to DRUIDs. If an Elemental's expertise is needed, as
         const travelPrompt = `Travel to realm "${step.parameters.realmName}" (realm ID: ${step.parameters.realmId}). Use the travel_to_realm tool.`;
         await this.agentService.executeAgentPrompt(step.agentId, {
           prompt: travelPrompt,
+          ...(sessionId && { sessionId }),
           collaborationContext: {
             scenarioName: 'Orchestrated Coordination',
             scenarioType: 'realm_travel',
@@ -658,6 +668,7 @@ CRITICAL: Only assign tasks to DRUIDs. If an Elemental's expertise is needed, as
     // Execute the task
     const result = await this.agentService.executeAgentPrompt(step.agentId, {
       prompt: fullPrompt,
+      ...(sessionId && { sessionId }),
       collaborationContext: {
         scenarioName: 'Orchestrated Coordination',
         scenarioType: 'coordinated_task',
@@ -673,7 +684,7 @@ CRITICAL: Only assign tasks to DRUIDs. If an Elemental's expertise is needed, as
    * Execute travel and collaboration step for druid
    * Druid travels to realm and collaborates with specified agents (respecting realm boundaries)
    */
-  private async executeTravelAndCollaborate(step: OrchestrationStep, context: string): Promise<string> {
+  private async executeTravelAndCollaborate(step: OrchestrationStep, context: string, sessionId?: string): Promise<string> {
     if (!this.agentService) throw new Error('AgentService not configured');
 
     console.log(`🚀 Starting travel and collaborate for step: ${step.stepId}`);
@@ -719,6 +730,7 @@ CRITICAL: Only assign tasks to DRUIDs. If an Elemental's expertise is needed, as
 
     const result = await this.agentService.executeAgentPrompt(step.agentId, {
       prompt,
+      ...(sessionId && { sessionId }),
       collaborationContext: {
         scenarioName: 'Orchestrated Coordination',
         scenarioType: 'druid_coordination',
@@ -1595,8 +1607,8 @@ When synthesizing results, focus on:
       if (druidTask) {
         // Execute the druid's multi-step task first - this will handle contacting other agents
         console.log(`🎯 Executing druid coordination task for agent ${druidTask.agentId}...`);
-        await this.executeTaskSequentially(druidTask);
-        
+        await this.executeTaskSequentially(druidTask, session.id);
+
         // Mark any elemental tasks that are still pending as completed if druid handled them
         session.participantTasks.forEach(task => {
           if (task !== druidTask && task.status === 'pending') {
@@ -1609,14 +1621,14 @@ When synthesizing results, focus on:
       } else {
         // Fallback to parallel execution if no clear druid task found
         console.log(`⚠️ No clear druid coordination task found, falling back to parallel execution...`);
-        const taskPromises = session.participantTasks.map(task => this.executeTaskInParallel(task));
+        const taskPromises = session.participantTasks.map(task => this.executeTaskInParallel(task, session.id));
         await Promise.all(taskPromises);
       }
-      
+
     } else {
       console.log(`⚡ Parallel workflow detected - executing all tasks simultaneously...`);
       // Execute all tasks in parallel (existing behavior)
-      const taskPromises = session.participantTasks.map(task => this.executeTaskInParallel(task));
+      const taskPromises = session.participantTasks.map(task => this.executeTaskInParallel(task, session.id));
       await Promise.all(taskPromises);
     }
     
@@ -1626,15 +1638,16 @@ When synthesizing results, focus on:
   /**
    * Execute a single task (helper method)
    */
-  private async executeTaskInParallel(task: any): Promise<void> {
+  private async executeTaskInParallel(task: any, sessionId?: string): Promise<void> {
     try {
       task.status = 'in_progress';
-      
+
       // Get role-specific prompt override for this agent
       const roleInfo = this.getCoordinationRole(task.agentId);
-      
+
       const result = await this.agentService!.executeAgentPrompt(task.agentId, {
         prompt: task.task,
+        ...(sessionId && { sessionId }),
         collaborationContext: {
           scenarioName: roleInfo.role || 'Collaborative Participant',
           scenarioType: 'coordination',
@@ -1658,26 +1671,26 @@ When synthesizing results, focus on:
   /**
    * Execute a multi-step task sequentially (for complex druid workflows)
    */
-  private async executeTaskSequentially(task: any): Promise<void> {
+  private async executeTaskSequentially(task: any, sessionId?: string): Promise<void> {
     try {
       task.status = 'in_progress';
-      
+
       // Split the task into steps if it contains "then" or numbered steps
       const taskSteps = this.parseTaskSteps(task.task);
-      
+
       console.log(`🎯 Executing ${taskSteps.length} sequential steps for agent ${task.agentId}`);
-      
+
       let accumulatedResult = '';
-      
+
       for (let i = 0; i < taskSteps.length; i++) {
         const step = taskSteps[i];
         if (!step) continue; // Skip undefined steps
-        
+
         console.log(`📍 Step ${i + 1}/${taskSteps.length}: ${step.substring(0, 100)}...`);
-        
+
         // Get role-specific prompt override for this agent
         const roleInfo = this.getCoordinationRole(task.agentId);
-        
+
         // Enhanced step prompt to ensure active collaboration
         let enhancedStepPrompt;
         if (accumulatedResult) {
@@ -1685,9 +1698,10 @@ When synthesizing results, focus on:
         } else {
           enhancedStepPrompt = `Complete this coordination step by taking ALL required actions: ${step}\n\nCRITICAL: This step requires MULTIPLE tool calls. You must complete EVERY action mentioned in this step:\n1. If the step mentions traveling, use travel_to_realm\n2. If the step mentions delegating, use delegate_task  \n3. If the step mentions collecting results, wait for and report the delegation response\n\nDO NOT STOP after just one tool call. Complete ALL actions in this step before responding.`;
         }
-        
+
         const result = await this.agentService!.executeAgentPrompt(task.agentId, {
           prompt: enhancedStepPrompt,
+          ...(sessionId && { sessionId }),
           collaborationContext: {
             scenarioName: roleInfo.role || 'Sequential Coordinator',
             scenarioType: 'coordination',
@@ -2544,10 +2558,11 @@ INTEGRATED RESULT:`;
       
       // Create a simple task based on the scenario prompt
       const taskPrompt = `Please contribute to this coordination scenario: ${session.scenarioPrompt}\n\nProvide your perspective as ${agent.name} with your expertise in ${agent.specialization?.domain || 'general analysis'}. Focus on delivering actual content rather than just methodology or steps.`;
-      
+
       try {
         const contribution = await this.agentService.executeAgentPrompt(participantId as AgentId, {
-          prompt: taskPrompt
+          prompt: taskPrompt,
+          sessionId: session.id
         });
         
         participantContributions.push({
