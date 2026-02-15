@@ -87,42 +87,51 @@ Druids act on user's behalf with realm-scoped tokens
 
 ## 3. System Prompt Architecture
 
-### Status: 🟡 Needs Design
+### Status: 🟢 Design Complete (See: [SYSTEM_PROMPT_ARCHITECTURE.md](SYSTEM_PROMPT_ARCHITECTURE.md))
+
+**Design Completed:** 2025-02-08
 
 **Key Decisions:**
-- [ ] Centralized system prompt storage
-- [ ] Prompt template system
-- [ ] Inheritance model: Base → Realm-specific → Agent-specific
-- [ ] Prompt versioning and updates
-- [ ] Prompt testing and validation
+- [x] URL-based storage abstraction (HTTPS, S3, GCS, Azure, files, Git)
+- [x] YAML-based prompt file format with metadata
+- [x] Inheritance model: Base → Agent Type → Realm → Agent-specific
+- [x] Multi-layer caching strategy (in-memory + Redis)
+- [x] Hot reload with file watchers
+- [x] Prompt versioning with explicit version pinning
+- [x] Composition engine with override_points and extension_points
 
 **Architecture:**
 ```
-Base Security Prompt (centralized)
+Global Base Prompt (https://prompts.druids.cloud/v1/base/global.yaml)
   ↓ extended by
-Engineering Realm Security Context
+Agent Type Prompt (elemental, druid, gaia, worldtree)
   ↓ extended by
-Engineering-Security-Elemental specifics
+Realm-Specific Prompt (engineering, legal, marketing)
+  ↓ extended by
+Agent-Specific Prompt (github-elemental-01, aws-elemental-02)
+  ↓ composed with
+Runtime Context (session_id, user_id, available_tools)
 ```
 
-**Examples:**
-```typescript
-baseSecurityPrompt = "You are a security specialist..."
-engineeringSecurityPrompt = baseSecurityPrompt + "Focus on code vulnerabilities..."
-legalSecurityPrompt = baseSecurityPrompt + "Focus on document confidentiality..."
-```
+**Implementation Plan:**
+- [ ] Phase 1: Foundation (FileLoader, HttpsLoader, basic composition)
+- [ ] Phase 2: Cloud storage (S3Loader, GCSLoader, AzureLoader)
+- [ ] Phase 3: Composition engine (override/extend logic, section ordering)
+- [ ] Phase 4: Hot reload & monitoring (PromptWatcher, metrics)
+- [ ] Phase 5: UI & management (frontend prompt viewer)
+- [ ] Phase 6: Advanced features (GitLoader, A/B testing, effectiveness)
 
-**Components Needed:**
-- [ ] Prompt template storage (database, files, external service?)
-- [ ] Template rendering engine
-- [ ] Prompt inheritance/composition logic
-- [ ] Prompt management API
-- [ ] Versioning strategy
+**Answered Questions:**
+- ✅ Storage: URL-based abstraction supporting HTTPS, S3, local files, Git
+- ✅ Composition: Layered with explicit override_points and extension_points
+- ✅ Hot-reload: File watchers + cache invalidation API
+- ✅ Versioning: Explicit version pinning with validation
+- ✅ Testing: Composition unit tests + integration tests + API endpoint for testing
 
 **Open Questions:**
-- How to test prompts for effectiveness?
-- Hot-reload prompts without restarting agents?
-- Prompt drift detection?
+- Prompt effectiveness measurement metrics?
+- Multi-language support for international deployments?
+- Prompt marketplace for community contributions?
 
 ---
 
