@@ -56,6 +56,9 @@ module.exports = {
       transform: {
         '^.+\\.ts$': 'ts-jest',
       },
+      transformIgnorePatterns: [
+        'node_modules/(?!(marked)/)'
+      ],
       testTimeout: 5000
     },
     {

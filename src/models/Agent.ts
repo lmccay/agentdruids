@@ -8,6 +8,7 @@ import {
   ResourceLimits,
   LLMProvider
 } from './Types';
+import { AgentPromptConfig } from './PromptConfig';
 
 /**
  * Specialization profile defining an agent's domain expertise and capabilities
@@ -166,29 +167,32 @@ export interface Agent extends BaseEntity {
   name: string;
   description: string;
   status: AgentStatus;
-  
+
   // Core capabilities and configuration
   capabilities: string[];
   specialization: SpecializationProfile;
   personality: DruidPersona;
-  
+
   // Technical configuration
   mcpTools: string[];
   toolPermissions: ToolPermissions;
   llmConfig: LLMConfiguration;
   resourceLimits: ResourceLimits;
-  
+
+  // System Prompt Configuration (NEW - Phase 1)
+  promptConfig?: AgentPromptConfig;
+
   // Deployment and runtime
   deployment?: AgentDeployment;
   bindings: AgentBinding[];
-  
+
   // Realm access control
   realmAccess?: RealmAccess;
-  
+
   // Metadata
   tags?: string[];
   metadata?: Record<string, any>;
-  
+
   // Audit information
   createdBy?: string;
   lastModifiedBy?: string;

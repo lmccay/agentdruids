@@ -1,0 +1,35 @@
+{
+  "prompt_sources": {
+    "global_base": {
+      "url": "base/global.md",
+      "cache_ttl": 3600,
+      "version": "1.0.0"
+    },
+    "agent_types": {
+      "druid": {
+        "url": "agent-types/druid.md",
+        "cache_ttl": 3600,
+        "optional": true
+      },
+      "elemental": {
+        "url": "agent-types/elemental.md",
+        "cache_ttl": 3600
+      },
+      "gaia": {
+        "url": "agent-types/gaia.md",
+        "cache_ttl": 3600,
+        "optional": true
+      },
+      "worldtree": {
+        "url": "agent-types/worldtree.md",
+        "cache_ttl": 3600,
+        "optional": true
+      }
+    },
+    "realm_specific": {
+      "base_url": "realms",
+      "pattern": "{realmId}.md",
+      "cache_ttl": 1800
+    }
+  }
+}

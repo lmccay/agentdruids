@@ -93,12 +93,15 @@ Druids act on user's behalf with realm-scoped tokens
 
 **Key Decisions:**
 - [x] URL-based storage abstraction (HTTPS, S3, GCS, Azure, files, Git)
-- [x] YAML-based prompt file format with metadata
-- [x] Inheritance model: Base → Agent Type → Realm → Agent-specific
+- [x] Markdown format with YAML frontmatter (not YAML for prompts)
+- [x] Hybrid model: Centralized bases (URL) + Agent extensions (database)
+- [x] Inheritance model: Global → Agent Type → Realm → Agent Extension
 - [x] Multi-layer caching strategy (in-memory + Redis)
 - [x] Hot reload with file watchers
 - [x] Prompt versioning with explicit version pinning
 - [x] Composition engine with override_points and extension_points
+- [x] Template library with snapshot model (Phase 1) and optional references (Phase 2)
+- [x] **Security architecture with 5-layer defense-in-depth**
 
 **Architecture:**
 ```
@@ -123,15 +126,27 @@ Runtime Context (session_id, user_id, available_tools)
 
 **Answered Questions:**
 - ✅ Storage: URL-based abstraction supporting HTTPS, S3, local files, Git
+- ✅ Format: Markdown with YAML frontmatter (not YAML for prose)
 - ✅ Composition: Layered with explicit override_points and extension_points
+- ✅ Agent extensions: Database-stored, UI-editable (not file-based)
+- ✅ Templates: Snapshot model (copy-on-use) for Phase 1
 - ✅ Hot-reload: File watchers + cache invalidation API
 - ✅ Versioning: Explicit version pinning with validation
 - ✅ Testing: Composition unit tests + integration tests + API endpoint for testing
+- ✅ **Security: Immutable sections, pattern detection, runtime enforcement, audit logging**
+
+**Security Architecture:**
+- ✅ Immutable sections prevent security rule overrides
+- ✅ Protected sections allow extension but not replacement
+- ✅ Pattern detection blocks obvious injection attempts at UI level
+- ✅ Runtime enforcement (code-level guardrails) is ultimate protection
+- ✅ Audit logging tracks all security violations and suspicious patterns
+- ✅ Credential redaction in tool outputs
 
 **Open Questions:**
 - Prompt effectiveness measurement metrics?
 - Multi-language support for international deployments?
-- Prompt marketplace for community contributions?
+- When to implement Phase 2 (template references) for fleet management?
 
 ---
 
