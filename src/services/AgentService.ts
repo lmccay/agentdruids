@@ -18,6 +18,10 @@ import { generateUUID, AgentIdMapper } from '../utils/uuidUtils';
 import { MCPConfigLoader } from './mcp/MCPConfigLoader';
 import { HttpMCPClient } from './mcp/HttpMCPClient';
 import { SSEMCPClient } from './mcp/SSEMCPClient';
+import { PromptCompositionService } from './PromptCompositionService';
+import { PromptSourcesConfig } from '../models/PromptConfig';
+import * as fs from 'fs/promises';
+import * as path from 'path';
 
 /**
  * Agent execution request for LLM operations
@@ -100,6 +104,7 @@ export class AgentService {
   private mcpConfigLoader: MCPConfigLoader;
   private mcpClients: Map<string, HttpMCPClient | SSEMCPClient> = new Map();
   private coordinationService?: any; // Avoid circular import, set via setter
+  private promptCompositionService: PromptCompositionService | null = null;
 
   constructor(ollamaClient?: OllamaClient, policyEngine?: PolicyEngine, openaiClient?: OpenAIClient) {
     this.ollamaClient = ollamaClient || new OllamaClient(createDefaultOllamaConfig());
@@ -117,8 +122,13 @@ export class AgentService {
     this.mcpConfigLoader = new MCPConfigLoader();
     this.initializeMCPConfig();
 
+    // Initialize prompt composition service
+    this.initializePromptComposition().catch(error => {
+      console.warn('Failed to initialize prompt composition:', error instanceof Error ? error.message : 'Unknown error');
+    });
+
     this.initializeSystemAgents();
-    
+
     // Initialize service with dual persistence
     this.initializeService().catch(error => {
       console.warn('Failed to initialize AgentService with database:', error instanceof Error ? error.message : 'Unknown error');
@@ -141,6 +151,24 @@ export class AgentService {
     } catch (error) {
       console.error('❌ Failed to initialize MCP config:', error);
       // Continue without MCP support
+    }
+  }
+
+  /**
+   * Initialize prompt composition service
+   */
+  private async initializePromptComposition(): Promise<void> {
+    try {
+      // Load prompt sources configuration
+      const configPath = path.join(process.cwd(), 'config', 'prompt-sources.json');
+      const configContent = await fs.readFile(configPath, 'utf-8');
+      const config: PromptSourcesConfig = JSON.parse(configContent);
+
+      this.promptCompositionService = new PromptCompositionService(config);
+      console.log('✅ Prompt composition service initialized');
+    } catch (error) {
+      console.error('❌ Failed to initialize prompt composition:', error);
+      // Continue without prompt composition (will use fallback behavior)
     }
   }
 
@@ -269,6 +297,7 @@ export class AgentService {
       },
       bindings: [],
       ...(request.realmAccess && { realmAccess: request.realmAccess }),
+      ...(request.promptConfig && { promptConfig: request.promptConfig }),
       tags: request.tags || [],
       metadata: request.metadata || {},
       createdAt: now,
@@ -554,6 +583,7 @@ export class AgentService {
       resourceLimits: updateData.resourceLimits || agent.resourceLimits,
       tags: updateData.tags !== undefined ? updateData.tags : (agent.tags || []),
       metadata: updateData.metadata !== undefined ? updateData.metadata : (agent.metadata || {}),
+      promptConfig: updateData.promptConfig !== undefined ? updateData.promptConfig : agent.promptConfig,
       updatedAt: Date.now().toString(),
       ...(requesterId && { lastModifiedBy: requesterId }),
       // Replace realmAccess completely instead of merging to allow removing fields
@@ -738,36 +768,74 @@ export class AgentService {
 
     const startTime = Date.now();
 
-    // Generate system prompt - use persona-aware prompt if collaboration context provided
-    let baseSystemPrompt: string;
+    // Generate system prompt
+    let systemPrompt: string;
 
     if (request.systemPrompt) {
-      // Use explicit system prompt override
-      baseSystemPrompt = request.systemPrompt;
+      // Use explicit system prompt override (for backward compatibility)
+      systemPrompt = request.systemPrompt;
     } else if (request.collaborationContext?.usePersonaPrompt && request.collaborationContext.scenarioName) {
-      // Generate enhanced persona-aware system prompt for collaborations
+      // Generate enhanced persona-aware system prompt for collaborations (legacy)
       const collaborationContextStr = this.generateCollaborationContext(
         request.collaborationContext.scenarioName,
         request.collaborationContext.scenarioType,
         request.collaborationContext.agentRole
       );
-      baseSystemPrompt = this.generatePersonaSystemPrompt(
+      const baseSystemPrompt = this.generatePersonaSystemPrompt(
         agent,
         collaborationContextStr,
         request.collaborationContext.agentRole
       );
+      systemPrompt = await this.generateRealmAwareSystemPrompt(agent, baseSystemPrompt, request.sessionId);
+      const toolInformation = await this.generateToolAwarenessPrompt(agent);
+      if (toolInformation) {
+        systemPrompt += toolInformation;
+      }
+    } else if (this.promptCompositionService && agent.promptConfig) {
+      // Use new prompt composition system (layered approach)
+      try {
+        // Get current realm ID from session if available
+        let realmId: string | undefined;
+        if (request.sessionId && agent.realmAccess?.currentRealmId) {
+          realmId = agent.realmAccess.currentRealmId;
+        } else if (agent.realmAccess?.boundRealmId) {
+          realmId = agent.realmAccess.boundRealmId;
+        }
+
+        // Get available tools
+        const availableTools = agent.mcpTools || [];
+
+        const composedPrompt = await this.promptCompositionService.composePrompt(agent, {
+          session_id: request.sessionId,
+          user_id: 'system', // TODO: Pass actual user ID when available
+          realm_id: realmId,
+          timestamp: new Date().toISOString(),
+          available_tools: availableTools
+        });
+
+        systemPrompt = composedPrompt.final_prompt;
+
+        if (composedPrompt.security_violations.length > 0) {
+          console.warn(`⚠️  Agent ${agentId} has ${composedPrompt.security_violations.length} security violations in prompt composition`);
+        }
+      } catch (error) {
+        console.error('Failed to compose prompt, falling back to legacy behavior:', error);
+        // Fall back to legacy behavior
+        const baseSystemPrompt = agent.llmConfig.systemPrompt || `You are ${agent.name}. ${agent.description}`;
+        systemPrompt = await this.generateRealmAwareSystemPrompt(agent, baseSystemPrompt, request.sessionId);
+        const toolInformation = await this.generateToolAwarenessPrompt(agent);
+        if (toolInformation) {
+          systemPrompt += toolInformation;
+        }
+      }
     } else {
-      // Use agent's configured system prompt or fallback
-      baseSystemPrompt = agent.llmConfig.systemPrompt || `You are ${agent.name}. ${agent.description}`;
-    }
-
-    // Add realm context to the system prompt if agent is bound to a realm (session-aware)
-    let systemPrompt = await this.generateRealmAwareSystemPrompt(agent, baseSystemPrompt, request.sessionId);
-
-    // Add tool awareness to system prompt based on agent type and permissions
-    const toolInformation = await this.generateToolAwarenessPrompt(agent);
-    if (toolInformation) {
-      systemPrompt += toolInformation;
+      // Legacy behavior: use agent's configured system prompt or fallback
+      const baseSystemPrompt = agent.llmConfig.systemPrompt || `You are ${agent.name}. ${agent.description}`;
+      systemPrompt = await this.generateRealmAwareSystemPrompt(agent, baseSystemPrompt, request.sessionId);
+      const toolInformation = await this.generateToolAwarenessPrompt(agent);
+      if (toolInformation) {
+        systemPrompt += toolInformation;
+      }
     }
 
     // Check if agentic loop is enabled for this agent

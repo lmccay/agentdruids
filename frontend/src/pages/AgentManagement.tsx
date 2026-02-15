@@ -43,6 +43,11 @@ interface AgentFormData {
   agenticLoopEnabled: boolean;
   agenticLoopMaxIterations: number;
   agenticLoopTrackCosts: boolean;
+  // Prompt composition configuration (NEW)
+  usePromptComposition: boolean; // Toggle to use new system
+  baseTemplate: 'standard' | 'minimal';
+  agentExtension: string;
+  disableRealmPrompt: boolean;
 }
 
 function AgentCard({ 
@@ -237,7 +242,12 @@ function AgentModal({
     // Agentic loop configuration
     agenticLoopEnabled: agent?.llmConfig?.agenticLoop?.enabled || false,
     agenticLoopMaxIterations: agent?.llmConfig?.agenticLoop?.maxIterations || 10,
-    agenticLoopTrackCosts: agent?.llmConfig?.agenticLoop?.trackCosts ?? true
+    agenticLoopTrackCosts: agent?.llmConfig?.agenticLoop?.trackCosts ?? true,
+    // Prompt composition config
+    usePromptComposition: !!agent?.promptConfig,
+    baseTemplate: agent?.promptConfig?.baseTemplate || 'standard',
+    agentExtension: agent?.promptConfig?.agentExtension || '',
+    disableRealmPrompt: agent?.promptConfig?.disableRealmPrompt || false
   });
 
     // Update form data when agent prop changes
@@ -262,7 +272,12 @@ function AgentModal({
         mcpTools: agent.mcpTools || [],
         agenticLoopEnabled: agent.llmConfig?.agenticLoop?.enabled || false,
         agenticLoopMaxIterations: agent.llmConfig?.agenticLoop?.maxIterations || 10,
-        agenticLoopTrackCosts: agent.llmConfig?.agenticLoop?.trackCosts ?? true
+        agenticLoopTrackCosts: agent.llmConfig?.agenticLoop?.trackCosts ?? true,
+        // Prompt composition config
+        usePromptComposition: !!agent.promptConfig,
+        baseTemplate: agent.promptConfig?.baseTemplate || 'standard',
+        agentExtension: agent.promptConfig?.agentExtension || '',
+        disableRealmPrompt: agent.promptConfig?.disableRealmPrompt || false
       });
     } else {
       // Reset form for create mode
@@ -285,7 +300,12 @@ function AgentModal({
         mcpTools: [],
         agenticLoopEnabled: false,
         agenticLoopMaxIterations: 10,
-        agenticLoopTrackCosts: true
+        agenticLoopTrackCosts: true,
+        // Prompt composition config
+        usePromptComposition: true, // Enable by default for new agents
+        baseTemplate: 'standard',
+        agentExtension: '',
+        disableRealmPrompt: false
       });
     }
   }, [agent]);
@@ -399,7 +419,7 @@ function AgentModal({
 
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">
-              System Prompt
+              System Prompt (Legacy)
             </label>
             <textarea
               value={formData.systemPrompt}
@@ -407,8 +427,154 @@ function AgentModal({
               rows={4}
               className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-primary-500"
               placeholder="Custom system prompt to define the agent's behavior and personality..."
-              disabled={isReadOnly}
+              disabled={isReadOnly || formData.usePromptComposition}
             />
+            {formData.usePromptComposition && (
+              <p className="text-xs text-gray-500 mt-1">
+                Disabled when using prompt composition. Use Agent Extension instead.
+              </p>
+            )}
+          </div>
+
+          {/* Prompt Composition Section (NEW) */}
+          <div className="border-t pt-6">
+            <div className="flex items-center justify-between mb-4">
+              <h4 className="font-medium text-gray-900">Prompt Composition (NEW)</h4>
+              <div className="flex items-center space-x-2">
+                <input
+                  type="checkbox"
+                  id="usePromptComposition"
+                  checked={formData.usePromptComposition}
+                  onChange={(e) => setFormData({ ...formData, usePromptComposition: e.target.checked })}
+                  disabled={isReadOnly}
+                  className="rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+                />
+                <label htmlFor="usePromptComposition" className="text-sm font-medium text-gray-700 cursor-pointer">
+                  Enable Layered Prompts
+                </label>
+              </div>
+            </div>
+
+            {formData.usePromptComposition && (
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Base Template
+                  </label>
+                  <div className="space-y-2">
+                    <label className="flex items-center space-x-2">
+                      <input
+                        type="radio"
+                        name="baseTemplate"
+                        value="standard"
+                        checked={formData.baseTemplate === 'standard'}
+                        onChange={(e) => setFormData({ ...formData, baseTemplate: 'standard' })}
+                        disabled={isReadOnly}
+                        className="text-primary-600 focus:ring-primary-500"
+                      />
+                      <span className="text-sm">
+                        <span className="font-medium">Standard</span> - Includes global + agent type + realm context
+                      </span>
+                    </label>
+                    <label className="flex items-center space-x-2">
+                      <input
+                        type="radio"
+                        name="baseTemplate"
+                        value="minimal"
+                        checked={formData.baseTemplate === 'minimal'}
+                        onChange={(e) => setFormData({ ...formData, baseTemplate: 'minimal' })}
+                        disabled={isReadOnly}
+                        className="text-primary-600 focus:ring-primary-500"
+                      />
+                      <span className="text-sm">
+                        <span className="font-medium">Minimal</span> - Global + agent type only (no realm)
+                      </span>
+                    </label>
+                  </div>
+                </div>
+
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="block text-sm font-medium text-gray-700">
+                      Agent Extension (Markdown)
+                    </label>
+                    {!isReadOnly && !formData.agentExtension && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const agentName = formData.name || 'My Agent';
+                          const agentDesc = formData.description || 'Custom instructions for this agent';
+                          const template = `---
+version: 1.0.0
+metadata:
+  name: "${agentName} Extension"
+  description: "${agentDesc}"
+---
+
+# Domain Expertise
+
+This agent specializes in...
+
+# Custom Guidelines
+
+- Always...
+- Never...`;
+                          setFormData({ ...formData, agentExtension: template });
+                        }}
+                        className="text-xs text-primary-600 hover:text-primary-700 font-medium"
+                      >
+                        Insert Template
+                      </button>
+                    )}
+                  </div>
+                  <textarea
+                    value={formData.agentExtension}
+                    onChange={(e) => setFormData({ ...formData, agentExtension: e.target.value })}
+                    rows={12}
+                    className="w-full px-3 py-2 font-mono text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-primary-500"
+                    placeholder="Click 'Insert Template' to start with a template, or write your own Markdown..."
+                    disabled={isReadOnly}
+                  />
+                  <p className="text-xs text-gray-500 mt-1">
+                    Custom Markdown instructions. Frontmatter will be auto-generated from agent name and description.
+                  </p>
+                </div>
+
+                <div className="flex items-start space-x-3">
+                  <input
+                    type="checkbox"
+                    id="disableRealmPrompt"
+                    checked={formData.disableRealmPrompt}
+                    onChange={(e) => setFormData({ ...formData, disableRealmPrompt: e.target.checked })}
+                    disabled={isReadOnly}
+                    className="mt-1 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+                  />
+                  <div>
+                    <label htmlFor="disableRealmPrompt" className="block text-sm font-medium text-gray-900 cursor-pointer">
+                      Disable Realm-Specific Prompts
+                    </label>
+                    <p className="text-xs text-gray-600 mt-1">
+                      Skip loading realm context even with standard template. Useful for agents that don't need realm-specific knowledge.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="bg-blue-50 border border-blue-200 rounded-md p-3">
+                  <p className="text-sm text-blue-800">
+                    <strong>Composition Layers:</strong>
+                  </p>
+                  <ol className="text-xs text-blue-700 mt-2 space-y-1 ml-4 list-decimal">
+                    <li>Global Base (security rules, identity)</li>
+                    <li>Agent Type ({formData.type}) base prompts</li>
+                    {formData.baseTemplate === 'standard' && !formData.disableRealmPrompt && (
+                      <li>Realm Context (if bound/assigned)</li>
+                    )}
+                    {formData.agentExtension && <li>Your Agent Extension</li>}
+                    <li>Security Postamble (always added)</li>
+                  </ol>
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Realm Association Section */}
@@ -915,6 +1081,28 @@ export default function AgentManagement() {
     }
   };
 
+  /**
+   * Auto-wrap agent extension with YAML frontmatter if not present
+   */
+  const ensureFrontmatter = (extension: string, agentName: string, agentDescription: string): string => {
+    if (!extension) return extension;
+
+    // Check if already has frontmatter (starts with ---)
+    if (extension.trim().startsWith('---')) {
+      return extension;
+    }
+
+    // Auto-wrap with frontmatter
+    return `---
+version: 1.0.0
+metadata:
+  name: "${agentName} Extension"
+  description: "${agentDescription}"
+---
+
+${extension}`;
+  };
+
   const handleCreateAgent = async (data: AgentFormData) => {
     try {
       // Map form data to the correct format expected by the backend
@@ -939,14 +1127,22 @@ export default function AgentManagement() {
           maxIterations: data.agenticLoopMaxIterations,
           trackCosts: data.agenticLoopTrackCosts
         },
+        // Prompt composition configuration (NEW)
+        promptConfig: data.usePromptComposition ? {
+          baseTemplate: data.baseTemplate,
+          agentExtension: data.agentExtension
+            ? ensureFrontmatter(data.agentExtension, data.name, data.description)
+            : undefined,
+          disableRealmPrompt: data.disableRealmPrompt
+        } : undefined,
         // Map realm associations using proper realmAccess structure
         realmAccess: (() => {
           if (data.type === 'elemental' && data.boundRealmId) {
             return { boundRealmId: data.boundRealmId };
           } else if (data.type === 'druid' && data.allowedRealms.length > 0) {
             return {
-              accessibleRealms: data.allowedRealms,
-              boundRealmId: 'default' // Default realm for druids
+              accessibleRealms: data.allowedRealms
+              // Druids should NOT have boundRealmId - they can travel between realms
             };
           }
           return undefined; // No realm assignment
@@ -1010,14 +1206,22 @@ export default function AgentManagement() {
         },
         modelId: data.modelId, // Include the selected model profile
         mcpTools: data.mcpTools, // Include MCP tool patterns
+        // Prompt composition configuration (NEW)
+        promptConfig: data.usePromptComposition ? {
+          baseTemplate: data.baseTemplate,
+          agentExtension: data.agentExtension
+            ? ensureFrontmatter(data.agentExtension, data.name, data.description)
+            : undefined,
+          disableRealmPrompt: data.disableRealmPrompt
+        } : undefined,
         // Map realm associations using new realmAccess structure
         realmAccess: (() => {
           if (data.type === 'elemental') {
             return { boundRealmId: data.boundRealmId }; // Always include, even if empty
           } else if (data.type === 'druid') {
             return {
-              accessibleRealms: data.allowedRealms,
-              boundRealmId: 'default' // Default realm for druids
+              accessibleRealms: data.allowedRealms
+              // Druids should NOT have boundRealmId - they can travel between realms
             };
           }
           return undefined;

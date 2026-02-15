@@ -39,6 +39,11 @@ export interface Agent {
     accessibleRealms?: string[]; // For Druids - simplified to just realm IDs
   };
   mcpTools?: string[]; // MCP tool patterns with wildcard support (e.g., "github:*", "github:list_*")
+  promptConfig?: {
+    baseTemplate: 'standard' | 'minimal';
+    agentExtension?: string;
+    disableRealmPrompt?: boolean;
+  };
   createdAt: string;
   updatedAt: string;
 }
@@ -79,6 +84,11 @@ export interface CreateAgentRequest {
     maxIterations?: number;
     trackCosts?: boolean;
   };
+  promptConfig?: {
+    baseTemplate: 'standard' | 'minimal';
+    agentExtension?: string;
+    disableRealmPrompt?: boolean;
+  };
 }
 
 export interface UpdateAgentRequest {
@@ -113,6 +123,11 @@ export interface UpdateAgentRequest {
   };
   modelId?: string; // Named model configuration ID
   mcpTools?: string[]; // MCP tool patterns with wildcard support
+  promptConfig?: {
+    baseTemplate: 'standard' | 'minimal';
+    agentExtension?: string;
+    disableRealmPrompt?: boolean;
+  };
 }
 
 export interface CreateRealmRequest {

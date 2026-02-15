@@ -214,6 +214,7 @@ export interface CreateAgentRequest {
   llmConfig: LLMConfiguration;
   resourceLimits?: ResourceLimits;
   realmAccess?: RealmAccess;
+  promptConfig?: AgentPromptConfig;
   tags?: string[];
   metadata?: Record<string, any>;
 }
@@ -234,6 +235,7 @@ export interface UpdateAgentRequest {
   llmConfig?: Partial<LLMConfiguration>;
   resourceLimits?: ResourceLimits;
   realmAccess?: Partial<RealmAccess>;
+  promptConfig?: AgentPromptConfig;
   tags?: string[];
   metadata?: Record<string, any>;
 }
