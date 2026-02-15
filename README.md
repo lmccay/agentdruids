@@ -35,6 +35,14 @@ Access the comprehensive management interface at **http://localhost:3004** after
 # Open http://localhost:3004 in your browser
 ```
 
+### 🌍 Remote Access
+Access the UI from any device on your network:
+```bash
+./scripts/setup-remote-access.sh    # Automated setup
+# Then access from any device: http://<your-server-ip>:3004
+```
+See [docs/REMOTE_ACCESS.md](docs/REMOTE_ACCESS.md) for configuration details and security best practices.
+
 ## 🚀 Quick Start with Docker
 
 ### Prerequisites

@@ -14,7 +14,8 @@ services:
     environment:
       - NODE_ENV=development
       - PORT=3000
-      - ALLOWED_ORIGINS=http://localhost:3000,http://localhost:8080,http://localhost:3001
+      - SERVER_HOST=${SERVER_HOST:-localhost}
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:3000,http://localhost:8080,http://localhost:3001}
       - LOG_LEVEL=debug
       - DRUIDS_ENV=docker-dev
       - OLLAMA_BASE_URL=http://druids-ollama:11434
@@ -60,6 +61,7 @@ services:
       - MCP_SERVER_PORT=3003
       - MCP_SERVER_HOST=0.0.0.0
       - PORT=3003  # Internal port for this container
+      - SERVER_HOST=${SERVER_HOST:-localhost}
       - LOG_LEVEL=debug
       - MAIN_APP_URL=http://druids-main:3000
     volumes:

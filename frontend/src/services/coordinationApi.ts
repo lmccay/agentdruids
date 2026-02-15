@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { apiConfig } from '../config/api-config';
 
 // Types for our new coordination system
 export interface CoordinationSession {
@@ -64,7 +65,7 @@ export interface PublishedContent {
 
 // MCP-based coordination API
 class MCPCoordinationAPI {
-  private baseURL = 'http://localhost:3003/mcp';
+  private baseURL = apiConfig.mcpBaseURL;
   private sessionId: string | null = null;
 
   private async initializeSession(): Promise<string> {

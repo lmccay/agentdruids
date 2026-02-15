@@ -66,9 +66,45 @@ export class DruidApp {
    * Configure middleware stack
    */
   private configureMiddleware(): void {
-    // CORS configuration
+    // CORS configuration - Allow both localhost and remote access
+    const allowedOrigins = [
+      'http://localhost:3000',
+      'http://localhost:3001',
+      'http://localhost:3003',
+      'http://localhost:3004',
+      'http://localhost:3005',
+    ];
+
+    // Add custom allowed origins from environment
+    const customOrigins = process.env.ALLOWED_ORIGINS?.split(',').map(o => o.trim()) || [];
+    allowedOrigins.push(...customOrigins);
+
     this.app.use(cors({
-      origin: ['http://localhost:3000', 'http://localhost:3001', 'http://localhost:3003', 'http://localhost:3004', 'http://localhost:3005'],
+      origin: (origin, callback) => {
+        // Allow requests with no origin (mobile apps, curl, etc.)
+        if (!origin) return callback(null, true);
+
+        // Check if origin is in allowed list
+        if (allowedOrigins.includes(origin)) {
+          return callback(null, true);
+        }
+
+        // Allow origins from same host (different ports)
+        try {
+          const originUrl = new URL(origin);
+          const serverHost = process.env.SERVER_HOST || 'localhost';
+
+          // Allow any port on the server's hostname
+          if (originUrl.hostname === serverHost || originUrl.hostname === 'localhost' || originUrl.hostname === '127.0.0.1') {
+            return callback(null, true);
+          }
+        } catch (e) {
+          // Invalid origin URL
+        }
+
+        // Reject all other origins
+        callback(new Error('Not allowed by CORS'));
+      },
       credentials: true,
       methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
       allowedHeaders: ['Content-Type', 'Authorization', 'x-requester-id', 'x-client-id']

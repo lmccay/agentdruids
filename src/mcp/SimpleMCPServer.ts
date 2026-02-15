@@ -91,7 +91,7 @@ export class SimpleMCPServer {
     }));
 
     // Custom JSON parser that handles mixed content types like "application/json, text/event-stream"
-    this.app.use(express.json({ 
+    this.app.use(express.json({
       limit: '10mb',
       type: (req: any) => {
         const contentType = req.get('Content-Type') || req.headers['content-type'] || '';
@@ -100,14 +100,20 @@ export class SimpleMCPServer {
     }));
 
     this.app.use(express.text());
-    
-    // Security headers for DNS rebinding protection - more permissive
+
+    // Security headers for DNS rebinding protection - allow both localhost and remote hosts
     this.app.use((req: Request, res: Response, next) => {
       console.log(`📥 Request: ${req.method} ${req.path}`);
       const host = req.get('host');
       console.log(`📡 Host: ${host}`);
-      if (host && !host.match(/^(localhost|127\.0\.0\.1|0\.0\.0\.0)(:\d+)?$/)) {
-        console.log(`❌ Invalid host: ${host}`);
+
+      // Allow localhost and configured server host
+      const serverHost = process.env.SERVER_HOST;
+      const isLocalhost = host && host.match(/^(localhost|127\.0\.0\.1|0\.0\.0\.0)(:\d+)?$/);
+      const isServerHost = serverHost && host && host.startsWith(serverHost);
+
+      if (host && !isLocalhost && !isServerHost) {
+        console.log(`❌ Invalid host: ${host} (SERVER_HOST: ${serverHost})`);
         return res.status(403).json({ error: 'Invalid host header' });
       }
       return next();

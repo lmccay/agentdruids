@@ -1,6 +1,8 @@
+import { apiConfig } from '../config/api-config';
+
 // REST API-based coordination service
 class CoordinationRestAPI {
-  private baseURL = 'http://localhost:3000/api';
+  private baseURL = apiConfig.apiBaseURL;
 
   async getCoordinators() {
     const response = await fetch(`${this.baseURL}/coordinators`);

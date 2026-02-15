@@ -1,7 +1,8 @@
 import axios from 'axios';
+import { apiConfig } from '../config/api-config';
 
 const api = axios.create({
-  baseURL: process.env.NODE_ENV === 'production' ? '/api' : 'http://localhost:3000/api'
+  baseURL: apiConfig.apiBaseURL
 });
 
 export interface PublishedContentItem {
