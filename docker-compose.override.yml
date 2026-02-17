@@ -1,0 +1,45 @@
+# Example docker-compose override for host file access
+#
+# Usage:
+# 1. Copy this content to docker-compose.override.yml (git-ignored by default)
+# 2. Customize the paths to match your needs
+# 3. Run: docker-compose down && docker-compose --env-file .env up -d
+#
+# This will automatically merge with docker-compose.yml
+
+version: '3.8'
+
+services:
+  druids-app:
+    volumes:
+      # CUSTOMIZE THESE PATHS for your host machine:
+
+      # Documents - read-only access
+      - ~/Documents:/app/host/documents:ro
+
+      # Downloads - read-write access
+      - ~/Downloads:/app/host/downloads:rw
+
+      # Data processing directories
+      - ~/druids-data/input:/app/host/input:ro           # Read raw data
+      - ~/druids-data/output:/app/host/output:rw         # Write processed data
+
+      # Reports directory
+      - ~/druids-data/reports:/app/host/reports:rw
+
+      # Configuration files - read-only
+      - ~/druids-data/config:/app/host/config:ro
+
+      # Temp directory - read-write
+      - /tmp:/app/host/tmp:rw
+
+  druids-mcp:
+    volumes:
+      # Same mounts as druids-app for consistent access
+      - ~/Documents:/app/host/documents:ro
+      - ~/Downloads:/app/host/downloads:rw
+      - ~/druids-data/input:/app/host/input:ro
+      - ~/druids-data/output:/app/host/output:rw
+      - ~/druids-data/reports:/app/host/reports:rw
+      - ~/druids-data/config:/app/host/config:ro
+      - /tmp:/app/host/tmp:rw

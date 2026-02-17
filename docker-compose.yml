@@ -34,6 +34,28 @@ services:
       - .:/app
       - /app/node_modules
       - druids-data:/app/data
+
+      # HOST FILE ACCESS: Uncomment and customize to give agents access to your host machine's files
+      # Format: <host-path>:<container-path>:<ro|rw>
+      # - ro = read-only (agents can use read_file but not write_file)
+      # - rw = read-write (agents can use both read_file and write_file)
+      #
+      # Examples (uncomment and adjust paths as needed):
+      # - ~/Documents:/app/host/documents:ro        # Read-only access to Documents
+      # - ~/Downloads:/app/host/downloads:rw        # Read-write access to Downloads
+      # - ~/data/input:/app/host/input:ro           # Read input data
+      # - ~/data/output:/app/host/output:rw         # Write processed output
+      # - ~/reports:/app/host/reports:rw            # Generate reports
+      # - ~/config:/app/host/config:ro              # Read configuration files
+      #
+      # Then grant agents permission in their resourceAccess configuration:
+      # "allowedLocations": [
+      #   "file:///app/host/documents/**/*",
+      #   "file:///app/host/downloads/**/*"
+      # ]
+      #
+      # See docs/HOST_FILE_ACCESS.md for complete guide
+
     networks:
       - druids-network
     depends_on:
@@ -68,6 +90,15 @@ services:
       - .:/app
       - /app/node_modules
       - druids-data:/app/data
+
+      # HOST FILE ACCESS: Same mounts as druids-app for consistent file access
+      # Uncomment the same host mounts you enabled in druids-app above
+      # Examples:
+      # - ~/Documents:/app/host/documents:ro
+      # - ~/Downloads:/app/host/downloads:rw
+      # - ~/data/input:/app/host/input:ro
+      # - ~/data/output:/app/host/output:rw
+
     networks:
       - druids-network
     depends_on:

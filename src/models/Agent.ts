@@ -90,6 +90,21 @@ export interface ToolPermissions {
 }
 
 /**
+ * Resource access configuration for file and URL operations
+ * Agents must explicitly opt-in by configuring allowed locations
+ */
+export interface ResourceAccess {
+  // Allowed file system paths (file:/// protocol)
+  allowedFilePaths?: string[];  // e.g., "file:///app/data/file.txt", "file:///app/data/**/*"
+
+  // Allowed HTTP/HTTPS URLs
+  allowedUrls?: string[];  // e.g., "https://api.example.com/endpoint", "https://api.example.com/**"
+
+  // Shorthand: combined array of all allowed locations
+  allowedLocations?: string[];  // Supports file:///, http://, https:// with wildcards
+}
+
+/**
  * Realm access configuration for agents
  */
 export interface RealmAccess {
@@ -176,6 +191,7 @@ export interface Agent extends BaseEntity {
   // Technical configuration
   mcpTools: string[];
   toolPermissions: ToolPermissions;
+  resourceAccess?: ResourceAccess;  // File and URL access permissions
   llmConfig: LLMConfiguration;
   resourceLimits: ResourceLimits;
 
@@ -211,6 +227,7 @@ export interface CreateAgentRequest {
   personality: DruidPersona;
   mcpTools: string[];
   toolPermissions: ToolPermissions;
+  resourceAccess?: ResourceAccess;
   llmConfig: LLMConfiguration;
   resourceLimits?: ResourceLimits;
   realmAccess?: RealmAccess;
@@ -232,6 +249,7 @@ export interface UpdateAgentRequest {
   personality?: Partial<DruidPersona>;
   mcpTools?: string[];
   toolPermissions?: ToolPermissions;
+  resourceAccess?: ResourceAccess;
   llmConfig?: Partial<LLMConfiguration>;
   resourceLimits?: ResourceLimits;
   realmAccess?: Partial<RealmAccess>;

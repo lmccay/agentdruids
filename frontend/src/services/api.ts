@@ -44,6 +44,11 @@ export interface Agent {
     agentExtension?: string;
     disableRealmPrompt?: boolean;
   };
+  resourceAccess?: {
+    allowedFilePaths?: string[];
+    allowedUrls?: string[];
+    allowedLocations?: string[];
+  };
   createdAt: string;
   updatedAt: string;
 }
@@ -89,6 +94,11 @@ export interface CreateAgentRequest {
     agentExtension?: string;
     disableRealmPrompt?: boolean;
   };
+  resourceAccess?: {
+    allowedFilePaths?: string[];
+    allowedUrls?: string[];
+    allowedLocations?: string[];
+  };
 }
 
 export interface UpdateAgentRequest {
@@ -127,6 +137,11 @@ export interface UpdateAgentRequest {
     baseTemplate: 'standard' | 'minimal';
     agentExtension?: string;
     disableRealmPrompt?: boolean;
+  };
+  resourceAccess?: {
+    allowedFilePaths?: string[];
+    allowedUrls?: string[];
+    allowedLocations?: string[];
   };
 }
 

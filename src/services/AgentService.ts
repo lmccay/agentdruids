@@ -288,6 +288,7 @@ export class AgentService {
       personality: request.personality,
       mcpTools: request.mcpTools,
       toolPermissions: request.toolPermissions,
+      resourceAccess: request.resourceAccess,
       llmConfig: request.llmConfig,
       resourceLimits: request.resourceLimits || {
         maxMemoryMB: 512,
@@ -576,6 +577,7 @@ export class AgentService {
       },
       mcpTools: updateData.mcpTools !== undefined ? updateData.mcpTools : agent.mcpTools,
       toolPermissions: updateData.toolPermissions || agent.toolPermissions,
+      resourceAccess: updateData.resourceAccess !== undefined ? updateData.resourceAccess : agent.resourceAccess,
       llmConfig: {
         ...agent.llmConfig,
         ...(updateData.llmConfig || {})
@@ -814,6 +816,12 @@ export class AgentService {
         });
 
         systemPrompt = composedPrompt.final_prompt;
+
+        // Add tool awareness information after prompt composition
+        const toolInformation = await this.generateToolAwarenessPrompt(agent);
+        if (toolInformation) {
+          systemPrompt += toolInformation;
+        }
 
         if (composedPrompt.security_violations.length > 0) {
           console.warn(`⚠️  Agent ${agentId} has ${composedPrompt.security_violations.length} security violations in prompt composition`);
@@ -1219,7 +1227,9 @@ export class AgentService {
    */
   private async generateToolAwarenessPrompt(agent: Agent): Promise<string> {
     const availableTools = await this.getAvailableToolsForAgent(agent);
-    
+
+    console.log(`🛠️  Generated ${availableTools.length} tools for agent ${agent.id}:`, availableTools.map(t => t.name).join(', '));
+
     if (availableTools.length === 0) {
       return '';
     }
@@ -1242,7 +1252,12 @@ Available tools:
       }
     }
 
-    toolPrompt += `\nOnly use tools that are explicitly listed above. Tool calls will be processed and results will be provided back to you. You can make multiple tool calls in a single response to accomplish complex tasks.`;
+    toolPrompt += `\nOnly use tools that are explicitly listed above. Tool calls will be processed and results will be provided back to you. You can make multiple tool calls in a single response to accomplish complex tasks.
+
+**CRITICAL**: When using file tools:
+- list_files returns a "path" field for each file - use this EXACT value with read_file/write_file
+- Do NOT modify paths - preserve underscores, hyphens, and special characters exactly as returned
+- Example: If list_files returns {"path": "file:///app/data/My_File_Name.md"}, use that exact string`;
 
     return toolPrompt;
   }
@@ -1252,7 +1267,12 @@ Available tools:
    */
   private async getAvailableToolsForAgent(agent: Agent): Promise<Array<{name: string, description: string, parameters?: any}>> {
     const tools: Array<{name: string, description: string, parameters?: any}> = [];
-    
+
+    console.log(`🔍 Getting tools for agent ${agent.id}:`, {
+      hasResourceAccess: !!agent.resourceAccess,
+      allowedLocations: agent.resourceAccess?.allowedLocations?.length || 0
+    });
+
     // Universal inter-agent communication tools (all agents)
     tools.push(
       {
@@ -1276,6 +1296,69 @@ Available tools:
         parameters: { content_id: 'content ID from previous step (e.g., coordination/session-123-step-1)' }
       }
     );
+
+    // Universal file and URL access tools (all agents with explicit opt-in via resourceAccess)
+    if (agent.resourceAccess && (
+      (agent.resourceAccess.allowedLocations && agent.resourceAccess.allowedLocations.length > 0) ||
+      (agent.resourceAccess.allowedFilePaths && agent.resourceAccess.allowedFilePaths.length > 0) ||
+      (agent.resourceAccess.allowedUrls && agent.resourceAccess.allowedUrls.length > 0)
+    )) {
+      // Check if agent has file access permissions
+      const hasFileAccess = [
+        ...(agent.resourceAccess.allowedLocations || []),
+        ...(agent.resourceAccess.allowedFilePaths || [])
+      ].some(loc => loc.startsWith('file:///'));
+
+      // Check if agent has URL access permissions
+      const hasUrlAccess = [
+        ...(agent.resourceAccess.allowedLocations || []),
+        ...(agent.resourceAccess.allowedUrls || [])
+      ].some(loc => loc.startsWith('http://') || loc.startsWith('https://'));
+
+      if (hasFileAccess) {
+        console.log(`✅ Agent ${agent.id} has file access - adding file tools including process_files_batch`);
+        tools.push(
+          {
+            name: 'read_file',
+            description: 'Read content from a file. Requires file:/// URL with permission. CRITICAL: Use the EXACT path from list_files, preserving underscores and special characters.',
+            parameters: { file_url: 'file:/// URL to read (e.g., file:///app/data/file.txt). MUST match exact path from list_files.' }
+          },
+          {
+            name: 'write_file',
+            description: 'Write content to a file. Requires file:/// URL with permission. Use exact paths with underscores preserved.',
+            parameters: { file_url: 'file:/// URL to write', content: 'content to write to file' }
+          },
+          {
+            name: 'list_files',
+            description: 'List files and directories in a directory. Returns array with "path" field containing EXACT file URLs to use with read_file/write_file.',
+            parameters: { directory_url: 'file:/// URL to directory (e.g., file:///app/data/)' }
+          },
+          {
+            name: 'process_files_batch',
+            description: 'Process multiple files in a directory with automatic iteration. Reads each file, executes processing instructions, and writes outputs. Handles all files automatically - no manual looping needed.',
+            parameters: {
+              input_directory: 'file:/// URL to input directory',
+              output_directory: 'file:/// URL to output directory',
+              file_pattern: 'optional glob pattern (e.g., *.md, *.txt)',
+              processing_instructions: 'what to do with each file (e.g., "extract key concepts and create learning module")',
+              output_filename_template: 'template for output filenames. Supported variables: {basename}, {filename}, {filename_without_extension} (with single or double braces). Example: "{basename}_module.md"'
+            }
+          }
+        );
+      } else {
+        console.log(`❌ Agent ${agent.id} does NOT have file access - skipping file tools`);
+      }
+
+      if (hasUrlAccess) {
+        tools.push(
+          {
+            name: 'fetch_url',
+            description: 'Fetch content from an HTTP/HTTPS URL. Requires URL permission.',
+            parameters: { url: 'HTTP or HTTPS URL to fetch', method: 'HTTP method (GET, POST, etc.)', body: 'optional request body', headers: 'optional request headers' }
+          }
+        );
+      }
+    }
 
     // Realm navigation tools (druids only)
     if (agent.type === 'druid') {
@@ -1866,9 +1949,59 @@ Your responses and behavior should be appropriate to this realm's context and ch
     const toolCalls: AgentToolCall[] = [];
     let processedResponse = response;
 
-    // Parse tool calls from the response
-    const toolCallPattern = /TOOL_CALL:\s*(\{(?:[^{}]|{[^{}]*})*\})/g;
-    const matches = Array.from(response.matchAll(toolCallPattern));
+    // Parse tool calls from the response using brace counting for robust JSON extraction
+    const matches: Array<{0: string, 1: string, index: number}> = [];
+    const toolCallPrefix = /TOOL_CALL:\s*/g;
+    let prefixMatch;
+
+    while ((prefixMatch = toolCallPrefix.exec(response)) !== null) {
+      const startIndex = prefixMatch.index + prefixMatch[0].length;
+
+      // Extract JSON by counting braces
+      let braceCount = 0;
+      let inString = false;
+      let escapeNext = false;
+      let jsonEnd = -1;
+
+      for (let i = startIndex; i < response.length; i++) {
+        const char = response[i];
+
+        if (escapeNext) {
+          escapeNext = false;
+          continue;
+        }
+
+        if (char === '\\') {
+          escapeNext = true;
+          continue;
+        }
+
+        if (char === '"') {
+          inString = !inString;
+          continue;
+        }
+
+        if (!inString) {
+          if (char === '{') braceCount++;
+          else if (char === '}') {
+            braceCount--;
+            if (braceCount === 0) {
+              jsonEnd = i + 1;
+              break;
+            }
+          }
+        }
+      }
+
+      if (jsonEnd > startIndex) {
+        const jsonStr = response.substring(startIndex, jsonEnd);
+        matches.push({
+          0: prefixMatch[0] + jsonStr,
+          1: jsonStr,
+          index: prefixMatch.index
+        } as any);
+      }
+    }
 
     if (matches.length === 0) {
       // No tool calls found, return original response
@@ -1964,7 +2097,8 @@ Your responses and behavior should be appropriate to this realm's context and ch
     // Define built-in tools that are handled internally (not via MCP Gateway)
     const builtInTools = [
       'message_agent', 'delegate_task', 'assign_simple_task', 'get_step_content',      // Communication tools (all agents)
-      'travel_to_realm', 'get_current_realm', 'get_realm_elementals'  // Realm tools (druids only)
+      'travel_to_realm', 'get_current_realm', 'get_realm_elementals',  // Realm tools (druids only)
+      'read_file', 'write_file', 'list_files', 'process_files_batch', 'fetch_url'  // Resource access tools (opt-in via resourceAccess)
     ];
 
     // Check if this is a built-in tool
@@ -1987,6 +2121,9 @@ Your responses and behavior should be appropriate to this realm's context and ch
     // Define realm navigation tools (for druids)
     const realmTools = ['travel_to_realm', 'get_current_realm', 'get_realm_elementals'];
 
+    // Define resource access tools (all agents with explicit opt-in)
+    const resourceAccessTools = ['read_file', 'write_file', 'list_files', 'process_files_batch', 'fetch_url'];
+
     // Check access permissions based on agent type and tool category
     if (communicationTools.includes(toolName)) {
       // All agents can use inter-agent communication tools
@@ -1997,6 +2134,12 @@ Your responses and behavior should be appropriate to this realm's context and ch
         throw new Error(`Agent ${agent.id} (${agent.type}) cannot access realm navigation tool: ${toolName}. Only druid agents can navigate realms.`);
       }
       console.log(`✅ Druid agent ${agent.id} accessing realm navigation tool: ${toolName}`);
+    } else if (resourceAccessTools.includes(toolName)) {
+      // All agents can use resource access tools if they have explicit permissions
+      if (!agent.resourceAccess) {
+        throw new Error(`Agent ${agent.id} cannot access ${toolName}: no resourceAccess configured. Configure allowedLocations to grant access.`);
+      }
+      console.log(`✅ Agent ${agent.id} (${agent.type}) accessing resource tool: ${toolName}`);
     } else {
       throw new Error(`Unknown built-in tool: ${toolName}`);
     }
@@ -2023,7 +2166,22 @@ Your responses and behavior should be appropriate to this realm's context and ch
       
       case 'get_realm_elementals':
         return await this.toolGetRealmElementals(params);
-      
+
+      case 'read_file':
+        return await this.toolReadFile(agent, params);
+
+      case 'write_file':
+        return await this.toolWriteFile(agent, params);
+
+      case 'list_files':
+        return await this.toolListFiles(agent, params);
+
+      case 'process_files_batch':
+        return await this.toolProcessFilesBatch(agent, params, sessionId);
+
+      case 'fetch_url':
+        return await this.toolFetchUrl(agent, params);
+
       default:
         throw new Error(`Unknown built-in tool: ${toolName}`);
     }
@@ -2645,6 +2803,380 @@ Please use your available tools to execute this task now and provide your comple
         }],
         isError: true
       };
+    }
+  }
+
+  /**
+   * Tool: Read content from a file
+   */
+  private async toolReadFile(agent: Agent, params: { file_url: string }): Promise<any> {
+    const { ResourceAccessValidator } = await import('./ResourceAccessValidator');
+
+    if (!params.file_url) {
+      throw new Error('file_url parameter is required');
+    }
+
+    // Validate file URL format
+    if (!ResourceAccessValidator.isValidFileUrl(params.file_url)) {
+      throw new Error('Invalid file URL: must start with file:///');
+    }
+
+    // Debug logging for permission checking
+    console.log(`🔍 Permission check for agent ${agent.id}:`);
+    console.log(`   Requested: ${params.file_url}`);
+    console.log(`   Agent resourceAccess:`, JSON.stringify(agent.resourceAccess, null, 2));
+
+    // Check access permissions
+    if (!ResourceAccessValidator.hasAccess(agent.resourceAccess, params.file_url)) {
+      throw new Error(ResourceAccessValidator.getAccessDeniedMessage(params.file_url, agent.id));
+    }
+
+    try {
+      const fs = await import('fs/promises');
+      const filePath = ResourceAccessValidator.fileUrlToPath(params.file_url);
+      const content = await fs.readFile(filePath, 'utf-8');
+
+      console.log(`📖 Agent ${agent.id} read file: ${params.file_url}`);
+
+      return {
+        success: true,
+        file_url: params.file_url,
+        content,
+        size: content.length
+      };
+    } catch (error: any) {
+      console.error(`❌ Error reading file ${params.file_url}:`, error.message);
+      throw new Error(`Failed to read file: ${error.message}`);
+    }
+  }
+
+  /**
+   * Tool: Write content to a file
+   */
+  private async toolWriteFile(agent: Agent, params: { file_url: string; content: string }): Promise<any> {
+    const { ResourceAccessValidator } = await import('./ResourceAccessValidator');
+
+    if (!params.file_url) {
+      throw new Error('file_url parameter is required');
+    }
+
+    if (params.content === undefined) {
+      throw new Error('content parameter is required');
+    }
+
+    // Validate file URL format
+    if (!ResourceAccessValidator.isValidFileUrl(params.file_url)) {
+      throw new Error('Invalid file URL: must start with file:///');
+    }
+
+    // Check access permissions
+    if (!ResourceAccessValidator.hasAccess(agent.resourceAccess, params.file_url)) {
+      throw new Error(ResourceAccessValidator.getAccessDeniedMessage(params.file_url, agent.id));
+    }
+
+    try {
+      const fs = await import('fs/promises');
+      const path = await import('path');
+      const filePath = ResourceAccessValidator.fileUrlToPath(params.file_url);
+
+      // Ensure directory exists
+      const dirPath = path.dirname(filePath);
+      await fs.mkdir(dirPath, { recursive: true });
+
+      // Write file
+      await fs.writeFile(filePath, params.content, 'utf-8');
+
+      console.log(`✍️  Agent ${agent.id} wrote file: ${params.file_url} (${params.content.length} bytes)`);
+
+      return {
+        success: true,
+        file_url: params.file_url,
+        bytes_written: params.content.length
+      };
+    } catch (error: any) {
+      console.error(`❌ Error writing file ${params.file_url}:`, error.message);
+      throw new Error(`Failed to write file: ${error.message}`);
+    }
+  }
+
+  /**
+   * Tool: List files and directories in a directory
+   */
+  private async toolListFiles(agent: Agent, params: { directory_url: string }): Promise<any> {
+    const { ResourceAccessValidator } = await import('./ResourceAccessValidator');
+
+    if (!params.directory_url) {
+      throw new Error('directory_url parameter is required');
+    }
+
+    // Validate directory URL format
+    if (!ResourceAccessValidator.isValidFileUrl(params.directory_url)) {
+      throw new Error('Invalid directory URL: must start with file:///');
+    }
+
+    // Check access permissions for the directory
+    if (!ResourceAccessValidator.hasAccess(agent.resourceAccess, params.directory_url)) {
+      throw new Error(ResourceAccessValidator.getAccessDeniedMessage(params.directory_url, agent.id));
+    }
+
+    try {
+      const fs = await import('fs/promises');
+      const path = await import('path');
+      const dirPath = ResourceAccessValidator.fileUrlToPath(params.directory_url);
+
+      // Check if directory exists
+      const stat = await fs.stat(dirPath);
+      if (!stat.isDirectory()) {
+        throw new Error('Path is not a directory');
+      }
+
+      // Read directory contents
+      const entries = await fs.readdir(dirPath, { withFileTypes: true });
+
+      // Build file list with metadata
+      const files = await Promise.all(entries.map(async (entry) => {
+        const entryPath = path.join(dirPath, entry.name);
+        const entryStat = await fs.stat(entryPath);
+
+        return {
+          name: entry.name,
+          type: entry.isDirectory() ? 'directory' : 'file',
+          size: entry.isFile() ? entryStat.size : undefined,
+          modified: entryStat.mtime.toISOString(),
+          path: `file://${entryPath}`  // file:// + absolute path = file:///path (entryPath starts with /)
+        };
+      }));
+
+      console.log(`📂 Agent ${agent.id} listed directory: ${params.directory_url} (${files.length} entries)`);
+
+      return {
+        success: true,
+        directory_url: params.directory_url,
+        files,
+        count: files.length
+      };
+    } catch (error: any) {
+      console.error(`❌ Error listing directory ${params.directory_url}:`, error.message);
+      throw new Error(`Failed to list directory: ${error.message}`);
+    }
+  }
+
+  /**
+   * Tool: Process multiple files in batch with automatic iteration
+   * This tool eliminates the need for manual looping - it processes ALL files automatically
+   */
+  private async toolProcessFilesBatch(
+    agent: Agent,
+    params: {
+      input_directory: string;
+      output_directory: string;
+      file_pattern?: string;
+      processing_instructions: string;
+      output_filename_template?: string;
+    },
+    sessionId?: string
+  ): Promise<any> {
+    const { ResourceAccessValidator } = await import('./ResourceAccessValidator');
+
+    // Validate required parameters
+    if (!params.input_directory) {
+      throw new Error('input_directory parameter is required');
+    }
+    if (!params.output_directory) {
+      throw new Error('output_directory parameter is required');
+    }
+    if (!params.processing_instructions) {
+      throw new Error('processing_instructions parameter is required');
+    }
+
+    console.log(`🔄 Starting batch file processing for agent ${agent.id}`);
+    console.log(`   Input: ${params.input_directory}`);
+    console.log(`   Output: ${params.output_directory}`);
+    console.log(`   Instructions: ${params.processing_instructions}`);
+
+    try {
+      // List all files in the input directory
+      const listResult = await this.toolListFiles(agent, { directory_url: params.input_directory });
+
+      // Filter files by pattern if provided
+      let filesToProcess = listResult.files.filter((f: any) => f.type === 'file');
+      if (params.file_pattern) {
+        const pattern = params.file_pattern.replace(/\*/g, '.*').replace(/\?/g, '.');
+        const regex = new RegExp(pattern);
+        filesToProcess = filesToProcess.filter((f: any) => regex.test(f.name));
+      }
+
+      console.log(`📋 Found ${filesToProcess.length} files to process`);
+
+      const results: any[] = [];
+      let successCount = 0;
+      let errorCount = 0;
+
+      // Process each file
+      for (let i = 0; i < filesToProcess.length; i++) {
+        const file = filesToProcess[i];
+        const fileNum = i + 1;
+
+        console.log(`📄 Processing file ${fileNum}/${filesToProcess.length}: ${file.name}`);
+
+        try {
+          // Read the input file
+          const fileContent = await this.toolReadFile(agent, { file_url: file.path });
+
+          // Construct processing prompt for this file
+          // CRITICAL: Agent's system prompt defines output format, processing_instructions are SECONDARY guidance
+          const processingPrompt = `IMPORTANT: Review your system prompt's "Output Format" or "Domain Expertise" section and apply that EXACT format.
+
+INPUT FILE: ${file.name}
+FILE CONTENT:
+${fileContent.content}
+
+ADDITIONAL CONTEXT: ${params.processing_instructions}
+
+YOUR TASK:
+Transform the file content above using the EXACT OUTPUT FORMAT defined in your system prompt.
+
+- If your system prompt defines learning modules: create a learning module with metadata comments, assessment questions, and practical exercises
+- If your system prompt defines a specific markdown structure: use that exact structure
+- If your system prompt shows format examples: follow those examples precisely
+
+DO NOT:
+- Create generic summaries or cleaned-up markdown
+- Say "I've processed..." or describe what you did
+- Deviate from your system prompt's specified format
+
+Your entire response will be written to a file. Start with the formatted content immediately:`;
+
+          // Execute processing via agent's LLM (self-processing)
+          const processed = await this.executeAgentPrompt(agent.id, {
+            prompt: processingPrompt,
+            sessionId
+          });
+
+          // Determine output filename
+          const path = await import('path');
+          const basename = path.basename(file.name, path.extname(file.name));
+          const outputTemplate = params.output_filename_template || '{basename}_processed.md';
+
+          // Support multiple template variable formats:
+          // {basename}, {{basename}}, {filename}, {{filename}}, {filename_without_extension}, {{filename_without_extension}}
+          let outputFilename = outputTemplate
+            .replace(/\{\{?basename\}\}?/g, basename)
+            .replace(/\{\{?filename_without_extension\}\}?/g, basename)
+            .replace(/\{\{?filename\}\}?/g, basename);
+
+          // Construct output path
+          const outputPath = `${params.output_directory.replace(/\/$/, '')}/${outputFilename}`;
+
+          // Write the processed content
+          await this.toolWriteFile(agent, {
+            file_url: outputPath,
+            content: processed.response
+          });
+
+          console.log(`✅ Successfully processed: ${file.name} → ${outputFilename}`);
+
+          results.push({
+            input_file: file.name,
+            input_path: file.path,
+            output_file: outputFilename,
+            output_path: outputPath,
+            status: 'success',
+            processed_at: new Date().toISOString()
+          });
+
+          successCount++;
+
+        } catch (error: any) {
+          console.error(`❌ Error processing file ${file.name}:`, error.message);
+
+          results.push({
+            input_file: file.name,
+            input_path: file.path,
+            status: 'error',
+            error: error.message,
+            processed_at: new Date().toISOString()
+          });
+
+          errorCount++;
+        }
+      }
+
+      console.log(`🎉 Batch processing complete: ${successCount} succeeded, ${errorCount} failed`);
+
+      return {
+        success: true,
+        total_files: filesToProcess.length,
+        succeeded: successCount,
+        failed: errorCount,
+        results
+      };
+
+    } catch (error: any) {
+      console.error(`❌ Batch processing failed:`, error.message);
+      throw new Error(`Batch processing failed: ${error.message}`);
+    }
+  }
+
+  /**
+   * Tool: Fetch content from an HTTP/HTTPS URL
+   */
+  private async toolFetchUrl(agent: Agent, params: { url: string; method?: string; body?: any; headers?: Record<string, string> }): Promise<any> {
+    const { ResourceAccessValidator } = await import('./ResourceAccessValidator');
+
+    if (!params.url) {
+      throw new Error('url parameter is required');
+    }
+
+    // Validate URL format
+    if (!ResourceAccessValidator.isValidHttpUrl(params.url)) {
+      throw new Error('Invalid URL: must start with http:// or https://');
+    }
+
+    // Check access permissions
+    if (!ResourceAccessValidator.hasAccess(agent.resourceAccess, params.url)) {
+      throw new Error(ResourceAccessValidator.getAccessDeniedMessage(params.url, agent.id));
+    }
+
+    try {
+      const method = (params.method || 'GET').toUpperCase();
+      const headers = params.headers || {};
+
+      console.log(`🌐 Agent ${agent.id} fetching URL: ${method} ${params.url}`);
+
+      const fetchOptions: RequestInit = {
+        method,
+        headers
+      };
+
+      if (params.body && ['POST', 'PUT', 'PATCH'].includes(method)) {
+        fetchOptions.body = typeof params.body === 'string' ? params.body : JSON.stringify(params.body);
+        if (!headers['Content-Type']) {
+          headers['Content-Type'] = 'application/json';
+        }
+      }
+
+      const response = await fetch(params.url, fetchOptions);
+      const contentType = response.headers.get('content-type') || '';
+
+      let responseData: any;
+      if (contentType.includes('application/json')) {
+        responseData = await response.json();
+      } else {
+        responseData = await response.text();
+      }
+
+      return {
+        success: true,
+        url: params.url,
+        status: response.status,
+        statusText: response.statusText,
+        headers: Object.fromEntries(response.headers.entries()),
+        data: responseData
+      };
+    } catch (error: any) {
+      console.error(`❌ Error fetching URL ${params.url}:`, error.message);
+      throw new Error(`Failed to fetch URL: ${error.message}`);
     }
   }
 

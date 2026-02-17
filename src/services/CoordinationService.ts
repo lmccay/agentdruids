@@ -56,10 +56,12 @@ export interface CoordinationSession {
   coordinationStyle: 'collaborative' | 'consultative' | 'directive';
   participantTasks: ParticipantTask[];
   finalResult?: FinalCoordinationResult;
-  
+  error?: string;  // Error message if session failed
+  metadata?: Record<string, any>;  // Additional session metadata (warnings, etc.)
+
   // Session-scoped agent management for concurrency safety
   sessionAgentManager: SessionAgentManagerImpl;
-  
+
   // Session-scoped content storage for isolation
   sessionContentManager: SessionContentManagerImpl;
 }
@@ -1452,10 +1454,24 @@ When synthesizing results, focus on:
         // FALLBACK: Simple direct task assignment
         await this.executeSimpleCoordination(session, coordinator);
       }
-      
+
       // CUSTOM INTEGRATION: Fix the content integration to use synthesizeResults logic
       if (session.finalResult && session.finalResult.participantContributions.length > 0) {
         console.log(`🎯 Phase 3: Re-processing content integration with synthesis logic...`);
+
+        // Detect if this is a file processing task where synthesis is redundant
+        const isFileProcessingTask = session.scenarioPrompt.toLowerCase().includes('process') &&
+          (session.scenarioPrompt.toLowerCase().includes('file') ||
+           session.scenarioPrompt.toLowerCase().includes('batch') ||
+           session.finalResult.participantContributions.some(c =>
+             c.contribution.includes('process_files_batch') ||
+             c.contribution.includes('Successfully processed')
+           ));
+
+        if (isFileProcessingTask) {
+          console.log(`⏭️  Skipping synthesis - detected file processing task where output files are the deliverable`);
+          session.finalResult.summary = `File processing completed successfully. ${session.finalResult.participantContributions.length} agent(s) contributed.`;
+        } else {
         
         // Convert orchestration contributions to task format for synthesis
         const mockTasks: ParticipantTask[] = session.finalResult.participantContributions
@@ -1514,21 +1530,36 @@ When synthesizing results, focus on:
           });
           
           console.log(`🔍 DEBUG: Has content contributions: ${hasContentContributions}`);
-          
+
           if (hasContentContributions) {
-            console.log(`🔄 Phase 3b: Coordinator integrating actual content...`);
-            const integrationPrompt = this.buildContentIntegrationPrompt(session, mockTasks, coordinator);
-            const integratedContent = await this.executeCoordinatorPrompt(coordinator, integrationPrompt);
-            
-            // Update the final result with proper integrated content
-            session.finalResult.integratedContent = integratedContent;
-            session.finalResult.summary = `Coordination completed successfully with integrated content from ${mockTasks.length} contributors`;
-            
-            console.log(`✅ Content integration completed - ${integratedContent.length} characters`);
+            // Attempt synthesis, but don't fail the session if it errors (e.g., token limits)
+            try {
+              console.log(`🔄 Phase 3b: Coordinator integrating actual content...`);
+              const integrationPrompt = this.buildContentIntegrationPrompt(session, mockTasks, coordinator);
+              const integratedContent = await this.executeCoordinatorPrompt(coordinator, integrationPrompt);
+
+              // Update the final result with proper integrated content
+              session.finalResult.integratedContent = integratedContent;
+              session.finalResult.summary = `Coordination completed successfully with integrated content from ${mockTasks.length} contributors`;
+
+              console.log(`✅ Content integration completed - ${integratedContent.length} characters`);
+            } catch (synthesisError) {
+              // Log warning but don't fail the session - the actual work is already done
+              const errorMsg = synthesisError instanceof Error ? synthesisError.message : String(synthesisError);
+              console.warn(`⚠️ Content synthesis failed but work completed successfully. Synthesis skipped due to: ${errorMsg}`);
+
+              // Set summary without synthesis
+              session.finalResult.summary = `Coordination completed successfully. ${mockTasks.length} agents contributed. Note: Final synthesis skipped (${errorMsg.includes('token') ? 'content too large for synthesis' : 'synthesis error'})`;
+
+              // Store warning in session metadata for visibility
+              if (!session.metadata) session.metadata = {};
+              session.metadata['synthesisWarning'] = errorMsg;
+            }
           } else {
             console.log(`⚠️ DEBUG: Skipping content integration - no substantial content contributions found`);
           }
         }
+        } // End of else block for file processing detection
       }
       
       session.status = 'completed';
@@ -1554,10 +1585,13 @@ When synthesizing results, focus on:
       console.error(`❌ Coordination failed for session ${sessionId}:`, error);
       session.status = 'failed';
       session.completedAt = new Date();
-      
+
+      // Persist error message to session
+      session.error = error instanceof Error ? error.message : String(error);
+
       // Clean up session-scoped agent states on failure
       session.sessionAgentManager.cleanup();
-      
+
       throw error;
     }
   }
@@ -2440,14 +2474,64 @@ PARTICIPANT_ASSESSMENT:
   }
 
   /**
-   * Build content integration prompt for coordinator
+   * Estimate token count (rough approximation: 1 token ≈ 4 characters)
+   */
+  private estimateTokens(text: string): number {
+    return Math.ceil(text.length / 4);
+  }
+
+  /**
+   * Truncate or summarize contributions to fit token limit
+   */
+  private optimizeContributionsForTokens(
+    tasks: CoordinationSession['participantTasks'],
+    maxTokens: number = 6000  // Leave room for system prompt and instructions (~2000 tokens)
+  ): string {
+    const contributions = tasks.map(task => ({
+      agentId: task.agentId,
+      content: task.result || '',
+      tokens: this.estimateTokens(task.result || '')
+    }));
+
+    const totalTokens = contributions.reduce((sum, c) => sum + c.tokens, 0);
+
+    console.log(`📊 Content optimization: ${contributions.length} contributions, ~${totalTokens} tokens`);
+
+    if (totalTokens <= maxTokens) {
+      // Fits within limit - return full content
+      return contributions
+        .map(c => `CONTRIBUTION FROM ${c.agentId}:\n${c.content}\n`)
+        .join('\n');
+    }
+
+    console.warn(`⚠️ Content exceeds token limit (${totalTokens} > ${maxTokens}), truncating contributions`);
+
+    // Calculate per-contribution token budget
+    const tokenBudgetPerContribution = Math.floor(maxTokens / contributions.length);
+
+    return contributions
+      .map(c => {
+        if (c.tokens <= tokenBudgetPerContribution) {
+          // Small enough - include full content
+          return `CONTRIBUTION FROM ${c.agentId}:\n${c.content}\n`;
+        } else {
+          // Truncate to budget
+          const charLimit = tokenBudgetPerContribution * 4;
+          const truncated = c.content.substring(0, charLimit);
+          return `CONTRIBUTION FROM ${c.agentId} (truncated from ${c.tokens} to ~${tokenBudgetPerContribution} tokens):\n${truncated}...\n[Content truncated due to size]\n`;
+        }
+      })
+      .join('\n');
+  }
+
+  /**
+   * Build content integration prompt for coordinator with token optimization
    */
   private buildContentIntegrationPrompt(session: CoordinationSession, completedTasks: CoordinationSession['participantTasks'], coordinator: Coordinator): string {
-    const contributionsText = completedTasks.map(task => 
-      `CONTRIBUTION FROM ${task.agentId}:\n${task.result}\n`
-    ).join('\n');
+    // Optimize contributions to fit within token limits
+    const contributionsText = this.optimizeContributionsForTokens(completedTasks);
 
-    return `${coordinator.llmConfig.systemPrompt}
+    const prompt = `${coordinator.llmConfig.systemPrompt}
 
 CONTENT INTEGRATION TASK:
 You have received substantial content contributions from multiple specialist agents. Your task is to integrate these contributions into a single, cohesive final deliverable.
@@ -2468,6 +2552,12 @@ Integrate these contributions into a unified, polished final result. This should
 Do NOT just summarize or analyze - create the actual integrated content that fulfills the original request.
 
 INTEGRATED RESULT:`;
+
+    // Log final token estimate
+    const promptTokens = this.estimateTokens(prompt);
+    console.log(`📏 Final integration prompt: ~${promptTokens} tokens`);
+
+    return prompt;
   }
 
   /**

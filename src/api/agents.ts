@@ -97,6 +97,7 @@ router.get('/', async (req: Request, res: Response) => {
           realmAccess: fullAgent.realmAccess, // Include realm access information
           mcpTools: fullAgent.mcpTools, // Include MCP tools configuration
           promptConfig: fullAgent.promptConfig, // Include prompt composition configuration
+          resourceAccess: fullAgent.resourceAccess, // Include resource access configuration
           createdAt: fullAgent.createdAt,
           updatedAt: fullAgent.updatedAt
         };
@@ -253,6 +254,7 @@ router.post('/create', async (req: Request, res: Response) => {
       },
       mcpTools: [],
       toolPermissions: {},
+      resourceAccess: req.body.resourceAccess,
       llmConfig: {
         ...modelRegistryService.resolveModelConfig(
           req.body.modelId || 'analytical-researcher',
@@ -389,6 +391,7 @@ router.post('/', async (req: Request, res: Response) => {
       },
       mcpTools: req.body.mcpTools || [],
       toolPermissions: req.body.toolPermissions || {},
+      resourceAccess: req.body.resourceAccess,
       llmConfig: req.body.modelId 
         ? modelRegistryService.resolveModelConfig(req.body.modelId, req.body.llmConfig?.systemPrompt || req.body.systemPrompt || config.systemPrompt)
         : {
@@ -579,6 +582,8 @@ router.get('/:agentId', async (req: Request, res: Response) => {
       systemPrompt: agent.llmConfig?.systemPrompt || 'Default system prompt',
       realmId: agent.deployment?.realmId || 'default-realm',
       realmAccess: agent.realmAccess, // Include realm access information
+      resourceAccess: agent.resourceAccess, // Include resource access permissions
+      promptConfig: agent.promptConfig, // Include prompt composition configuration
       mcpTools: agent.mcpTools, // Include MCP tools configuration
       createdAt: agent.createdAt,
       updatedAt: agent.updatedAt
@@ -693,6 +698,7 @@ router.put('/:agentId', async (req: Request, res: Response) => {
       'personalityTraits', 'communicationStyle', 'decisionMaking', 'modelId', 'realmAccess',
       'llmConfig',  // Allow direct llmConfig updates
       'mcpTools',    // Allow MCP tool configuration updates
+      'resourceAccess',  // Allow resource access configuration updates
       'promptConfig' // Allow prompt composition configuration updates
     ];
     const allowedWrappedFields = ['configuration', 'metadata'];
@@ -812,6 +818,8 @@ router.put('/:agentId', async (req: Request, res: Response) => {
         realmAccess: updateData.realmAccess || existingAgent.realmAccess,
         // Handle mcpTools configuration
         mcpTools: updateData.mcpTools !== undefined ? updateData.mcpTools : (existingAgent.mcpTools || []),
+        // Handle resourceAccess
+        resourceAccess: updateData.resourceAccess !== undefined ? updateData.resourceAccess : existingAgent.resourceAccess,
         // Handle promptConfig
         promptConfig: updateData.promptConfig !== undefined ? updateData.promptConfig : existingAgent.promptConfig,
         updatedAt: new Date().toISOString(),
@@ -861,6 +869,7 @@ router.put('/:agentId', async (req: Request, res: Response) => {
         llmConfig: updatedAgent.llmConfig, // Use the already resolved llmConfig
         realmAccess: updatedAgent.realmAccess, // Pass through realmAccess directly
         mcpTools: updateData.mcpTools || updatedAgent.mcpTools, // Include MCP tools configuration
+        resourceAccess: updateData.resourceAccess !== undefined ? updateData.resourceAccess : updatedAgent.resourceAccess, // Include resource access config
         promptConfig: updateData.promptConfig !== undefined ? updateData.promptConfig : updatedAgent.promptConfig // Include prompt composition config
       };
       

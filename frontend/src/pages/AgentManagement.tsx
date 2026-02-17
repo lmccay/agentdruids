@@ -48,6 +48,8 @@ interface AgentFormData {
   baseTemplate: 'standard' | 'minimal';
   agentExtension: string;
   disableRealmPrompt: boolean;
+  // Resource access configuration (NEW)
+  allowedLocations: string; // Newline-separated list of allowed file:// and http(s):// URLs
 }
 
 function AgentCard({ 
@@ -247,7 +249,9 @@ function AgentModal({
     usePromptComposition: !!agent?.promptConfig,
     baseTemplate: agent?.promptConfig?.baseTemplate || 'standard',
     agentExtension: agent?.promptConfig?.agentExtension || '',
-    disableRealmPrompt: agent?.promptConfig?.disableRealmPrompt || false
+    disableRealmPrompt: agent?.promptConfig?.disableRealmPrompt || false,
+    // Resource access config
+    allowedLocations: agent?.resourceAccess?.allowedLocations?.join('\n') || ''
   });
 
     // Update form data when agent prop changes
@@ -277,7 +281,9 @@ function AgentModal({
         usePromptComposition: !!agent.promptConfig,
         baseTemplate: agent.promptConfig?.baseTemplate || 'standard',
         agentExtension: agent.promptConfig?.agentExtension || '',
-        disableRealmPrompt: agent.promptConfig?.disableRealmPrompt || false
+        disableRealmPrompt: agent.promptConfig?.disableRealmPrompt || false,
+        // Resource access config
+        allowedLocations: agent.resourceAccess?.allowedLocations?.join('\n') || ''
       });
     } else {
       // Reset form for create mode
@@ -305,7 +311,9 @@ function AgentModal({
         usePromptComposition: true, // Enable by default for new agents
         baseTemplate: 'standard',
         agentExtension: '',
-        disableRealmPrompt: false
+        disableRealmPrompt: false,
+        // Resource access config
+        allowedLocations: ''
       });
     }
   }, [agent]);
@@ -737,6 +745,44 @@ This agent specializes in...
             </div>
           </div>
 
+          {/* Resource Access Section */}
+          <div className="border-t pt-6">
+            <h4 className="font-medium text-gray-900 mb-4">Resource Access (File & URL Tools)</h4>
+            <p className="text-sm text-gray-600 mb-4">
+              Configure allowed file paths and URLs for built-in <code className="bg-gray-100 px-1 rounded">read_file</code>, <code className="bg-gray-100 px-1 rounded">write_file</code>, and <code className="bg-gray-100 px-1 rounded">fetch_url</code> tools.
+            </p>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Allowed Locations
+              </label>
+              <textarea
+                value={formData.allowedLocations}
+                onChange={(e) => setFormData({ ...formData, allowedLocations: e.target.value })}
+                rows={8}
+                className="w-full px-3 py-2 font-mono text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-primary-500"
+                placeholder={`file:///app/data/**/*
+file:///tmp/*.txt
+https://api.example.com/**
+https://specific.com/endpoint`}
+                disabled={isReadOnly}
+              />
+              <p className="text-xs text-gray-500 mt-1">
+                One location per line. Supports wildcards: <code className="bg-gray-100 px-1 rounded">*</code> (single segment), <code className="bg-gray-100 px-1 rounded">**</code> (multiple segments)
+              </p>
+            </div>
+
+            <div className="mt-3 p-3 bg-blue-50 border border-blue-200 rounded-md">
+              <p className="text-xs font-medium text-blue-900 mb-2">Examples:</p>
+              <ul className="text-xs text-blue-800 space-y-1">
+                <li><code className="bg-white px-1 rounded">file:///app/data/config.json</code> - Exact file</li>
+                <li><code className="bg-white px-1 rounded">file:///app/data/**/*</code> - All files recursively</li>
+                <li><code className="bg-white px-1 rounded">https://api.github.com/**</code> - All GitHub API endpoints</li>
+                <li><code className="bg-white px-1 rounded">https://example.com/v1/endpoint</code> - Specific URL</li>
+              </ul>
+            </div>
+          </div>
+
           {/* Personality Section */}
           <div className="border-t pt-6">
             <h4 className="font-medium text-gray-900 mb-4">Personality & Behavior</h4>
@@ -1146,7 +1192,14 @@ ${extension}`;
             };
           }
           return undefined; // No realm assignment
-        })()
+        })(),
+        // Resource access configuration (NEW)
+        resourceAccess: data.allowedLocations.trim() ? {
+          allowedLocations: data.allowedLocations
+            .split('\n')
+            .map(loc => loc.trim())
+            .filter(loc => loc.length > 0)
+        } : undefined
       };
 
       await agentApi.createAgent(createPayload);
@@ -1225,9 +1278,16 @@ ${extension}`;
             };
           }
           return undefined;
-        })()
+        })(),
+        // Resource access configuration (NEW)
+        resourceAccess: data.allowedLocations.trim() ? {
+          allowedLocations: data.allowedLocations
+            .split('\n')
+            .map(loc => loc.trim())
+            .filter(loc => loc.length > 0)
+        } : undefined
       };
-      
+
       console.log('🚀 Computed realmAccess:', updatePayload.realmAccess, 'from type:', data.type);
       console.log('🚀 Sending update payload:', updatePayload);
       await agentApi.updateAgent(modalState.agent.id, updatePayload);

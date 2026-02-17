@@ -449,7 +449,44 @@ docker-compose build --no-cache
 
 **Environment Variables:** The `.env` file contains critical configuration (database URLs, API keys, etc.). Always use `--env-file .env` with `docker-compose up` commands, or use the `./scripts/dev.sh` script which handles this automatically.
 
-### 8. Frontend-Backend Communication
+### 8. Built-In Resource Access Tools (File & URL)
+
+All agents have access to five foundational tools with explicit opt-in permissions:
+
+**Built-In Tools:**
+1. `read_file` - Read content from `file:///` URLs
+2. `write_file` - Write content to `file:///` URLs
+3. `list_files` - List files and directories at a `file:///` URL (returns name, type, size, modified date)
+4. `process_files_batch` - Process multiple files automatically with built-in iteration (eliminates manual looping)
+5. `fetch_url` - Fetch content from `http://` and `https://` URLs
+
+**Configuration:** Agents must explicitly configure `resourceAccess` with allowed locations:
+```json
+{
+  "resourceAccess": {
+    "allowedLocations": [
+      "file:///app/data/**/*",              // All files in directory tree
+      "file:///tmp/*.txt",                  // Wildcard: only .txt files
+      "https://api.example.com/**",         // All API endpoints
+      "https://specific.com/endpoint"       // Specific URL only
+    ]
+  }
+}
+```
+
+**Wildcards:** `*` (single segment), `**` (multiple segments), `?` (single character)
+
+**Host File Access:** Since agents run in Docker containers, `file:///` paths access the container filesystem by default. To grant access to host machine files:
+1. Add volume mounts to `docker-compose.yml` (see commented examples in file)
+2. Map host directories to `/app/host/*` in container
+3. Grant agent permission to container paths (e.g., `file:///app/host/documents/**/*`)
+
+**Documentation:**
+- `docs/RESOURCE_ACCESS_TOOLS.md` - Complete usage guide with examples
+- `docs/HOST_FILE_ACCESS.md` - Host file access setup and troubleshooting
+- `docker-compose.host-access-example.yml` - Example configuration
+
+### 9. Frontend-Backend Communication
 - Frontend makes REST calls for CRUD operations
 - Frontend uses MCP JSON-RPC 2.0 for coordination execution
 - Always map frontend flat structures to backend nested structures
