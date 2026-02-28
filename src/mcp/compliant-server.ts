@@ -88,29 +88,6 @@ export class MCPCompliantServer {
     }));
     
     this.app.use(express.json());
-    
-    // Security headers
-    this.app.use((req, res, next): void => {
-      // Validate Origin for security (DNS rebinding protection)
-      const origin = req.get('Origin');
-      if (origin && !this.isAllowedOrigin(origin)) {
-        res.status(403).json({
-          jsonrpc: '2.0',
-          error: {
-            code: -32600,
-            message: 'Invalid origin'
-          },
-          id: null
-        });
-        return;
-      }
-      next();
-    });
-  }
-
-  private isAllowedOrigin(origin: string): boolean {
-    // For development, allow localhost origins
-    return origin.includes('localhost') || origin.includes('127.0.0.1');
   }
 
   private setupRoutes(): void {

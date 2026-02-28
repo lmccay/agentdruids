@@ -118,48 +118,6 @@ export class MCPCompliantServer {
     }));
     
     this.app.use(express.json());
-    
-    // Security headers and validation
-    this.app.use((req, res, next) => {
-      // Bind to localhost only for security
-      if (req.hostname !== 'localhost' && req.hostname !== '127.0.0.1') {
-        return res.status(403).json({
-          jsonrpc: '2.0',
-          error: {
-            code: -32600,
-            message: 'Server only accepts connections from localhost'
-          },
-          id: null
-        });
-      }
-
-      // Validate Origin for DNS rebinding protection
-      const origin = req.get('Origin');
-      if (origin && !this.isAllowedOrigin(origin)) {
-        return res.status(403).json({
-          jsonrpc: '2.0',
-          error: {
-            code: -32600,
-            message: 'Invalid origin - potential DNS rebinding attack'
-          },
-          id: null
-        });
-      }
-      return next();
-    });
-  }
-
-  private isAllowedOrigin(origin: string): boolean {
-    // Allow localhost origins and common MCP client origins
-    const allowedPatterns = [
-      /^https?:\/\/localhost(:\d+)?$/,
-      /^https?:\/\/127\.0\.0\.1(:\d+)?$/,
-      /^https?:\/\/\[::1\](:\d+)?$/,
-      /^goose:\/\//, // Goose Desktop Agent
-      /^vscode:\/\//, // VS Code extensions
-    ];
-    
-    return allowedPatterns.some(pattern => pattern.test(origin));
   }
 
   private setupRoutes(): void {

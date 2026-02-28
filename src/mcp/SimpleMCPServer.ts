@@ -1,4 +1,4 @@
-import express, { Request, Response } from 'express';
+import express, { NextFunction, Request, Response } from 'express';
 import cors from 'cors';
 import { v4 as uuidv4 } from 'uuid';
 import axios from 'axios';
@@ -81,13 +81,12 @@ export class SimpleMCPServer {
   }
 
   private setupMiddleware(): void {
-    // CORS configuration for MCP compliance - more permissive for testing
     this.app.use(cors({
-      origin: '*', // Allow all origins for now
+      origin: true,
       credentials: true,
       methods: ['GET', 'POST', 'OPTIONS'],
       allowedHeaders: ['Content-Type', 'Accept', 'MCP-Protocol-Version', 'Mcp-Session-Id', 'Origin'],
-      exposedHeaders: ['Mcp-Session-Id'] // Expose session ID header to frontend
+      exposedHeaders: ['Mcp-Session-Id']
     }));
 
     // Custom JSON parser that handles mixed content types like "application/json, text/event-stream"
@@ -101,21 +100,9 @@ export class SimpleMCPServer {
 
     this.app.use(express.text());
 
-    // Security headers for DNS rebinding protection - allow both localhost and remote hosts
-    this.app.use((req: Request, res: Response, next) => {
+    this.app.use((req: Request, _res: Response, next: NextFunction) => {
       console.log(`📥 Request: ${req.method} ${req.path}`);
-      const host = req.get('host');
-      console.log(`📡 Host: ${host}`);
-
-      // Allow localhost and configured server host
-      const serverHost = process.env.SERVER_HOST;
-      const isLocalhost = host && host.match(/^(localhost|127\.0\.0\.1|0\.0\.0\.0)(:\d+)?$/);
-      const isServerHost = serverHost && host && host.startsWith(serverHost);
-
-      if (host && !isLocalhost && !isServerHost) {
-        console.log(`❌ Invalid host: ${host} (SERVER_HOST: ${serverHost})`);
-        return res.status(403).json({ error: 'Invalid host header' });
-      }
+      console.log(`📡 Host: ${req.get('host')}`);
       return next();
     });
   }
