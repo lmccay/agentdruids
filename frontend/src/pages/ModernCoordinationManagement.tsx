@@ -23,6 +23,7 @@ import {
 import { agentApi, Agent } from '../services/api';
 import coordinationRestApi from '../services/coordinationRestApi';
 import { ContentViewer } from '../components/ContentViewer';
+import { DiagramEditor } from '../components/DiagramEditor';
 
 // Define types for coordination functionality
 interface ParticipantContribution {
@@ -68,6 +69,7 @@ interface CoordinationRequest {
   timeoutMinutes?: number;
   coordinationStyle?: string;
   publishTo?: string;
+  workflow?: { plantuml: string }; // Optional: PlantUML workflow diagram
 }
 
 interface ConcurrencyMetrics {
@@ -341,16 +343,18 @@ export default function ModernCoordinationManagement() {
               try {
                 if (useNaturalLanguage) {
                   // Use natural language API that defaults to built-in coordinator
-                  await coordinationRestApi.startNaturalCoordination({
+                  const result = await coordinationRestApi.startNaturalCoordination({
                     scenarioPrompt: request.scenarioPrompt,
                     participantIds: request.participantIds,
                     coordinatorId: request.coordinatorId === 'built-in-coordinator' ? undefined : request.coordinatorId,
                     timeoutMinutes: request.timeoutMinutes,
                     coordinationStyle: request.coordinationStyle,
                     publishTo: request.publishTo,
-                    metadata: { 
+                    // requireApproval: true,  // TODO: Re-enable when plan approval UI is integrated
+                    workflow: request.workflow,  // Include PlantUML workflow if present
+                    metadata: {
                       mode: 'natural_language',
-                      uiGenerated: true 
+                      uiGenerated: true
                     }
                   });
                 } else {
@@ -360,7 +364,8 @@ export default function ModernCoordinationManagement() {
                     participantIds: request.participantIds,
                     timeoutMinutes: request.timeoutMinutes,
                     coordinationStyle: request.coordinationStyle,
-                    publishTo: request.publishTo
+                    publishTo: request.publishTo,
+                    workflow: request.workflow  // Include PlantUML workflow if present
                   });
                 }
                 setShowNewSessionForm(false);
@@ -665,33 +670,73 @@ function NewSessionForm({
   );
 
   const [naturalLanguageMode, setNaturalLanguageMode] = useState(true); // Default to natural mode
+
+  // Workflow diagram state
+  const [workflowMode, setWorkflowMode] = useState<'text' | 'diagram'>('text');
+  const [plantuml, setPlantuml] = useState('');
+  const [originalScenarioText, setOriginalScenarioText] = useState(''); // Preserve original text when converting to diagram
+  const [convertingToDiagram, setConvertingToDiagram] = useState(false);
+
   const activeAgents = agents.filter(agent => agent.status === 'active');
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (formData.scenarioPrompt.trim() && formData.participantIds.length > 0) {
-      // In natural language mode, don't auto-include coordinator in participants 
-      // The backend will handle coordination automatically
-      let finalParticipantIds = [...formData.participantIds];
-      
-      if (!naturalLanguageMode) {
-        // Only auto-include druid coordinator in explicit mode
-        const coordinator = activeAgents.find(agent => agent.id === formData.coordinatorId);
-        if (coordinator && coordinator.type === 'druid' && !finalParticipantIds.includes(coordinator.id)) {
-          finalParticipantIds.push(coordinator.id);
-        }
-      }
-      
-      await onSubmit({
-        ...formData,
-        participantIds: finalParticipantIds
-      }, naturalLanguageMode);
+  const convertToDiagram = async (textPrompt: string, participantIds: string[]) => {
+    setConvertingToDiagram(true);
+    try {
+      const response = await coordinationRestApi.convertToDiagram(textPrompt, participantIds);
+      setPlantuml(response.plantuml);
+      setOriginalScenarioText(textPrompt); // ✅ Preserve original context
+      setWorkflowMode('diagram');
+    } catch (error) {
+      console.error('Failed to convert to diagram:', error);
+      alert('Failed to convert prompt to diagram. Please try again.');
+    } finally {
+      setConvertingToDiagram(false);
     }
   };
 
+  const handleSubmit = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+
+    // Validate based on mode
+    const isValid = workflowMode === 'diagram'
+      ? plantuml.includes('@startuml') && formData.participantIds.length > 0
+      : formData.scenarioPrompt.trim() && formData.participantIds.length > 0;
+
+    if (!isValid) return;
+
+    // In natural language mode, don't auto-include coordinator in participants
+    // The backend will handle coordination automatically
+    let finalParticipantIds = [...formData.participantIds];
+
+    if (!naturalLanguageMode) {
+      // Only auto-include druid coordinator in explicit mode
+      const coordinator = activeAgents.find(agent => agent.id === formData.coordinatorId);
+      if (coordinator && coordinator.type === 'druid' && !finalParticipantIds.includes(coordinator.id)) {
+        finalParticipantIds.push(coordinator.id);
+      }
+    }
+
+    // Build request with workflow if in diagram mode
+    const request: any = {
+      ...formData,
+      participantIds: finalParticipantIds
+    };
+
+    if (workflowMode === 'diagram') {
+      request.workflow = { plantuml };
+      // ✅ Keep original scenario text for context, don't overwrite with PlantUML
+      // Backend will use original text for detailed instructions + PlantUML for step structure
+      if (originalScenarioText) {
+        request.scenarioPrompt = originalScenarioText;
+      }
+    }
+
+    await onSubmit(request, naturalLanguageMode);
+  };
+
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-      <div className="bg-white rounded-lg p-6 w-full max-w-2xl max-h-screen overflow-y-auto">
+    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 overflow-y-auto">
+      <div className={`bg-white rounded-lg p-6 w-full ${workflowMode === 'diagram' ? 'max-w-7xl' : 'max-w-2xl'} max-h-screen overflow-y-auto my-8`}>
         <h2 className="text-2xl font-semibold text-gray-900 mb-6">
           {initialData ? 'Edit & Start New Session' : 'Start New Coordination Session'}
         </h2>
@@ -742,20 +787,50 @@ function NewSessionForm({
           </div>
           )}
 
-          {/* Scenario Prompt */}
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              Scenario Prompt
-            </label>
-            <textarea
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-primary-500 focus:border-primary-500"
-              rows={4}
-              placeholder="Describe the coordination scenario and what you want the agents to accomplish..."
-              value={formData.scenarioPrompt}
-              onChange={(e) => setFormData(prev => ({ ...prev, scenarioPrompt: e.target.value }))}
-              required
+          {/* Scenario Prompt or Workflow Diagram */}
+          {workflowMode === 'text' ? (
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Scenario Prompt
+              </label>
+              <textarea
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-primary-500 focus:border-primary-500"
+                rows={4}
+                placeholder="Describe the coordination scenario and what you want the agents to accomplish..."
+                value={formData.scenarioPrompt}
+                onChange={(e) => setFormData(prev => ({ ...prev, scenarioPrompt: e.target.value }))}
+                required
+              />
+              <div className="mt-2 flex justify-end">
+                <button
+                  type="button"
+                  onClick={() => convertToDiagram(formData.scenarioPrompt, formData.participantIds)}
+                  disabled={!formData.scenarioPrompt.trim() || formData.participantIds.length === 0 || convertingToDiagram}
+                  className="flex items-center space-x-2 px-4 py-2 text-sm font-medium text-primary-700 bg-primary-50 border border-primary-300 rounded-lg hover:bg-primary-100 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {convertingToDiagram ? (
+                    <>
+                      <RefreshCw className="h-4 w-4 animate-spin" />
+                      <span>Converting...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Activity className="h-4 w-4" />
+                      <span>Convert to Workflow Diagram</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+          ) : (
+            <DiagramEditor
+              plantuml={plantuml}
+              onPlantUMLChange={setPlantuml}
+              onBackToText={() => setWorkflowMode('text')}
+              onSubmit={handleSubmit}
+              isSubmitting={convertingToDiagram}
             />
-          </div>
+          )}
 
           {/* Participant Selection */}
           <div>

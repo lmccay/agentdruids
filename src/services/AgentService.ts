@@ -3040,6 +3040,15 @@ Transform the file content above using the EXACT OUTPUT FORMAT defined in your s
 - If your system prompt defines a specific markdown structure: use that exact structure
 - If your system prompt shows format examples: follow those examples precisely
 
+OUTPUT FILENAME CONTROL:
+If you need to specify a custom output filename based on content metadata, include this comment at the VERY START of your response:
+<!-- OUTPUT_FILENAME: your-custom-filename.md -->
+
+For example:
+<!-- OUTPUT_FILENAME: [Main_Topic]-[Sub_Topic]-[Difficulty_Level]-[Version].md -->
+
+The comment will be automatically removed from the final file.
+
 DO NOT:
 - Create generic summaries or cleaned-up markdown
 - Say "I've processed..." or describe what you did
@@ -3053,25 +3062,46 @@ Your entire response will be written to a file. Start with the formatted content
             sessionId
           });
 
+          // Extract agent-specified output filename if present
+          let finalContent = processed.response;
+          let agentSpecifiedFilename: string | null = null;
+
+          // Check for OUTPUT_FILENAME directive at start of response
+          const filenameMatch = finalContent.match(/^<!--\s*OUTPUT_FILENAME:\s*(.+?)\s*-->\s*/);
+          if (filenameMatch) {
+            agentSpecifiedFilename = filenameMatch[1].trim();
+            // Remove the directive from the content
+            finalContent = finalContent.substring(filenameMatch[0].length);
+            console.log(`   📝 Agent specified custom filename: ${agentSpecifiedFilename}`);
+          }
+
           // Determine output filename
           const path = await import('path');
-          const basename = path.basename(file.name, path.extname(file.name));
-          const outputTemplate = params.output_filename_template || '{basename}_processed.md';
+          let outputFilename: string;
 
-          // Support multiple template variable formats:
-          // {basename}, {{basename}}, {filename}, {{filename}}, {filename_without_extension}, {{filename_without_extension}}
-          let outputFilename = outputTemplate
-            .replace(/\{\{?basename\}\}?/g, basename)
-            .replace(/\{\{?filename_without_extension\}\}?/g, basename)
-            .replace(/\{\{?filename\}\}?/g, basename);
+          if (agentSpecifiedFilename) {
+            // Use agent-specified filename
+            outputFilename = agentSpecifiedFilename;
+          } else {
+            // Fall back to template-based naming
+            const basename = path.basename(file.name, path.extname(file.name));
+            const outputTemplate = params.output_filename_template || '{basename}_processed.md';
+
+            // Support multiple template variable formats:
+            // {basename}, {{basename}}, {filename}, {{filename}}, {filename_without_extension}, {{filename_without_extension}}
+            outputFilename = outputTemplate
+              .replace(/\{\{?basename\}\}?/g, basename)
+              .replace(/\{\{?filename_without_extension\}\}?/g, basename)
+              .replace(/\{\{?filename\}\}?/g, basename);
+          }
 
           // Construct output path
           const outputPath = `${params.output_directory.replace(/\/$/, '')}/${outputFilename}`;
 
-          // Write the processed content
+          // Write the processed content (with directive removed if present)
           await this.toolWriteFile(agent, {
             file_url: outputPath,
-            content: processed.response
+            content: finalContent
           });
 
           console.log(`✅ Successfully processed: ${file.name} → ${outputFilename}`);

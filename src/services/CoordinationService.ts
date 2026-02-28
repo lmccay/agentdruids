@@ -132,6 +132,7 @@ export interface OrchestrationPlan {
   steps: OrchestrationStep[];
   createdAt: Date;
   status: 'draft' | 'executing' | 'completed' | 'failed';
+  plantuml?: string;  // Optional PlantUML diagram source for visualization
 }
 
 /**
@@ -206,7 +207,9 @@ export class CoordinationService {
       timeoutMinutes: session.timeoutMinutes,
       coordinationStyle: session.coordinationStyle,
       participantTasks: session.participantTasks,
-      ...(session.finalResult && { finalResult: session.finalResult })
+      ...(session.finalResult && { finalResult: session.finalResult }),
+      ...(session.error && { error: session.error }),
+      ...(session.metadata && { metadata: session.metadata })
       // Exclude sessionAgentManager and sessionContentManager to avoid circular references
     };
   }
@@ -292,10 +295,247 @@ export class CoordinationService {
   /**
    * Use LLM to break down complex scenario into sequential instructions for the druid
    */
+  /**
+   * Parse PlantUML workflow diagram into orchestration steps
+   */
+  private async parsePlantUMLWorkflow(session: CoordinationSession, plantuml: string): Promise<OrchestrationStep[]> {
+    if (!this.agentService) throw new Error('AgentService not configured');
+
+    console.log(`📊 Parsing PlantUML workflow diagram into executable steps`);
+
+    // Extract participant declarations (e.g., "participant Dev Druid Alpha")
+    const participantPattern = /participant\s+"([^"]+)"\s+as\s+(\w+)/g;
+    const participantMap = new Map<string, string>(); // alias -> full name
+    let match;
+
+    while ((match = participantPattern.exec(plantuml)) !== null) {
+      const [, fullName, alias] = match;
+      participantMap.set(alias, fullName);
+    }
+
+    // Extract arrows/actions (e.g., "Alpha -> OSSR : travel_to_realm")
+    const arrowPattern = /(\w+)\s*-+>\s*(\w+)\s*:\s*([^\n]+)/g;
+    const actions: Array<{ from: string; to: string; action: string }> = [];
+
+    while ((match = arrowPattern.exec(plantuml)) !== null) {
+      const [, from, to, action] = match;
+      actions.push({
+        from: from.trim(),
+        to: to.trim(),
+        action: action.trim()
+      });
+    }
+
+    console.log(`📊 Found ${participantMap.size} participants and ${actions.length} actions`);
+
+    // Map participant names to agent IDs
+    const nameToAgentId = new Map<string, string>();
+    for (const [alias, fullName] of participantMap) {
+      // Find agent by name
+      for (const agentId of session.participantIds) {
+        try {
+          const agent = await this.agentService!.getAgent(agentId);
+          if (agent.name === fullName || agent.name === alias) {
+            nameToAgentId.set(alias, agentId);
+            nameToAgentId.set(fullName, agentId);
+            console.log(`✓ Mapped ${fullName} (${alias}) to agent ${agentId}`);
+            break;
+          }
+        } catch (e) {
+          console.warn(`Could not load agent ${agentId}`);
+        }
+      }
+    }
+
+    // Also try to map realm names mentioned in the diagram
+    const realmNameToId = new Map<string, string>();
+    if (this.realmService) {
+      try {
+        const realms = await this.realmService.listRealms();
+        for (const realm of realms) {
+          realmNameToId.set(realm.name, realm.id);
+          // Also try uppercase versions since PlantUML often uses uppercase
+          realmNameToId.set(realm.name.toUpperCase(), realm.id);
+          // Try acronyms (e.g., "Open Source Software" -> "OSS" or "OSSR")
+          const acronym = realm.name.split(' ').map(w => w[0]).join('').toUpperCase();
+          if (acronym.length > 1) {
+            realmNameToId.set(acronym, realm.id);
+            // Also try with "R" for Realm suffix
+            realmNameToId.set(acronym + 'R', realm.id);
+          }
+
+          // Also map participant aliases from PlantUML (e.g., "OSSR" as participant)
+          for (const [alias, fullName] of participantMap) {
+            if (fullName.toLowerCase().includes(realm.name.toLowerCase()) ||
+                realm.name.toLowerCase().includes(fullName.toLowerCase())) {
+              realmNameToId.set(alias, realm.id);
+              console.log(`✓ Mapped participant ${alias} (${fullName}) to realm ${realm.name}`);
+            }
+          }
+        }
+        console.log(`✓ Mapped ${realmNameToId.size} realm name variations`);
+      } catch (error) {
+        console.warn('Failed to load realms:', error);
+      }
+    }
+
+    // Convert actions to orchestration steps
+    const steps: OrchestrationStep[] = [];
+    let stepNumber = 1;
+
+    for (const action of actions) {
+      const fromAgentId = nameToAgentId.get(action.from);
+      if (!fromAgentId) {
+        console.warn(`⚠️ Could not find agent ID for ${action.from}, skipping action`);
+        continue;
+      }
+
+      const fromAgent = await this.agentService!.getAgent(fromAgentId);
+      const actionLower = action.action.toLowerCase();
+
+      // Parse travel_to_realm actions
+      if (actionLower.includes('travel_to_realm') || actionLower.includes('travel to')) {
+        const realmName = action.to;
+        const realmId = realmNameToId.get(realmName) || realmNameToId.get(realmName.toUpperCase());
+
+        if (!realmId) {
+          console.warn(`⚠️ Could not find realm ID for ${realmName}, skipping travel action`);
+          continue;
+        }
+
+        steps.push({
+          stepId: `${session.id}-step-${stepNumber}`,
+          stepNumber: stepNumber++,
+          description: `${fromAgent.name} travels to realm ${realmName}`,
+          agentId: fromAgentId,
+          actionType: 'travel',
+          parameters: {
+            realmId,
+            realmName
+          },
+          status: 'pending'
+        } as OrchestrationStep);
+      }
+      // Parse delegate_task actions
+      else if (actionLower.includes('delegate_task') || actionLower.includes('delegate')) {
+        const toAgentId = nameToAgentId.get(action.to);
+        if (!toAgentId) {
+          console.warn(`⚠️ Could not find agent ID for ${action.to}, skipping delegate action`);
+          continue;
+        }
+
+        const toAgent = await this.agentService!.getAgent(toAgentId);
+
+        // Extract task description from action text (after the colon or action name)
+        let taskDescription = action.action;
+        if (taskDescription.includes(':')) {
+          taskDescription = taskDescription.split(':').slice(1).join(':').trim();
+        } else if (taskDescription.toLowerCase().startsWith('delegate')) {
+          taskDescription = taskDescription.replace(/^delegate[_\s]*(task)?[_\s]*/i, '').trim();
+        }
+
+        // If still generic, use a default
+        if (!taskDescription || taskDescription.length < 5) {
+          taskDescription = `Work with ${toAgent.name} on this coordination task`;
+        }
+
+        steps.push({
+          stepId: `${session.id}-step-${stepNumber}`,
+          stepNumber: stepNumber++,
+          description: `${fromAgent.name} delegates task to ${toAgent.name}`,
+          agentId: fromAgentId,
+          actionType: 'travel_and_collaborate',
+          parameters: {
+            realmId: toAgent.realmAccess?.boundRealmId || toAgent.realmAccess?.currentRealmId,
+            realmName: action.to, // Use the alias as a placeholder
+            collaborationTargets: [{
+              agentId: toAgentId,
+              agentName: toAgent.name,
+              role: toAgent.specialization?.domain || 'contributor'
+            }],
+            taskPrompt: taskDescription,
+            expectedDeliverable: 'Task completion output'
+          },
+          status: 'pending'
+        } as OrchestrationStep);
+      }
+      // Parse other message/action arrows as collaboration
+      else {
+        const toAgentId = nameToAgentId.get(action.to);
+
+        // If target is a realm or unknown, treat as travel+collaborate
+        if (!toAgentId || realmNameToId.has(action.to)) {
+          const realmId = realmNameToId.get(action.to) || realmNameToId.get(action.to.toUpperCase());
+
+          steps.push({
+            stepId: `${session.id}-step-${stepNumber}`,
+            stepNumber: stepNumber++,
+            description: `${fromAgent.name}: ${action.action}`,
+            agentId: fromAgentId,
+            actionType: 'execute_task',
+            parameters: {
+              taskPrompt: action.action,
+              ...(realmId && { realmId, realmName: action.to })
+            },
+            status: 'pending'
+          } as OrchestrationStep);
+        } else {
+          // Collaboration between two agents
+          const toAgent = await this.agentService!.getAgent(toAgentId);
+
+          steps.push({
+            stepId: `${session.id}-step-${stepNumber}`,
+            stepNumber: stepNumber++,
+            description: `${fromAgent.name} collaborates with ${toAgent.name}: ${action.action}`,
+            agentId: fromAgentId,
+            actionType: 'travel_and_collaborate',
+            parameters: {
+              collaborationTargets: [{
+                agentId: toAgentId,
+                agentName: toAgent.name,
+                role: toAgent.specialization?.domain || 'collaborator'
+              }],
+              taskPrompt: action.action,
+              realmId: toAgent.realmAccess?.boundRealmId || toAgent.realmAccess?.currentRealmId
+            },
+            status: 'pending'
+          } as OrchestrationStep);
+        }
+      }
+    }
+
+    console.log(`✅ Parsed PlantUML into ${steps.length} executable steps`);
+    return steps;
+  }
+
   private async createOrchestrationPlan(session: CoordinationSession): Promise<OrchestrationPlan> {
     if (!this.agentService) throw new Error('AgentService not configured');
 
     console.log(`🎯 Coordinator ${session.coordinatorId} creating orchestration plan for ${session.participantIds.length} participants`);
+
+    // Check if scenario prompt contains PlantUML workflow diagram
+    if (session.scenarioPrompt.includes('@startuml') || session.metadata?.workflowMode === 'diagram') {
+      console.log(`📊 Detected PlantUML workflow diagram, parsing directly into execution steps`);
+
+      // Extract PlantUML content
+      let plantumlContent = session.scenarioPrompt;
+      if (session.metadata?.originalWorkflow?.plantuml) {
+        plantumlContent = session.metadata.originalWorkflow.plantuml;
+      }
+
+      // Parse PlantUML into steps
+      const steps = await this.parsePlantUMLWorkflow(session, plantumlContent);
+
+      return {
+        planId: `plan-${session.id}`,
+        sessionId: session.id,
+        originalScenario: session.scenarioPrompt,
+        steps,
+        createdAt: new Date(),
+        status: 'draft',
+        plantuml: plantumlContent  // Include PlantUML for visualization in approval UI
+      };
+    }
 
     // Get detailed agent and realm information to help LLM make informed decisions
     const participantDetails = await Promise.all(
@@ -610,7 +850,7 @@ CRITICAL: Only assign tasks to DRUIDs. If an Elemental's expertise is needed, as
         scenarioName: 'Orchestrated Coordination',
         scenarioType: 'step_execution',
         agentRole: 'executor',
-        usePersonaPrompt: false
+        usePersonaPrompt: true  // CRITICAL: Preserve agent-specific prompts
       }
     });
 
@@ -648,7 +888,8 @@ CRITICAL: Only assign tasks to DRUIDs. If an Elemental's expertise is needed, as
           collaborationContext: {
             scenarioName: 'Orchestrated Coordination',
             scenarioType: 'realm_travel',
-            agentRole: 'traveler'
+            agentRole: 'traveler',
+            usePersonaPrompt: true  // CRITICAL: Preserve agent-specific prompts even during travel
           }
         });
         console.log(`✅ Agent ${agent.name} traveled to ${step.parameters.realmName}`);
@@ -663,6 +904,13 @@ CRITICAL: Only assign tasks to DRUIDs. If an Elemental's expertise is needed, as
     if (context && context !== "This is the first step in the coordination plan.") {
       fullPrompt += `${context}\n\n`;
     }
+
+    // For PlantUML workflows, include the original scenario text for rich context
+    const session = Array.from((this as any).sessions.values()).find((s: any) => s.id === sessionId);
+    if (session && session.metadata?.workflowMode === 'diagram' && session.scenarioPrompt && !session.scenarioPrompt.startsWith('Execute this PlantUML')) {
+      fullPrompt += `COORDINATION CONTEXT:\n${session.scenarioPrompt}\n\nYOUR SPECIFIC TASK:\n`;
+    }
+
     fullPrompt += `${step.parameters.taskPrompt}`;
 
     console.log(`📝 Executing task for agent ${agent.name}...`);
@@ -674,7 +922,8 @@ CRITICAL: Only assign tasks to DRUIDs. If an Elemental's expertise is needed, as
       collaborationContext: {
         scenarioName: 'Orchestrated Coordination',
         scenarioType: 'coordinated_task',
-        agentRole: 'contributor'
+        agentRole: 'contributor',
+        usePersonaPrompt: true  // CRITICAL: Preserve agent-specific prompts
       }
     });
 
@@ -712,8 +961,14 @@ CRITICAL: Only assign tasks to DRUIDs. If an Elemental's expertise is needed, as
       prompt += `${context}\n\n`;
     }
 
+    // For PlantUML workflows, include the original scenario text for rich context
+    const session = Array.from((this as any).sessions.values()).find((s: any) => s.id === sessionId);
+    if (session && session.metadata?.workflowMode === 'diagram' && session.scenarioPrompt && !session.scenarioPrompt.startsWith('Execute this PlantUML')) {
+      prompt += `COORDINATION CONTEXT:\n${session.scenarioPrompt}\n\n`;
+    }
+
     // Build a natural task prompt with context, letting the agent decide which tools to use
-    prompt += `Task: ${step.parameters.taskPrompt}\n\n`;
+    prompt += `YOUR SPECIFIC TASK: ${step.parameters.taskPrompt}\n\n`;
 
     // Add context about the situation without being prescriptive
     if (needsTravel) {
@@ -736,7 +991,8 @@ CRITICAL: Only assign tasks to DRUIDs. If an Elemental's expertise is needed, as
       collaborationContext: {
         scenarioName: 'Orchestrated Coordination',
         scenarioType: 'druid_coordination',
-        agentRole: 'druid_coordinator'
+        agentRole: 'druid_coordinator',
+        usePersonaPrompt: true  // CRITICAL: Preserve agent-specific prompts
       }
     });
 
@@ -1079,9 +1335,230 @@ CRITICAL: Only assign tasks to DRUIDs. If an Elemental's expertise is needed, as
   /**
    * Start a new coordination session
    */
+  /**
+   * Create a coordination session with plan-only mode (requires approval before execution)
+   */
+  async createCoordinationPlan(request: CoordinationRequest): Promise<string> {
+    console.log(`🔍 Creating plan-only coordination session for ${request.participantIds.length} participants`);
+
+    // Resolve agent names to IDs and validate participants exist
+    if (!this.agentService) {
+      throw new Error('AgentService not configured');
+    }
+
+    const resolvedParticipantIds: string[] = [];
+    for (const participantId of request.participantIds) {
+      const resolvedId = await this.resolveAgentId(participantId);
+      const agent = await this.agentService.getAgent(resolvedId as AgentId);
+      if (!agent) {
+        throw new Error(`Participant agent ${resolvedId} (original: ${participantId}) not found`);
+      }
+      resolvedParticipantIds.push(resolvedId);
+    }
+
+    // Create coordination session
+    const sessionId = `session-${Date.now()}-${uuidv4().slice(0, 8)}`;
+    const sessionAgentManager = new SessionAgentManagerImpl(sessionId);
+    const sessionContentManager = new SessionContentManagerImpl({
+      baseDirectory: `./data/published_content/sessions`,
+      useSessionDirectories: true
+    });
+
+    const session: CoordinationSession = {
+      id: sessionId,
+      coordinatorId: request.coordinatorId,
+      scenarioPrompt: request.scenarioPrompt,
+      participantIds: resolvedParticipantIds,
+      status: 'pending',
+      startedAt: new Date(),
+      timeoutMinutes: request.timeoutMinutes,
+      coordinationStyle: request.coordinationStyle,
+      participantTasks: [],
+      sessionAgentManager,
+      sessionContentManager,
+      metadata: request.metadata
+    };
+
+    // Initialize session-scoped agent states
+    for (const participantId of resolvedParticipantIds) {
+      try {
+        const agent = await this.agentService.getAgent(participantId as AgentId);
+        sessionAgentManager.joinSession(participantId, agent);
+      } catch (error) {
+        console.warn(`⚠️ Failed to initialize session state for agent ${participantId}:`, error);
+      }
+    }
+
+    // Generate the orchestration plan but DON'T execute it
+    try {
+      const plan = await this.createOrchestrationPlan(session);
+
+      // Store the plan in session metadata for later approval
+      if (!session.metadata) session.metadata = {};
+      session.metadata['orchestrationPlan'] = plan;
+
+      console.log(`✅ Created orchestration plan with ${plan.steps.length} steps, awaiting approval`);
+    } catch (error) {
+      console.error(`❌ Failed to create orchestration plan:`, error);
+      throw new Error(`Failed to create orchestration plan: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+
+    this.sessions.set(sessionId, session);
+    console.log(`🚀 Created plan-only coordination session: ${sessionId}`);
+
+    return sessionId;
+  }
+
+  /**
+   * Approve and execute a coordination plan
+   */
+  async approveAndExecutePlan(sessionId: string): Promise<void> {
+    const session = this.sessions.get(sessionId);
+
+    if (!session) {
+      throw new Error(`Session ${sessionId} not found`);
+    }
+
+    if (session.status !== 'pending') {
+      throw new Error(`Session ${sessionId} is not pending approval (status: ${session.status})`);
+    }
+
+    const plan = session.metadata?.['orchestrationPlan'] as OrchestrationPlan;
+    if (!plan) {
+      throw new Error(`No orchestration plan found for session ${sessionId}`);
+    }
+
+    console.log(`✅ Plan approved for session ${sessionId}, starting execution...`);
+
+    // Start async execution
+    this.executeApprovedPlan(sessionId, plan).catch(error => {
+      console.error(`❌ Approved plan execution failed for session ${sessionId}:`, error);
+      session.status = 'failed';
+      session.completedAt = new Date();
+      session.error = error instanceof Error ? error.message : String(error);
+
+      // Clean up session-scoped agent states on failure
+      session.sessionAgentManager.cleanup();
+    });
+  }
+
+  /**
+   * Execute an approved orchestration plan
+   */
+  private async executeApprovedPlan(sessionId: string, plan: OrchestrationPlan): Promise<void> {
+    const session = this.sessions.get(sessionId);
+    if (!session) {
+      throw new Error(`Session ${sessionId} not found`);
+    }
+
+    try {
+      session.status = 'in_progress';
+
+      // Execute the pre-generated plan
+      await this.executeOrchestrationPlan(session, plan);
+
+      // Handle content integration (same as in performCoordination)
+      if (session.finalResult && session.finalResult.participantContributions.length > 0) {
+        console.log(`🎯 Post-execution: Processing content integration...`);
+
+        const isFileProcessingTask = session.scenarioPrompt.toLowerCase().includes('process') &&
+          (session.scenarioPrompt.toLowerCase().includes('file') ||
+           session.scenarioPrompt.toLowerCase().includes('batch') ||
+           session.finalResult.participantContributions.some(c =>
+             c.contribution.includes('process_files_batch') ||
+             c.contribution.includes('Successfully processed')
+           ));
+
+        if (isFileProcessingTask) {
+          console.log(`⏭️  Skipping synthesis - detected file processing task where output files are the deliverable`);
+          session.finalResult.summary = `File processing completed successfully. ${session.finalResult.participantContributions.length} agent(s) contributed.`;
+        } else {
+          const mockTasks: ParticipantTask[] = session.finalResult.participantContributions
+            .filter(contrib => contrib.contribution && contrib.contribution.length > 200)
+            .map(contrib => {
+              let extractedContent = contrib.contribution;
+
+              if (contrib.contribution.includes('TOOL_RESULT:')) {
+                try {
+                  const toolResultMatch = contrib.contribution.match(/TOOL_RESULT:\s*(\{[\s\S]*?\})/);
+                  if (toolResultMatch && toolResultMatch[1]) {
+                    const toolResult = JSON.parse(toolResultMatch[1]);
+                    if (toolResult.result && typeof toolResult.result === 'string') {
+                      extractedContent = toolResult.result;
+                    }
+                  }
+                } catch (error) {
+                  console.log(`⚠️ Failed to parse TOOL_RESULT, using raw content`);
+                }
+              }
+
+              return {
+                agentId: contrib.agentId,
+                task: `Content generation task (${extractedContent.substring(0, 50)}...)`,
+                status: 'completed' as const,
+                result: extractedContent,
+                assignedAt: new Date(Date.now() - 60000),
+                completedAt: new Date()
+              };
+            });
+
+          if (mockTasks.length > 0) {
+            const hasContentContributions = mockTasks.some(task => {
+              if (!task.result || task.result.length < 200) return false;
+
+              const planningIndicators = [
+                'propose the following steps', 'here is my methodology', 'my approach would be',
+                'i recommend the following steps', 'the plan should include',
+                'step 1:', 'step 2:', 'step 3:', 'phase 1:', 'phase 2:', 'phase 3:'
+              ];
+
+              return !planningIndicators.some(indicator =>
+                task.result!.toLowerCase().includes(indicator)
+              );
+            });
+
+            if (hasContentContributions) {
+              try {
+                console.log(`🔄 Coordinator integrating content...`);
+                const coordinator = this.getBuiltInCoordinator();
+                const integrationPrompt = this.buildContentIntegrationPrompt(session, mockTasks, coordinator);
+                const integratedContent = await this.executeCoordinatorPrompt(coordinator, integrationPrompt);
+
+                session.finalResult.integratedContent = integratedContent;
+                session.finalResult.summary = `Coordination completed successfully with integrated content from ${mockTasks.length} contributors`;
+                console.log(`✅ Content integration completed`);
+              } catch (synthesisError) {
+                const errorMsg = synthesisError instanceof Error ? synthesisError.message : String(synthesisError);
+                console.warn(`⚠️ Content synthesis failed: ${errorMsg}`);
+                session.finalResult.summary = `Coordination completed successfully. ${mockTasks.length} agents contributed. Synthesis skipped.`;
+                if (!session.metadata) session.metadata = {};
+                session.metadata['synthesisWarning'] = errorMsg;
+              }
+            }
+          }
+        }
+      }
+
+      session.status = 'completed';
+      console.log(`✅ Approved plan execution completed for session ${sessionId}`);
+
+      // Clean up
+      session.sessionAgentManager.cleanup();
+      session.sessionContentManager.shutdown();
+
+    } catch (error) {
+      console.error(`❌ Approved plan execution failed:`, error);
+      session.status = 'failed';
+      session.completedAt = new Date();
+      session.error = error instanceof Error ? error.message : String(error);
+      session.sessionAgentManager.cleanup();
+      throw error;
+    }
+  }
+
   async startCoordination(request: CoordinationRequest): Promise<string> {
     console.log(`🔍 DEBUG: Validating ${request.participantIds.length} participants: ${JSON.stringify(request.participantIds)}`);
-    
+
     // Resolve agent names to IDs and validate participants exist
     if (!this.agentService) {
       throw new Error('AgentService not configured');
@@ -1091,7 +1568,7 @@ CRITICAL: Only assign tasks to DRUIDs. If an Elemental's expertise is needed, as
     for (const participantId of request.participantIds) {
       console.log(`🔍 DEBUG: Resolving agent identifier ${participantId}...`);
       const resolvedId = await this.resolveAgentId(participantId);
-      
+
       console.log(`🔍 DEBUG: Checking agent ${resolvedId}...`);
       const agent = await this.agentService.getAgent(resolvedId as AgentId);
       if (!agent) {
@@ -1116,7 +1593,7 @@ CRITICAL: Only assign tasks to DRUIDs. If an Elemental's expertise is needed, as
       baseDirectory: `./data/published_content/sessions`,
       useSessionDirectories: true
     });
-    
+
     const session: CoordinationSession = {
       id: sessionId,
       coordinatorId: resolvedRequest.coordinatorId,
@@ -1128,7 +1605,8 @@ CRITICAL: Only assign tasks to DRUIDs. If an Elemental's expertise is needed, as
       coordinationStyle: resolvedRequest.coordinationStyle,
       participantTasks: [],
       sessionAgentManager,
-      sessionContentManager
+      sessionContentManager,
+      metadata: resolvedRequest.metadata
     };
 
     // Initialize session-scoped agent states
@@ -1152,7 +1630,7 @@ CRITICAL: Only assign tasks to DRUIDs. If an Elemental's expertise is needed, as
       console.error(`❌ Coordination failed for session ${sessionId}:`, error);
       session.status = 'failed';
       session.completedAt = new Date();
-      
+
       // Clean up session-scoped agent states on failure
       session.sessionAgentManager.cleanup();
     });

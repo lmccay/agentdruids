@@ -26,6 +26,7 @@ class CoordinationRestAPI {
     timeoutMinutes?: number;
     coordinationStyle?: string;
     publishTo?: string;
+    workflow?: { plantuml: string }; // Optional: PlantUML workflow diagram
   }) {
     const response = await fetch(`${this.baseURL}/coordinators/${coordinatorId}/coordinate`, {
       method: 'POST',
@@ -52,6 +53,8 @@ class CoordinationRestAPI {
     coordinationStyle?: string;
     publishTo?: string;
     metadata?: any;
+    requireApproval?: boolean; // New: request plan approval before execution
+    workflow?: { plantuml: string }; // Optional: PlantUML workflow diagram
   }) {
     const response = await fetch(`${this.baseURL}/coordinators/coordinate`, {
       method: 'POST',
@@ -64,6 +67,22 @@ class CoordinationRestAPI {
     if (!response.ok) {
       const error = await response.json();
       throw new Error(error.error || `Failed to start coordination: ${response.statusText}`);
+    }
+
+    return response.json();
+  }
+
+  async approvePlan(sessionId: string) {
+    const response = await fetch(`${this.baseURL}/coordinators/sessions/${sessionId}/approve`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      }
+    });
+
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.error || `Failed to approve plan: ${response.statusText}`);
     }
 
     return response.json();
@@ -210,6 +229,27 @@ class CoordinationRestAPI {
     if (!response.ok) {
       const error = await response.json();
       throw new Error(error.details || error.error || `Failed to purge session results: ${response.statusText}`);
+    }
+
+    return response.json();
+  }
+
+  async convertToDiagram(prompt: string, availableAgents: string[]) {
+    const response = await fetch(`${this.baseURL}/coordinators/convert-to-diagram`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        prompt,
+        availableAgents,
+        coordinatorId: 'built-in-coordinator'
+      })
+    });
+
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.error || `Failed to convert to diagram: ${response.statusText}`);
     }
 
     return response.json();
