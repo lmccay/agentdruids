@@ -166,7 +166,7 @@ CREATE INDEX IF NOT EXISTS idx_scenarios_coordinator ON druids_core.scenarios(co
 CREATE INDEX IF NOT EXISTS idx_scenarios_realm ON druids_core.scenarios(realm_id);
 CREATE INDEX IF NOT EXISTS idx_scenarios_status ON druids_core.scenarios(status);
 CREATE INDEX IF NOT EXISTS idx_scenarios_created_at ON druids_core.scenarios(created_at);
-CREATE INDEX IF NOT EXISTS idx_scenarios_name_trgm ON druids_scenarios.scenarios USING gin(name gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_scenarios_name_trgm ON druids_core.scenarios USING gin(name gin_trgm_ops);
 
 CREATE INDEX IF NOT EXISTS idx_knowledge_namespace ON druids_knowledge.entries(namespace);
 CREATE INDEX IF NOT EXISTS idx_knowledge_namespace_key ON druids_knowledge.entries(namespace, key);
