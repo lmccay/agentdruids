@@ -1353,8 +1353,8 @@ Available tools:
         tools.push(
           {
             name: 'fetch_url',
-            description: 'Fetch content from an HTTP/HTTPS URL. Requires URL permission.',
-            parameters: { url: 'HTTP or HTTPS URL to fetch', method: 'HTTP method (GET, POST, etc.)', body: 'optional request body', headers: 'optional request headers' }
+            description: 'Fetch content from one or more HTTP/HTTPS URLs. Requires URL permission. Pass "url" for a single URL or "urls" (array) to fetch multiple in parallel.',
+            parameters: { url: 'single HTTP or HTTPS URL to fetch', urls: 'array of HTTP/HTTPS URLs to fetch in parallel', method: 'HTTP method (GET, POST, etc.) — applied to all URLs', body: 'optional request body', headers: 'optional request headers' }
           }
         );
       }
@@ -3151,63 +3151,73 @@ Your entire response will be written to a file. Start with the formatted content
   /**
    * Tool: Fetch content from an HTTP/HTTPS URL
    */
-  private async toolFetchUrl(agent: Agent, params: { url: string; method?: string; body?: any; headers?: Record<string, string> }): Promise<any> {
+  private async toolFetchUrl(agent: Agent, params: { url?: string; urls?: string[]; method?: string; body?: any; headers?: Record<string, string> }): Promise<any> {
     const { ResourceAccessValidator } = await import('./ResourceAccessValidator');
 
-    if (!params.url) {
-      throw new Error('url parameter is required');
-    }
+    const method = (params.method || 'GET').toUpperCase();
+    const headers = params.headers || {};
 
-    // Validate URL format
-    if (!ResourceAccessValidator.isValidHttpUrl(params.url)) {
-      throw new Error('Invalid URL: must start with http:// or https://');
-    }
+    const fetchOne = async (url: string) => {
+      if (!ResourceAccessValidator.isValidHttpUrl(url)) {
+        return { success: false, url, error: 'Invalid URL: must start with http:// or https://' };
+      }
+      if (!ResourceAccessValidator.hasAccess(agent.resourceAccess, url)) {
+        return { success: false, url, error: ResourceAccessValidator.getAccessDeniedMessage(url, agent.id) };
+      }
 
-    // Check access permissions
-    if (!ResourceAccessValidator.hasAccess(agent.resourceAccess, params.url)) {
-      throw new Error(ResourceAccessValidator.getAccessDeniedMessage(params.url, agent.id));
-    }
+      try {
+        console.log(`🌐 Agent ${agent.id} fetching URL: ${method} ${url}`);
 
-    try {
-      const method = (params.method || 'GET').toUpperCase();
-      const headers = params.headers || {};
+        const fetchOptions: RequestInit = { method, headers: { ...headers } };
 
-      console.log(`🌐 Agent ${agent.id} fetching URL: ${method} ${params.url}`);
-
-      const fetchOptions: RequestInit = {
-        method,
-        headers
-      };
-
-      if (params.body && ['POST', 'PUT', 'PATCH'].includes(method)) {
-        fetchOptions.body = typeof params.body === 'string' ? params.body : JSON.stringify(params.body);
-        if (!headers['Content-Type']) {
-          headers['Content-Type'] = 'application/json';
+        if (params.body && ['POST', 'PUT', 'PATCH'].includes(method)) {
+          fetchOptions.body = typeof params.body === 'string' ? params.body : JSON.stringify(params.body);
+          if (!(fetchOptions.headers as Record<string, string>)['Content-Type']) {
+            (fetchOptions.headers as Record<string, string>)['Content-Type'] = 'application/json';
+          }
         }
+
+        const response = await fetch(url, fetchOptions);
+        const contentType = response.headers.get('content-type') || '';
+        const responseData = contentType.includes('application/json')
+          ? await response.json()
+          : await response.text();
+
+        return {
+          success: true,
+          url,
+          status: response.status,
+          statusText: response.statusText,
+          headers: Object.fromEntries(response.headers.entries()),
+          data: responseData
+        };
+      } catch (error: any) {
+        console.error(`❌ Error fetching URL ${url}:`, error.message);
+        return { success: false, url, error: error.message };
       }
+    };
 
-      const response = await fetch(params.url, fetchOptions);
-      const contentType = response.headers.get('content-type') || '';
-
-      let responseData: any;
-      if (contentType.includes('application/json')) {
-        responseData = await response.json();
-      } else {
-        responseData = await response.text();
-      }
-
+    // Batch mode: urls array
+    if (params.urls && params.urls.length > 0) {
+      const results = await Promise.all(params.urls.map(fetchOne));
       return {
-        success: true,
-        url: params.url,
-        status: response.status,
-        statusText: response.statusText,
-        headers: Object.fromEntries(response.headers.entries()),
-        data: responseData
+        success: results.every(r => r.success),
+        total: results.length,
+        succeeded: results.filter(r => r.success).length,
+        failed: results.filter(r => !r.success).length,
+        results
       };
-    } catch (error: any) {
-      console.error(`❌ Error fetching URL ${params.url}:`, error.message);
-      throw new Error(`Failed to fetch URL: ${error.message}`);
     }
+
+    // Single mode: url string
+    if (!params.url) {
+      throw new Error('Either "url" or "urls" parameter is required');
+    }
+    const result = await fetchOne(params.url);
+    if (!result.success) {
+      throw new Error(result.error);
+    }
+    return result;
   }
 
   /**
