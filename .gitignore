@@ -12,6 +12,15 @@ build
 .env.*.local
 .env.backup
 
+# Backup, scratch, and disabled source files (do not commit)
+*.bak
+*.bak2
+*.backup
+*.disabled
+*.corrupt
+*.temp
+*.orig
+
 # Runtime data and volumes
 data
 host

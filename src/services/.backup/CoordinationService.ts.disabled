@@ -1,6 +1,0 @@
-export class CoordinationService {
-  async executeCoordinatedWorkflow(coordinator: Agent, specialists: Agent[], scenario: Scenario): Promise<CollaborationResult>;
-  private distributeTasksToSpecialists(coordinator: Agent, specialists: Agent[], prompt: string): Promise<TaskAssignment[]>;
-  private collectAndIntegrateResults(coordinator: Agent, results: SpecialistResult[]): Promise<IntegratedResult>;
-  private publishResult(result: IntegratedResult, publishTarget: string): Promise<void>;
-}

@@ -37,7 +37,7 @@
     "TypeScript"
   ],
   "author": "Druids Project",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "dependencies": {
     "@types/marked": "^5.0.2",
     "axios": "^1.5.0",
