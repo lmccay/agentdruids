@@ -38,3 +38,6 @@ verify_*.js
 # HTTP debug artifacts
 cookies.txt
 headers.txt
+
+# Per-contributor Claude Code settings (opt-in from .claude/settings.example.json)
+.claude/settings.local.json

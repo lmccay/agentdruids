@@ -492,6 +492,32 @@ All agents have access to five foundational tools with explicit opt-in permissio
 - Always map frontend flat structures to backend nested structures
 - CORS configured for localhost ports 3000-3005
 
+## Working with Claude on this codebase
+
+Druids is public, and contributors will often use Claude Code (or another Claude-driven client) to prepare PRs. Several default Claude behaviors make those PRs hard to review: creating summary markdown files, refactoring adjacent code "while we're here," packaging multiple unrelated changes into one diff. The rules below exist to keep contributions surgical and reviewable.
+
+**These rules are mandatory when working on this codebase and override default Claude behavior.**
+
+### Scope rules
+
+1. **One PR = one task.** If you find yourself fixing a second thing, file a follow-up issue. Don't bundle.
+2. **No new markdown files** outside `docs/`, `specs/`, `.github/`, `.claude/`, or the project root whitelist (`README.md`, `CONTRIBUTING.md`, `SECURITY.md`, `CLAUDE.md`, `CHANGELOG.md`, `LICENSE`, `CODE_OF_CONDUCT.md`). Do not create `IMPLEMENTATION_SUMMARY.md`, `PLAN.md`, `NOTES.md`, or similar narrative artifacts. Reasoning belongs in the PR description, not in tracked files.
+3. **No refactoring of unrelated code.** Renaming a variable, moving a helper, reformatting a file — these belong in their own PR. If you spot rot, file an issue; do not fold it into the current change.
+4. **Default to editing existing files.** Creating a new file should require a specific reason that fits the task.
+
+### Before declaring a task complete
+
+1. Run `/pr-scope` to get a scope report on the working tree.
+2. Run `docker compose exec druids-app npm run type-check`.
+3. Run the relevant tests: `npm run test:unit` minimally, plus integration / contract / `test:session-protection` if your area requires them (see [CONTRIBUTING.md](CONTRIBUTING.md)).
+4. If anything is out of scope, revert it before opening the PR.
+
+### Tooling provided
+
+- `/pr-scope` — slash command that runs `git status` + `git diff --stat` and flags new files, `.md` additions, and out-of-scope edits.
+- `pr-scope-auditor` — subagent that audits the current diff against a stated task description and returns PASS/FAIL.
+- `.claude/settings.example.json` — opt-in hook bundle that *enforces* the markdown-creation rule via `PreToolUse`. Copy to `.claude/settings.local.json` to enable. See [CONTRIBUTING.md](CONTRIBUTING.md) for the one-line opt-in.
+
 ## Project Structure Reference
 
 ```

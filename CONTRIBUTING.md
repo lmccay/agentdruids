@@ -111,6 +111,26 @@ A small number of operations bypass the PR flow:
 
 These are exceptions. If you find yourself reaching for a direct push, ask whether it actually meets one of the criteria above — most things that feel urgent do not.
 
+## Using Claude effectively on this codebase
+
+Druids ships project-level Claude Code scaffolding under `.claude/` so that AI-assisted contributions stay focused and reviewable. If you use Claude Code (or another Claude-driven MCP client) to prepare PRs:
+
+1. Read the **"Working with Claude on this codebase"** section in [CLAUDE.md](CLAUDE.md). Claude reads it automatically; you should read it too so you can spot when its output drifts from the rules.
+
+2. Use `/pr-scope` before pushing. The slash command reports the shape of your working-tree diff and flags new files, `.md` additions outside allowed paths, and edits that look out of scope.
+
+3. For a stricter audit, invoke the `pr-scope-auditor` subagent with a one-sentence task description. It returns PASS/FAIL with line-level feedback.
+
+4. **Recommended:** enable scope-enforcement hooks. These actually *block* Claude from creating markdown files outside `docs/`, `specs/`, `.github/`, `.claude/`, or the root whitelist:
+
+   ```bash
+   cp .claude/settings.example.json .claude/settings.local.json
+   ```
+
+   `.claude/settings.local.json` is gitignored, so this is a per-contributor opt-in. The hook depends on `jq` (`brew install jq` on macOS) and degrades gracefully if it isn't installed.
+
+If you find yourself fighting these rules — for example, Claude really wants to write `IMPLEMENTATION_SUMMARY.md` for a complex feature — that's the signal to **stop and split the PR**, not to disable the hook. Reviewer time is the constraint these tools protect.
+
 ## Reporting bugs and requesting features
 
 Use GitHub Issues. Templates are provided under `.github/ISSUE_TEMPLATE/`. For security issues, see [SECURITY.md](SECURITY.md) — please do not file public issues for vulnerabilities.

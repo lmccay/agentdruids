@@ -1,0 +1,16 @@
+{
+  "_comment": "Druids contributor scope-enforcement hooks. Copy this file to .claude/settings.local.json (which is gitignored) to enable. See CLAUDE.md 'Working with Claude on this codebase' and CONTRIBUTING.md 'Using Claude effectively on this codebase'.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/block-stray-md.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
