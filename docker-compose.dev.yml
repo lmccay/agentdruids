@@ -1,6 +1,4 @@
 # Development override for frontend
-version: '3.8'
-
 services:
   # Frontend UI - Development version with hot reload
   druids-frontend:

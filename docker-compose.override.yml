@@ -7,8 +7,6 @@
 #
 # This will automatically merge with docker-compose.yml
 
-version: '3.8'
-
 services:
   druids-app:
     volumes:
