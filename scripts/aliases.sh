@@ -33,7 +33,6 @@ alias druids-rebuild-all="cd $DRUIDS_ROOT && docker-compose build --no-cache && 
 
 # Testing shortcuts
 alias druids-test="docker-compose -f $DRUIDS_ROOT/docker-compose.yml exec druids-app npm test"
-alias druids-test-isolation="docker-compose -f $DRUIDS_ROOT/docker-compose.yml exec druids-app npm run test:session-protection"
 alias druids-test-unit="docker-compose -f $DRUIDS_ROOT/docker-compose.yml exec druids-app npm run test:unit"
 alias druids-test-integration="docker-compose -f $DRUIDS_ROOT/docker-compose.yml exec druids-app npm run test:integration"
 

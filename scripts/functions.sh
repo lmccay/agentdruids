@@ -90,10 +90,6 @@ druids-test() {
   docker-compose -f "$DRUIDS_ROOT/docker-compose.yml" exec druids-app npm test
 }
 
-druids-test-isolation() {
-  docker-compose -f "$DRUIDS_ROOT/docker-compose.yml" exec druids-app npm run test:session-protection
-}
-
 druids-test-unit() {
   docker-compose -f "$DRUIDS_ROOT/docker-compose.yml" exec druids-app npm run test:unit
 }

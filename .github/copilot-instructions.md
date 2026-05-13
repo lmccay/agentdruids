@@ -3,7 +3,7 @@
 Sophisticated multi-agent system with federated architecture and comprehensive management UI. Last updated: 2025-11-05
 
 ## 🛡️ **CRITICAL: CONCURRENT SESSION ARCHITECTURE**
-**CONSTITUTIONAL REQUIREMENT**: This system has production-ready concurrent session support that MUST NOT be regressed. See `CONCURRENT_SESSION_CONSTITUTION.md` for mandatory architectural principles. All changes MUST preserve:
+**CONSTITUTIONAL REQUIREMENT**: This system has production-ready concurrent session support that MUST NOT be regressed. See the "Concurrent Session Architecture (CONSTITUTIONAL)" section of `CLAUDE.md` for mandatory architectural principles. All changes MUST preserve:
 - **Session Isolation**: Complete separation between coordination sessions
 - **Session-Scoped Managers**: Three-layer isolation (Agent/Task/Content)  
 - **Concurrency Tracking**: Coordinator limits and session lifecycle management
@@ -73,15 +73,10 @@ npm run dev              # Local development server
 npm run mcp:server       # Standalone MCP server for external clients
 
 # Testing Strategy
-npm test                 # All test suites with 10s timeout
+npm test                 # All test suites
 npm run test:contract    # MCP protocol compliance (5s timeout)
 npm run test:integration # Multi-agent workflows (15s timeout)
-npm run test:performance # Load and scalability tests
-
-# Agent Management CLI
-npm run agent:create     # Interactive agent creation wizard
-npm run realm:create     # Deploy new federated realm
-npm run scenario:run     # Execute multi-agent collaboration
+npm run test:unit        # Component isolation (10s timeout)
 
 # Frontend Development
 cd frontend && npm run dev  # React dev server (http://localhost:3004)

@@ -225,14 +225,7 @@ run_performance_tests() {
     # Wait for services
     log_info "Waiting for services to be ready..."
     sleep 30
-    
-    # Run performance tests (if available)
-    if $COMPOSE_CMD -f "$COMPOSE_FILE" run --rm druids-app npm run test:performance 2>/dev/null; then
-        log_success "Performance tests completed!"
-    else
-        log_warning "Performance tests not found - skipping"
-    fi
-    
+
     # Stop environment
     $COMPOSE_CMD -f "$COMPOSE_FILE" down
 }

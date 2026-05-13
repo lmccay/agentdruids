@@ -31,7 +31,7 @@ Which part of the system would change?
 
 ## Architectural considerations
 
-If your idea touches coordination, sessions, or the MCP server, please note how it would interact with the constraints in `CONCURRENT_SESSION_CONSTITUTION.md` and `docs/MCP_COMPLIANCE_CONSTITUTION.md`.
+If your idea touches coordination, sessions, or the MCP server, please note how it would interact with the constraints in `CLAUDE.md` ("Concurrent Session Architecture (CONSTITUTIONAL)") and `docs/MCP_COMPLIANCE_CONSTITUTION.md`.
 
 ## Additional context
 
