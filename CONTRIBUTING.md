@@ -68,6 +68,49 @@ Before opening a PR:
 
 PR titles should describe the user-visible change in one line. The body should explain the *why* — what motivated the change, what tradeoffs you considered — more than the *what*, since the diff already shows the what.
 
+## Contribution workflow (everyone, including maintainers)
+
+Druids uses a standard fork-and-PR workflow. This applies to **all** contributors, maintainers included — there is no "trusted committer" shortcut to direct pushes on `main`. Branch protection on the canonical repository enforces this.
+
+```text
+your fork ──(push branch)──> your fork on GitHub ──(PR)──> open-tempest-labs/agentdruids:main
+```
+
+For a typical change:
+
+```bash
+# One-time: fork open-tempest-labs/agentdruids on GitHub (UI or `gh repo fork`)
+git clone https://github.com/<your-username>/agentdruids.git
+cd agentdruids
+git remote add upstream https://github.com/open-tempest-labs/agentdruids.git
+git branch --set-upstream-to=upstream/main main
+git config branch.main.pushRemote origin   # keeps accidental pushes off upstream/main
+
+# Per change:
+git checkout main && git pull              # sync from upstream
+git checkout -b descriptive-branch-name
+# ... make changes, run type-check + tests ...
+git commit -m "..."
+git push -u origin descriptive-branch-name
+gh pr create --base main --repo open-tempest-labs/agentdruids
+```
+
+To keep your fork's `main` in sync with upstream's `main`, either use GitHub's "Sync fork" button on your fork page, or:
+
+```bash
+gh repo sync <your-username>/agentdruids
+```
+
+### Direct pushes to `main` (breakglass only)
+
+A small number of operations bypass the PR flow:
+
+- Tagging a release on a commit that is already on `main`
+- Emergency security hotfix when a PR cycle would meaningfully extend exposure
+- Repository hygiene that doesn't touch source (e.g. README typo on `main` if branch protection allows)
+
+These are exceptions. If you find yourself reaching for a direct push, ask whether it actually meets one of the criteria above — most things that feel urgent do not.
+
 ## Reporting bugs and requesting features
 
 Use GitHub Issues. Templates are provided under `.github/ISSUE_TEMPLATE/`. For security issues, see [SECURITY.md](SECURITY.md) — please do not file public issues for vulnerabilities.
