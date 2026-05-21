@@ -198,7 +198,7 @@ Each phase produces a demonstrable artifact. Phases are sequential but small eno
 
 **Done when:** a Goose user can run `goose use druids` (or equivalent) and see a Druids coordination session render in Goose end-to-end.
 
-This phase is the load-bearing grant demo and should be sized accordingly.
+This phase produces the most consumer-facing artifact of the rendering work and should be sized accordingly.
 
 ### Phase 5 — Iterate the event taxonomy
 
