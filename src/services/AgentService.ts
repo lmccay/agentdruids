@@ -288,7 +288,6 @@ export class AgentService {
       personality: request.personality,
       mcpTools: request.mcpTools,
       toolPermissions: request.toolPermissions,
-      resourceAccess: request.resourceAccess,
       llmConfig: request.llmConfig,
       resourceLimits: request.resourceLimits || {
         maxMemoryMB: 512,
@@ -297,6 +296,7 @@ export class AgentService {
         maxExecutionTimeMs: 300000
       },
       bindings: [],
+      ...(request.resourceAccess && { resourceAccess: request.resourceAccess }),
       ...(request.realmAccess && { realmAccess: request.realmAccess }),
       ...(request.promptConfig && { promptConfig: request.promptConfig }),
       tags: request.tags || [],
@@ -559,6 +559,12 @@ export class AgentService {
       }
     }
 
+    // Resolve optional fields ahead of the object literal so we can conditionally
+    // include them — exactOptionalPropertyTypes forbids assigning `undefined` to
+    // a `?:`-declared field directly.
+    const resolvedResourceAccess = updateData.resourceAccess !== undefined ? updateData.resourceAccess : agent.resourceAccess;
+    const resolvedPromptConfig = updateData.promptConfig !== undefined ? updateData.promptConfig : agent.promptConfig;
+
     // Apply updates safely
     const updatedAgent: Agent = {
       ...agent,
@@ -577,7 +583,6 @@ export class AgentService {
       },
       mcpTools: updateData.mcpTools !== undefined ? updateData.mcpTools : agent.mcpTools,
       toolPermissions: updateData.toolPermissions || agent.toolPermissions,
-      resourceAccess: updateData.resourceAccess !== undefined ? updateData.resourceAccess : agent.resourceAccess,
       llmConfig: {
         ...agent.llmConfig,
         ...(updateData.llmConfig || {})
@@ -585,8 +590,9 @@ export class AgentService {
       resourceLimits: updateData.resourceLimits || agent.resourceLimits,
       tags: updateData.tags !== undefined ? updateData.tags : (agent.tags || []),
       metadata: updateData.metadata !== undefined ? updateData.metadata : (agent.metadata || {}),
-      promptConfig: updateData.promptConfig !== undefined ? updateData.promptConfig : agent.promptConfig,
       updatedAt: Date.now().toString(),
+      ...(resolvedResourceAccess !== undefined && { resourceAccess: resolvedResourceAccess }),
+      ...(resolvedPromptConfig !== undefined && { promptConfig: resolvedPromptConfig }),
       ...(requesterId && { lastModifiedBy: requesterId }),
       // Replace realmAccess completely instead of merging to allow removing fields
       ...(updateData.realmAccess !== undefined && { realmAccess: updateData.realmAccess as RealmAccess })
@@ -808,11 +814,11 @@ export class AgentService {
         const availableTools = agent.mcpTools || [];
 
         const composedPrompt = await this.promptCompositionService.composePrompt(agent, {
-          session_id: request.sessionId,
           user_id: 'system', // TODO: Pass actual user ID when available
-          realm_id: realmId,
           timestamp: new Date().toISOString(),
-          available_tools: availableTools
+          available_tools: availableTools,
+          ...(request.sessionId && { session_id: request.sessionId }),
+          ...(realmId && { realm_id: realmId })
         });
 
         systemPrompt = composedPrompt.final_prompt;
@@ -2976,8 +2982,6 @@ Please use your available tools to execute this task now and provide your comple
     },
     sessionId?: string
   ): Promise<any> {
-    const { ResourceAccessValidator } = await import('./ResourceAccessValidator');
-
     // Validate required parameters
     if (!params.input_directory) {
       throw new Error('input_directory parameter is required');
@@ -3059,7 +3063,7 @@ Your entire response will be written to a file. Start with the formatted content
           // Execute processing via agent's LLM (self-processing)
           const processed = await this.executeAgentPrompt(agent.id, {
             prompt: processingPrompt,
-            sessionId
+            ...(sessionId && { sessionId })
           });
 
           // Extract agent-specified output filename if present
@@ -3069,10 +3073,14 @@ Your entire response will be written to a file. Start with the formatted content
           // Check for OUTPUT_FILENAME directive at start of response
           const filenameMatch = finalContent.match(/^<!--\s*OUTPUT_FILENAME:\s*(.+?)\s*-->\s*/);
           if (filenameMatch) {
-            agentSpecifiedFilename = filenameMatch[1].trim();
-            // Remove the directive from the content
-            finalContent = finalContent.substring(filenameMatch[0].length);
-            console.log(`   📝 Agent specified custom filename: ${agentSpecifiedFilename}`);
+            const captured = filenameMatch[1];
+            const fullMatch = filenameMatch[0];
+            if (captured !== undefined && fullMatch !== undefined) {
+              agentSpecifiedFilename = captured.trim();
+              // Remove the directive from the content
+              finalContent = finalContent.substring(fullMatch.length);
+              console.log(`   📝 Agent specified custom filename: ${agentSpecifiedFilename}`);
+            }
           }
 
           // Determine output filename
