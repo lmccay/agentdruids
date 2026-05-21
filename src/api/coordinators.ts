@@ -662,10 +662,11 @@ router.delete('/sessions/:sessionId/results', async (req: Request, res: Response
  */
 router.post('/convert-to-diagram', async (req: Request, res: Response) => {
   try {
-    const { prompt, coordinatorId = 'built-in-coordinator', availableAgents = [] } = req.body;
+    const { prompt, availableAgents = [] } = req.body;
 
     if (!prompt) {
-      return res.status(400).json({ error: 'Prompt is required' });
+      res.status(400).json({ error: 'Prompt is required' });
+      return;
     }
 
     const coordinator = coordinationService.getBuiltInCoordinator();
@@ -791,6 +792,13 @@ Output ONLY the PlantUML code. Do not include explanations or markdown code bloc
     while ((match = participantRegex.exec(plantuml)) !== null) {
       const displayName = match[1] || match[3];
       const alias = match[2] || match[3];
+
+      // The regex has two alternatives: alt 1 fills groups 1+2; alt 2 fills group 3.
+      // At least one of {1, 3} must be defined for displayName, and likewise for alias.
+      // Skip defensively if neither is — unreachable for the current regex.
+      if (displayName === undefined || alias === undefined) {
+        continue;
+      }
 
       // Try to match to actual agent IDs
       const matchedAgent = validAgents.find(a =>
