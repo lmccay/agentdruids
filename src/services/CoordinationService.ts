@@ -42,6 +42,10 @@ export interface CoordinationRequest {
   timeoutMinutes: number;
   coordinationStyle: 'collaborative' | 'consultative' | 'directive';
   publishTo?: string[];
+  // Caller-supplied per-request extras (e.g., workflowMode='diagram',
+  // originalWorkflow for PlantUML workflows). Forwarded to the session's
+  // metadata.
+  metadata?: Record<string, any>;
 }
 
 export interface CoordinationSession {
@@ -310,6 +314,10 @@ export class CoordinationService {
 
     while ((match = participantPattern.exec(plantuml)) !== null) {
       const [, fullName, alias] = match;
+      if (fullName === undefined || alias === undefined) {
+        // Unreachable given the regex, but TypeScript needs the narrow.
+        continue;
+      }
       participantMap.set(alias, fullName);
     }
 
@@ -319,6 +327,10 @@ export class CoordinationService {
 
     while ((match = arrowPattern.exec(plantuml)) !== null) {
       const [, from, to, action] = match;
+      if (from === undefined || to === undefined || action === undefined) {
+        // Unreachable given the regex, but TypeScript needs the narrow.
+        continue;
+      }
       actions.push({
         from: from.trim(),
         to: to.trim(),
@@ -357,7 +369,7 @@ export class CoordinationService {
           // Also try uppercase versions since PlantUML often uses uppercase
           realmNameToId.set(realm.name.toUpperCase(), realm.id);
           // Try acronyms (e.g., "Open Source Software" -> "OSS" or "OSSR")
-          const acronym = realm.name.split(' ').map(w => w[0]).join('').toUpperCase();
+          const acronym = realm.name.split(' ').map((w: string) => w[0]).join('').toUpperCase();
           if (acronym.length > 1) {
             realmNameToId.set(acronym, realm.id);
             // Also try with "R" for Realm suffix
@@ -514,13 +526,14 @@ export class CoordinationService {
     console.log(`🎯 Coordinator ${session.coordinatorId} creating orchestration plan for ${session.participantIds.length} participants`);
 
     // Check if scenario prompt contains PlantUML workflow diagram
-    if (session.scenarioPrompt.includes('@startuml') || session.metadata?.workflowMode === 'diagram') {
+    if (session.scenarioPrompt.includes('@startuml') || session.metadata?.['workflowMode'] === 'diagram') {
       console.log(`📊 Detected PlantUML workflow diagram, parsing directly into execution steps`);
 
       // Extract PlantUML content
       let plantumlContent = session.scenarioPrompt;
-      if (session.metadata?.originalWorkflow?.plantuml) {
-        plantumlContent = session.metadata.originalWorkflow.plantuml;
+      const originalPlantuml = session.metadata?.['originalWorkflow']?.plantuml;
+      if (originalPlantuml) {
+        plantumlContent = originalPlantuml;
       }
 
       // Parse PlantUML into steps
@@ -906,8 +919,8 @@ CRITICAL: Only assign tasks to DRUIDs. If an Elemental's expertise is needed, as
     }
 
     // For PlantUML workflows, include the original scenario text for rich context
-    const session = Array.from((this as any).sessions.values()).find((s: any) => s.id === sessionId);
-    if (session && session.metadata?.workflowMode === 'diagram' && session.scenarioPrompt && !session.scenarioPrompt.startsWith('Execute this PlantUML')) {
+    const session = sessionId ? this.sessions.get(sessionId) : undefined;
+    if (session && session.metadata?.['workflowMode'] === 'diagram' && session.scenarioPrompt && !session.scenarioPrompt.startsWith('Execute this PlantUML')) {
       fullPrompt += `COORDINATION CONTEXT:\n${session.scenarioPrompt}\n\nYOUR SPECIFIC TASK:\n`;
     }
 
@@ -962,8 +975,8 @@ CRITICAL: Only assign tasks to DRUIDs. If an Elemental's expertise is needed, as
     }
 
     // For PlantUML workflows, include the original scenario text for rich context
-    const session = Array.from((this as any).sessions.values()).find((s: any) => s.id === sessionId);
-    if (session && session.metadata?.workflowMode === 'diagram' && session.scenarioPrompt && !session.scenarioPrompt.startsWith('Execute this PlantUML')) {
+    const session = sessionId ? this.sessions.get(sessionId) : undefined;
+    if (session && session.metadata?.['workflowMode'] === 'diagram' && session.scenarioPrompt && !session.scenarioPrompt.startsWith('Execute this PlantUML')) {
       prompt += `COORDINATION CONTEXT:\n${session.scenarioPrompt}\n\n`;
     }
 
@@ -1376,7 +1389,7 @@ CRITICAL: Only assign tasks to DRUIDs. If an Elemental's expertise is needed, as
       participantTasks: [],
       sessionAgentManager,
       sessionContentManager,
-      metadata: request.metadata
+      ...(request.metadata !== undefined && { metadata: request.metadata })
     };
 
     // Initialize session-scoped agent states
@@ -1606,7 +1619,7 @@ CRITICAL: Only assign tasks to DRUIDs. If an Elemental's expertise is needed, as
       participantTasks: [],
       sessionAgentManager,
       sessionContentManager,
-      metadata: resolvedRequest.metadata
+      ...(resolvedRequest.metadata !== undefined && { metadata: resolvedRequest.metadata })
     };
 
     // Initialize session-scoped agent states

@@ -93,6 +93,11 @@ export interface CoordinationSession {
   startedAt: string;
   completedAt?: string;
   timeoutAt: string;
+
+  // Free-form per-session extras (workflow mode, original PlantUML, etc.). The
+  // CoordinationService populates and reads specific keys; this is intentionally
+  // loose to accommodate scenario-specific data without churn here.
+  metadata?: Record<string, any>;
 }
 
 /**
@@ -105,6 +110,11 @@ export interface CoordinationRequest {
   timeoutMinutes?: number;
   coordinationStyle?: 'directive' | 'consultative' | 'collaborative';
   publishTo?: string[]; // MCP tools to publish results to
+
+  // Caller-supplied per-request extras (e.g., workflowMode='diagram',
+  // originalWorkflow for PlantUML workflows). Forwarded to the resulting
+  // CoordinationSession's metadata.
+  metadata?: Record<string, any>;
 }
 
 /**
