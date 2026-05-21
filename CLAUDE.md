@@ -497,6 +497,27 @@ Druids is public, and contributors will often use Claude Code (or another Claude
 3. **No refactoring of unrelated code.** Renaming a variable, moving a helper, reformatting a file — these belong in their own PR. If you spot rot, file an issue; do not fold it into the current change.
 4. **Default to editing existing files.** Creating a new file should require a specific reason that fits the task.
 
+### What does not belong in public artifacts
+
+Certain context about this project is operationally useful when assisting the maintainer in private conversations but **must not appear in repository files, commit messages, PR descriptions, issue threads, or any other public artifact**. This includes:
+
+- **Funding context.** Grant program name, amounts, installment structure, assessment criteria, reviewer identities, internal grant narratives or status. Refer to the project's motivation in technical terms ("research direction," "architectural goal"), not in funding terms.
+- **Commercial / venture-studio activity.** Specific business names, customer targets, revenue plans, go-to-market strategy. If a business built on top of Druids drives a feature requirement, describe the requirement generically ("vertical applications in domain X need Y").
+- **Unannounced strategic positioning.** Pivots, foundation applications in flight, partnership discussions — until they are public, they are not in public docs.
+
+When writing project documentation or commit/PR text, generalize. Examples:
+
+| Don't write | Write instead |
+|---|---|
+| "The original grant pitch was X" | "The project's research direction is X" |
+| "Driven by [our marketing business]'s needs" | "Driven by vertical applications such as marketing tooling" |
+| "The grant team will assess..." | (omit — assessment context is not part of the technical doc) |
+| "Load-bearing grant demo" | "Most consumer-facing artifact" / describe the technical role |
+
+Generic *domain* examples (marketing, legal, learning, engineering) are fine as illustrative categories — they're universal. What stays confidential is the specific business, funding, or strategic context attached to those domains.
+
+When in doubt, write the generic version. Internal-only context lives in places outside the repository (typically the maintainer's local notes); public artifacts under `docs/`, `README.md`, `CONTRIBUTING.md`, and PR/issue threads stay generic.
+
 ### Before declaring a task complete
 
 1. Run `/pr-scope` to get a scope report on the working tree.
