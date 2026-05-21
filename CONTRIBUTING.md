@@ -50,7 +50,7 @@ docker compose --env-file .env up -d
 
 Two architectural documents are treated as constitutions. Pull requests that violate them will be asked to change before review.
 
-1. **[CONCURRENT_SESSION_CONSTITUTION.md](CONCURRENT_SESSION_CONSTITUTION.md)** — coordination sessions must remain fully isolated. No shared mutable state between sessions; services stay stateless; all session state lives in session-scoped managers. The files listed as "protected" in `CLAUDE.md` cannot regress.
+1. **`CLAUDE.md` — "Concurrent Session Architecture (CONSTITUTIONAL)"** — coordination sessions must remain fully isolated. No shared mutable state between sessions; services stay stateless; all session state lives in session-scoped managers. The files listed as "protected" in the same document cannot regress.
 
 2. **[docs/MCP_COMPLIANCE_CONSTITUTION.md](docs/MCP_COMPLIANCE_CONSTITUTION.md)** — the MCP server must remain spec-compliant. All MCP requests use the `/mcp` endpoint, `tools/call` returns `{ content: [{ type: "text", text: "..." }] }`, session IDs come from the `Mcp-Session-Id` response header.
 
@@ -61,9 +61,9 @@ If your change touches coordination, session lifecycle, or the MCP server, pleas
 Before opening a PR:
 
 - [ ] `docker compose exec druids-app npm run type-check` passes
-- [ ] `docker compose exec druids-app npm test` passes (or, if you've touched coordination, also `npm run test:session-protection`)
+- [ ] `docker compose exec druids-app npm test` passes
 - [ ] You haven't committed `.bak`, `.backup`, `.disabled`, or `.env*` files
-- [ ] New behavior is covered by a test in the appropriate category (`tests/unit`, `tests/integration`, `tests/contract`, `tests/performance`)
+- [ ] New behavior is covered by a test in the appropriate category (`tests/unit`, `tests/integration`, `tests/contract`)
 - [ ] Public-facing changes (API, MCP tools, config) are reflected in the relevant doc under `docs/`
 
 PR titles should describe the user-visible change in one line. The body should explain the *why* — what motivated the change, what tradeoffs you considered — more than the *what*, since the diff already shows the what.

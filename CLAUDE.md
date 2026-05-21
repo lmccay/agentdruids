@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Druids is a sophisticated multi-agent system featuring four agent types (Druids, Elementals, Gaia, Worldtree) working together in a federated architecture with FULLY COMPLIANT Model Context Protocol (MCP) integration and a comprehensive web-based management interface.
 
-**Key Architecture:** Production-ready concurrent session support with complete isolation between coordination sessions, enforced through a constitutional architecture documented in `CONCURRENT_SESSION_CONSTITUTION.md`.
+**Key Architecture:** Production-ready concurrent session support with complete isolation between coordination sessions, enforced through a constitutional architecture defined in the "Concurrent Session Architecture (CONSTITUTIONAL)" sections below.
 
 **Development Philosophy:** This project is Docker-first. All development, testing, and deployment workflows assume services run in Docker containers. This ensures consistent environments, proper service isolation, and eliminates "works on my machine" issues. Local npm commands are available but are NOT the primary workflow.
 
@@ -171,8 +171,6 @@ docker-compose exec druids-app npm test
 docker-compose exec druids-app npm run test:contract
 docker-compose exec druids-app npm run test:integration
 docker-compose exec druids-app npm run test:unit
-docker-compose exec druids-app npm run test:performance
-docker-compose exec druids-app npm run test:session-protection
 
 # Test coverage
 docker-compose exec druids-app npm run test:coverage
@@ -195,11 +193,6 @@ docker-compose exec druids-app npm run build
 
 # Frontend build
 docker-compose exec druids-ui npm run build
-
-# Agent/Realm Management CLI (inside container)
-docker-compose exec druids-app npm run agent:create
-docker-compose exec druids-app npm run realm:create
-docker-compose exec druids-app npm run scenario:run
 ```
 
 ### Local Development (Outside Docker - Advanced Use Cases Only)
@@ -250,7 +243,7 @@ The system enforces mandatory session isolation through three-layer architecture
 2. **TaskQueueManager**: Task and concurrency management per session
 3. **SessionContentManager**: Content storage isolation per session
 
-**CRITICAL**: Any changes to coordination, agent state, or content management MUST preserve session isolation. See `CONCURRENT_SESSION_CONSTITUTION.md` for immutable architectural principles.
+**CRITICAL**: Any changes to coordination, agent state, or content management MUST preserve session isolation. See "Critical Development Rules > 1. Concurrent Session Architecture (CONSTITUTIONAL)" below for the full set of immutable architectural principles, including the list of protected files.
 
 ### Service Layer Design
 Services follow a stateless pattern - NO session-specific state stored in service classes. All session state must exist in session-scoped managers created during coordination.
@@ -342,12 +335,11 @@ Core services in Docker Compose:
 - **druids-grafana** (port 3002): Monitoring dashboards
 
 ### Testing Strategy
-Four test categories with different timeout configurations:
+Three test categories with different timeout configurations:
 
 1. **Contract Tests** (`tests/contract/`): MCP protocol compliance, 5s timeout
 2. **Integration Tests** (`tests/integration/`): Multi-agent scenarios, 15s timeout
 3. **Unit Tests** (`tests/unit/`): Component isolation, 10s timeout
-4. **Performance Tests** (`tests/performance/`): Load/scalability, 30s timeout
 
 All tests use `tests/setup.ts` for environment configuration and mocked console methods.
 
@@ -566,8 +558,6 @@ tests/
 ├── contract/                   # MCP protocol compliance (5s timeout)
 ├── integration/                # Multi-agent scenarios (15s timeout)
 ├── unit/                       # Component isolation (10s timeout)
-├── performance/                # Load/scalability (30s timeout)
-├── concurrent_session/         # 🛡️ PROTECTED: Session isolation tests
 └── setup.ts                    # Test environment configuration
 
 scripts/
@@ -576,7 +566,7 @@ scripts/
 └── health.sh                   # System health checks
 
 docs/
-├── CONCURRENT_SESSION_CONSTITUTION.md  # 🛡️ Architectural constitution
+├── MCP_COMPLIANCE_CONSTITUTION.md      # 🛡️ MCP architectural constitution
 ├── MCP_CLIENT_CONFIGURATION.md         # MCP integration guide
 ├── BORIS_CHERNY_WORKFLOW_DESIGN.md    # Multi-project workflow design
 └── OpenAI-Integration.md               # OpenAI LLM setup
@@ -585,14 +575,10 @@ docs/
 ## Development Workflow Best Practices
 
 ### When Making Changes to Coordination
-1. Read `CONCURRENT_SESSION_CONSTITUTION.md` first
+1. Review the "Concurrent Session Architecture (CONSTITUTIONAL)" section above and "Critical Development Rules > 1." below first
 2. Ensure changes preserve session isolation
-3. Run session protection tests:
-   ```bash
-   docker-compose exec druids-app npm run test:session-protection
-   ```
-4. Test with concurrent coordination scenarios
-5. Verify cleanup in both success and failure paths
+3. Test with concurrent coordination scenarios
+4. Verify cleanup in both success and failure paths
 
 ### When Modifying MCP Server
 1. Use `/mcp` endpoint for all testing (NOT `/`)
@@ -678,7 +664,7 @@ docker-compose --env-file .env up -d
 
 ### Issue: Session isolation failures
 **Root Cause:** Shared mutable state or bypassing session managers
-**Solution:** Review `CONCURRENT_SESSION_CONSTITUTION.md` and use session-scoped managers
+**Solution:** Review the "Concurrent Session Architecture (CONSTITUTIONAL)" and "Critical Development Rules > 1." sections of this file, and use session-scoped managers
 
 ### Issue: Frontend data mapping errors
 **Root Cause:** Flat frontend structure vs nested backend structure
@@ -686,7 +672,7 @@ docker-compose --env-file .env up -d
 
 ### Issue: Test timeouts
 **Root Cause:** Wrong test category or expensive operations
-**Solution:** Use correct test directory (contract=5s, unit=10s, integration=15s, performance=30s)
+**Solution:** Use correct test directory (contract=5s, unit=10s, integration=15s)
 
 ### Issue: Ollama model not loading
 **Solution:**
@@ -708,7 +694,6 @@ docker-compose --env-file .env up -d
 
 For detailed information, see:
 - `README.md` - Comprehensive project overview and setup
-- `CONCURRENT_SESSION_CONSTITUTION.md` - Session isolation principles (MANDATORY reading for coordination changes)
 - `.github/copilot-instructions.md` - Additional development guidelines
 - `docs/MCP_CLIENT_CONFIGURATION.md` - MCP integration guide
 - `docs/BORIS_CHERNY_WORKFLOW_DESIGN.md` - Multi-project workflow patterns

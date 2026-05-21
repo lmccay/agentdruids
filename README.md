@@ -151,7 +151,7 @@ docs/         Extended documentation
 3. Run the test suite: `docker compose exec druids-main npm test`
 4. Open a pull request
 
-For architectural changes affecting coordination or session isolation, read `CONCURRENT_SESSION_CONSTITUTION.md` first — those constraints are non-negotiable.
+For architectural changes affecting coordination or session isolation, read the "Concurrent Session Architecture (CONSTITUTIONAL)" section of `CLAUDE.md` first — those constraints are non-negotiable.
 
 ## License
 

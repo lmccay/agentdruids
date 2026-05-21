@@ -438,7 +438,7 @@ Goose agents implement 3 standard tools:
 ### Research
 - **Grant Application:** `grant_application_content.md`
 - **Evolution Framework:** `docs/evolution-framework.md` (referenced in grant)
-- **Concurrent Session Architecture:** `CONCURRENT_SESSION_CONSTITUTION.md`
+- **Concurrent Session Architecture:** `CLAUDE.md` ("Concurrent Session Architecture (CONSTITUTIONAL)" section)
 
 ---
 
