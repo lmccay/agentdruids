@@ -109,7 +109,13 @@ export class MigrationService {
           if (!match) {
             throw new Error(`Invalid migration filename: ${filename}`);
           }
-          const version = parseInt(match[1], 10);
+          const versionStr = match[1];
+          const name = match[2];
+          if (versionStr === undefined || name === undefined) {
+            // Unreachable given the regex, but TypeScript needs the narrow.
+            throw new Error(`Invalid migration filename: ${filename}`);
+          }
+          const version = parseInt(versionStr, 10);
           if (version < 2) {
             throw new Error(
               `Migration version ${version} is reserved for baseline. ` +
@@ -118,7 +124,7 @@ export class MigrationService {
           }
           return {
             version,
-            name: match[2],
+            name,
             filename,
           };
         })
