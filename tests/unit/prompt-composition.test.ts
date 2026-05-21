@@ -9,40 +9,8 @@
  * - Caching behavior
  */
 
-// Mock the marked module to avoid ES module issues in Jest
-jest.mock('marked', () => {
-  // Create a simple mock that simulates marked's behavior for parsing our test prompts
-  const mockLexer = (text: string) => {
-    const tokens: any[] = [];
-    const lines = text.split('\n');
-
-    for (const line of lines) {
-      if (line.startsWith('# ')) {
-        const heading = line.substring(2).trim();
-        tokens.push({ type: 'heading', depth: 1, text: heading, raw: line + '\n' });
-      } else if (line.trim() && !line.startsWith('---')) {
-        tokens.push({ type: 'paragraph', text: line, raw: line + '\n' });
-      }
-    }
-
-    return tokens;
-  };
-
-  const mockParser = (tokens: any[]) => {
-    return tokens
-      .filter((t: any) => t.type === 'paragraph')
-      .map((t: any) => t.text)
-      .join('\n');
-  };
-
-  return {
-    marked: {
-      lexer: jest.fn(mockLexer),
-      parser: jest.fn(mockParser)
-    },
-    Token: {} as any
-  };
-});
+// `marked` is mocked globally in tests/setup.ts so jest doesn't try to load
+// its ESM build. No per-file mock is needed here.
 
 import { PromptCompositionService } from '../../src/services/PromptCompositionService';
 import { PromptSourcesConfig } from '../../src/models/PromptConfig';
