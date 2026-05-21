@@ -206,8 +206,12 @@ check_all_services() {
     
     # Grafana (optional)
     check_http_health "Grafana (optional)" "$GRAFANA_URL/api/health" >/dev/null 2>&1 || true
-    
-    return $all_healthy
+
+    if [ "$all_healthy" = "true" ]; then
+        return 0
+    else
+        return 1
+    fi
 }
 
 # Detailed health check
