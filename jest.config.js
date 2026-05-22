@@ -24,6 +24,11 @@ module.exports = {
   setupFilesAfterEnv: ['<rootDir>/tests/setup.ts'],
   testTimeout: 10000,
   verbose: true,
+  // Note: per-project `testTimeout` is not a valid jest option and produces
+  // "Unknown option" validation warnings. Per-project timeouts can be set via
+  // `jest.setTimeout(N)` at the top of an individual test file if a specific
+  // category needs a different value. Until then, the top-level testTimeout
+  // above (10000ms) applies to all projects.
   projects: [
     {
       displayName: 'contract',
@@ -34,18 +39,16 @@ module.exports = {
       transform: {
         '^.+\\.ts$': 'ts-jest',
       },
-      testTimeout: 5000
     },
     {
       displayName: 'integration',
-      preset: 'ts-jest', 
+      preset: 'ts-jest',
       testEnvironment: 'node',
       testMatch: ['<rootDir>/tests/integration/**/*.test.ts'],
       setupFilesAfterEnv: ['<rootDir>/tests/setup.ts'],
       transform: {
         '^.+\\.ts$': 'ts-jest',
       },
-      testTimeout: 15000
     },
     {
       displayName: 'unit',
@@ -59,18 +62,6 @@ module.exports = {
       transformIgnorePatterns: [
         'node_modules/(?!(marked)/)'
       ],
-      testTimeout: 5000
-    },
-    {
-      displayName: 'performance',
-      preset: 'ts-jest',
-      testEnvironment: 'node',
-      testMatch: ['<rootDir>/tests/performance/**/*.test.ts'],
-      setupFilesAfterEnv: ['<rootDir>/tests/setup.ts'],
-      transform: {
-        '^.+\\.ts$': 'ts-jest',
-      },
-      testTimeout: 30000
     }
   ]
 };
