@@ -25,7 +25,7 @@ class CoordinationRestAPI {
     participantIds: string[];
     timeoutMinutes?: number;
     coordinationStyle?: string;
-    publishTo?: string;
+    publishTo?: string[];
     workflow?: { plantuml: string }; // Optional: PlantUML workflow diagram
   }) {
     const response = await fetch(`${this.baseURL}/coordinators/${coordinatorId}/coordinate`, {
@@ -51,7 +51,7 @@ class CoordinationRestAPI {
     coordinatorId?: string; // Optional - defaults to built-in-coordinator
     timeoutMinutes?: number;
     coordinationStyle?: string;
-    publishTo?: string;
+    publishTo?: string[];
     metadata?: any;
     requireApproval?: boolean; // New: request plan approval before execution
     workflow?: { plantuml: string }; // Optional: PlantUML workflow diagram
