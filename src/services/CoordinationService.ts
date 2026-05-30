@@ -918,9 +918,12 @@ CRITICAL: Only assign tasks to DRUIDs. If an Elemental's expertise is needed, as
       fullPrompt += `${context}\n\n`;
     }
 
-    // For PlantUML workflows, include the original scenario text for rich context
+    // Always include the original scenario text so the executing agent has the
+    // full brief, not just the planner's per-step paraphrase. The
+    // "Execute this PlantUML" guard skips synthetic diagram-execution prompts
+    // that re-embed the diagram itself.
     const session = sessionId ? this.sessions.get(sessionId) : undefined;
-    if (session && session.metadata?.['workflowMode'] === 'diagram' && session.scenarioPrompt && !session.scenarioPrompt.startsWith('Execute this PlantUML')) {
+    if (session && session.scenarioPrompt && !session.scenarioPrompt.startsWith('Execute this PlantUML')) {
       fullPrompt += `COORDINATION CONTEXT:\n${session.scenarioPrompt}\n\nYOUR SPECIFIC TASK:\n`;
     }
 
@@ -974,9 +977,12 @@ CRITICAL: Only assign tasks to DRUIDs. If an Elemental's expertise is needed, as
       prompt += `${context}\n\n`;
     }
 
-    // For PlantUML workflows, include the original scenario text for rich context
+    // Always include the original scenario text so the executing agent has the
+    // full brief, not just the planner's per-step paraphrase. The
+    // "Execute this PlantUML" guard skips synthetic diagram-execution prompts
+    // that re-embed the diagram itself.
     const session = sessionId ? this.sessions.get(sessionId) : undefined;
-    if (session && session.metadata?.['workflowMode'] === 'diagram' && session.scenarioPrompt && !session.scenarioPrompt.startsWith('Execute this PlantUML')) {
+    if (session && session.scenarioPrompt && !session.scenarioPrompt.startsWith('Execute this PlantUML')) {
       prompt += `COORDINATION CONTEXT:\n${session.scenarioPrompt}\n\n`;
     }
 
