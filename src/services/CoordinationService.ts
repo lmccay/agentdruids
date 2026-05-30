@@ -62,6 +62,10 @@ export interface CoordinationSession {
   finalResult?: FinalCoordinationResult;
   error?: string;  // Error message if session failed
   metadata?: Record<string, any>;  // Additional session metadata (warnings, etc.)
+  // Destinations to publish the final integrated content to. Persisted on the
+  // session so that rerun and the simple-coordination fallback can both honor
+  // the original request's publish intent.
+  publishTo?: string[];
 
   // Session-scoped agent management for concurrency safety
   sessionAgentManager: SessionAgentManagerImpl;
@@ -270,7 +274,8 @@ export class CoordinationService {
       coordinationStyle: request.coordinationStyle,
       participantTasks: [],
       sessionAgentManager,
-      sessionContentManager
+      sessionContentManager,
+      ...(request.publishTo !== undefined && { publishTo: request.publishTo })
     };
     
     // Initialize session-scoped agent states
@@ -1389,7 +1394,8 @@ CRITICAL: Only assign tasks to DRUIDs. If an Elemental's expertise is needed, as
       participantTasks: [],
       sessionAgentManager,
       sessionContentManager,
-      ...(request.metadata !== undefined && { metadata: request.metadata })
+      ...(request.metadata !== undefined && { metadata: request.metadata }),
+      ...(request.publishTo !== undefined && { publishTo: request.publishTo })
     };
 
     // Initialize session-scoped agent states
@@ -1619,7 +1625,8 @@ CRITICAL: Only assign tasks to DRUIDs. If an Elemental's expertise is needed, as
       participantTasks: [],
       sessionAgentManager,
       sessionContentManager,
-      ...(resolvedRequest.metadata !== undefined && { metadata: resolvedRequest.metadata })
+      ...(resolvedRequest.metadata !== undefined && { metadata: resolvedRequest.metadata }),
+      ...(resolvedRequest.publishTo !== undefined && { publishTo: resolvedRequest.publishTo })
     };
 
     // Initialize session-scoped agent states
@@ -1712,7 +1719,8 @@ CRITICAL: Only assign tasks to DRUIDs. If an Elemental's expertise is needed, as
       sessionContentManager: new SessionContentManagerImpl({
         baseDirectory: `./data/published_content/sessions`,
         useSessionDirectories: true
-      })
+      }),
+      ...(originalSession.publishTo !== undefined && { publishTo: [...originalSession.publishTo] })
     };
 
     this.sessions.set(newSessionId, newSession);
@@ -3201,6 +3209,21 @@ Please create a well-structured, integrated response that combines these perspec
     } else {
       session.finalResult.summary = 'Simple coordination completed but no contributions received';
       session.finalResult.integratedContent = 'No contributions were successfully collected from participants.';
+    }
+
+    // Honor the original request's publish intent in the fallback path too.
+    // session.publishTo is set at session creation from request.publishTo.
+    if (session.publishTo && session.publishTo.length > 0 && session.finalResult.integratedContent) {
+      try {
+        for (const publishKey of session.publishTo) {
+          const contentPath = path.join('./data/published_content', `${publishKey.replace(/[^a-zA-Z0-9]/g, '_')}.md`);
+          await fs.writeFile(contentPath, session.finalResult.integratedContent, 'utf-8');
+          console.log(`📖 Published final content to: ${contentPath}`);
+        }
+        session.finalResult.publishedTo = [...session.publishTo];
+      } catch (publishError) {
+        console.warn('Failed to publish content:', publishError instanceof Error ? publishError.message : 'Unknown error');
+      }
     }
 
     // Mark session as completed
