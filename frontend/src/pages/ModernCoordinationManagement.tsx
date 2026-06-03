@@ -349,7 +349,9 @@ export default function ModernCoordinationManagement() {
                     coordinatorId: request.coordinatorId === 'built-in-coordinator' ? undefined : request.coordinatorId,
                     timeoutMinutes: request.timeoutMinutes,
                     coordinationStyle: request.coordinationStyle,
-                    publishTo: request.publishTo,
+                    publishTo: request.publishTo
+                      ? [request.publishTo.trim()].filter(s => s.length > 0)
+                      : undefined,
                     // requireApproval: true,  // TODO: Re-enable when plan approval UI is integrated
                     workflow: request.workflow,  // Include PlantUML workflow if present
                     metadata: {
@@ -364,7 +366,9 @@ export default function ModernCoordinationManagement() {
                     participantIds: request.participantIds,
                     timeoutMinutes: request.timeoutMinutes,
                     coordinationStyle: request.coordinationStyle,
-                    publishTo: request.publishTo,
+                    publishTo: request.publishTo
+                      ? [request.publishTo.trim()].filter(s => s.length > 0)
+                      : undefined,
                     workflow: request.workflow  // Include PlantUML workflow if present
                   });
                 }
@@ -904,12 +908,34 @@ function NewSessionForm({
                 min="5"
                 max="180"
                 value={formData.timeoutMinutes}
-                onChange={(e) => setFormData(prev => ({ 
-                  ...prev, 
+                onChange={(e) => setFormData(prev => ({
+                  ...prev,
                   timeoutMinutes: parseInt(e.target.value) || 30
                 }))}
               />
             </div>
+          </div>
+
+          {/* Publish To (optional) */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Publish To (optional)
+            </label>
+            <input
+              type="text"
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-primary-500 focus:border-primary-500"
+              placeholder="e.g. promptkit-launch-campaign"
+              value={formData.publishTo || ''}
+              onChange={(e) => setFormData(prev => ({
+                ...prev,
+                publishTo: e.target.value
+              }))}
+            />
+            <p className="mt-1 text-xs text-gray-500">
+              If set, the coordinator's final integrated content is written to
+              {' '}<code className="px-1 bg-gray-100 rounded">data/published_content/&#123;name&#125;.md</code>{' '}
+              and appears in the Content browser. Non-alphanumeric characters are replaced with underscores.
+            </p>
           </div>
 
           {/* Buttons */}
