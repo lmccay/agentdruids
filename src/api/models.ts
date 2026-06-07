@@ -182,7 +182,7 @@ router.post('/', async (req: Request, res: Response) => {
       isActive: isActive !== false // Default to true if not specified
     };
 
-    modelRegistryService.addModel(newModel);
+    await modelRegistryService.addModel(newModel);
 
     res.status(201).json({ data: newModel });
   } catch (error) {
@@ -251,7 +251,7 @@ router.put('/:id', async (req: Request, res: Response) => {
       return;
     }
 
-    const success = modelRegistryService.updateModel(id, updates);
+    const success = await modelRegistryService.updateModel(id, updates);
     if (!success) {
       res.status(500).json({
         error: 'Internal server error',
@@ -306,7 +306,7 @@ router.delete('/:id', async (req: Request, res: Response) => {
       return;
     }
 
-    const success = modelRegistryService.removeModel(id);
+    const success = await modelRegistryService.removeModel(id);
     if (!success) {
       res.status(500).json({
         error: 'Internal server error',
@@ -360,7 +360,7 @@ router.patch('/:id/active', async (req: Request, res: Response) => {
       return;
     }
 
-    const success = modelRegistryService.setModelActive(id, active);
+    const success = await modelRegistryService.setModelActive(id, active);
     if (!success) {
       res.status(500).json({
         error: 'Internal server error',

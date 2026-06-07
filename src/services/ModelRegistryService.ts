@@ -1,55 +1,104 @@
 /**
  * Model Registry Service
- * Manages named model configurations and provides them to the application
+ *
+ * Database-backed registry of named model configurations. There is no in-code
+ * fallback or default set — all definitions live in `druids_core.model_configurations`
+ * (seeded by migration 005). On boot, `initialize()` loads every row into an
+ * in-memory cache for fast synchronous reads; mutations write through to the
+ * database and refresh the cache.
  */
 
-import { ModelConfiguration, ModelRegistry, DefaultModelRegistry } from '../models/ModelConfiguration';
+import { ModelConfiguration } from '../models/ModelConfiguration';
 import { LLMConfiguration } from '../models/Agent';
+import { ModelRepository } from './ModelRepository';
 
 export class ModelRegistryService {
-  private registry: ModelRegistry;
+  private models: Map<string, ModelConfiguration> = new Map();
+  private repository: ModelRepository | undefined;
+  private initialized: boolean = false;
 
-  constructor(registry?: ModelRegistry) {
-    this.registry = registry || new DefaultModelRegistry();
+  /**
+   * Configure the database-backed repository. Must be called before `initialize()`.
+   */
+  setRepository(repository: ModelRepository): void {
+    this.repository = repository;
   }
 
   /**
-   * Get all available models
+   * Load all model configurations from the database into the in-memory cache.
+   * Idempotent — re-calling re-reads from the DB.
    */
+  async initialize(): Promise<void> {
+    if (!this.repository) {
+      throw new Error('ModelRegistryService: repository not configured. Call setRepository() first.');
+    }
+    const rows = await this.repository.findAll();
+    this.models = new Map(rows.map(m => [m.id, m]));
+    this.initialized = true;
+    console.log(`🔧 ModelRegistryService loaded ${this.models.size} model configuration(s) from database`);
+  }
+
+  /** Returns true after a successful `initialize()` call. */
+  isInitialized(): boolean {
+    return this.initialized;
+  }
+
+  // ─── Reads (synchronous, served from the in-memory cache) ─────────────────
+
   getAllModels(): ModelConfiguration[] {
-    return this.registry.models;
+    return Array.from(this.models.values());
   }
 
-  /**
-   * Get only active/available models
-   */
   getAvailableModels(): ModelConfiguration[] {
-    return this.registry.getActiveModels();
+    return this.getAllModels().filter(m => m.isActive !== false);
   }
 
-  /**
-   * Get a specific model by ID
-   */
   getModel(id: string): ModelConfiguration | undefined {
-    return this.registry.getModel(id);
+    return this.models.get(id);
   }
 
-  /**
-   * Get models by category/tag
-   */
   getModelsByTag(tag: string): ModelConfiguration[] {
-    return this.registry.getModelsByTag(tag);
+    return this.getAvailableModels().filter(m => m.tags.includes(tag));
   }
 
   /**
-   * Get the default model
+   * Returns the model marked `isDefault`. Falls back to the first active model.
+   * Throws if no model is registered.
    */
   getDefaultModel(): ModelConfiguration {
-    return this.registry.getDefaultModel();
+    const explicit = this.getAllModels().find(m => m.isDefault === true);
+    if (explicit) return explicit;
+
+    const firstActive = this.getAvailableModels()[0];
+    if (firstActive) return firstActive;
+
+    throw new Error('No model configurations registered (database empty or not initialized).');
+  }
+
+  isModelAvailable(id: string): boolean {
+    const m = this.getModel(id);
+    return m !== undefined && m.isActive !== false;
+  }
+
+  /** Group active models by tag for category-style UIs. */
+  getModelsByCategory(): Record<string, ModelConfiguration[]> {
+    const categories: Record<string, ModelConfiguration[]> = {};
+    for (const model of this.getAvailableModels()) {
+      for (const tag of model.tags) {
+        if (!categories[tag]) {
+          categories[tag] = [];
+        }
+        if (!categories[tag]!.includes(model)) {
+          categories[tag]!.push(model);
+        }
+      }
+    }
+    return categories;
   }
 
   /**
-   * Convert a named model configuration to LLM configuration
+   * Convert a named model configuration to a runtime LLMConfiguration that
+   * agents can use directly.
    */
   resolveModelConfig(modelId: string, systemPrompt?: string): LLMConfiguration {
     const modelConfig = this.getModel(modelId);
@@ -66,7 +115,6 @@ export class ModelRegistryService {
       modelConfigId: modelId
     };
 
-    // Add optional properties only if they exist
     if (modelConfig.topP !== undefined) {
       llmConfig.topP = modelConfig.topP;
     }
@@ -80,80 +128,58 @@ export class ModelRegistryService {
     return llmConfig;
   }
 
-  /**
-   * Build system prompt by combining model prefix with agent prompt
-   */
   private buildSystemPrompt(modelConfig: ModelConfiguration, agentPrompt?: string): string {
     const parts: string[] = [];
-    
     if (modelConfig.systemPromptPrefix) {
       parts.push(modelConfig.systemPromptPrefix);
     }
-    
     if (agentPrompt) {
       parts.push(agentPrompt);
     }
-
     return parts.join('\n\n');
   }
 
-  /**
-   * Add a new model configuration
-   */
-  addModel(model: ModelConfiguration): void {
-    this.registry.addModel(model);
+  // ─── Mutations (async; write-through to DB, then refresh cache) ───────────
+
+  async addModel(model: ModelConfiguration): Promise<void> {
+    const repo = this.requireRepository();
+    const stored = await repo.upsert(model);
+    this.models.set(stored.id, stored);
   }
 
-  /**
-   * Update an existing model configuration
-   */
-  updateModel(id: string, updates: Partial<ModelConfiguration>): boolean {
-    return this.registry.updateModel(id, updates);
+  async updateModel(id: string, updates: Partial<ModelConfiguration>): Promise<boolean> {
+    const repo = this.requireRepository();
+    const existing = this.models.get(id);
+    if (!existing) {
+      return false;
+    }
+    const merged: ModelConfiguration = { ...existing, ...updates, id };
+    const stored = await repo.upsert(merged);
+    this.models.set(stored.id, stored);
+    return true;
   }
 
-  /**
-   * Remove a model configuration
-   */
-  removeModel(id: string): boolean {
-    return this.registry.removeModel(id);
+  async removeModel(id: string): Promise<boolean> {
+    const repo = this.requireRepository();
+    const removed = await repo.delete(id);
+    if (removed) {
+      this.models.delete(id);
+    }
+    return removed;
   }
 
-  /**
-   * Enable/disable a model
-   */
-  setModelActive(id: string, active: boolean): boolean {
+  async setModelActive(id: string, active: boolean): Promise<boolean> {
     return this.updateModel(id, { isActive: active });
   }
 
-  /**
-   * Get models grouped by category
-   */
-  getModelsByCategory(): Record<string, ModelConfiguration[]> {
-    const models = this.getAvailableModels();
-    const categories: Record<string, ModelConfiguration[]> = {};
-
-    models.forEach(model => {
-      model.tags.forEach(tag => {
-        if (!categories[tag]) {
-          categories[tag] = [];
-        }
-        if (!categories[tag].includes(model)) {
-          categories[tag].push(model);
-        }
-      });
-    });
-
-    return categories;
-  }
-
-  /**
-   * Check if a model is available
-   */
-  isModelAvailable(id: string): boolean {
-    const model = this.getModel(id);
-    return model !== undefined && model.isActive !== false;
+  private requireRepository(): ModelRepository {
+    if (!this.repository) {
+      throw new Error('ModelRegistryService: repository not configured. Call setRepository() first.');
+    }
+    return this.repository;
   }
 }
 
-// Export singleton instance
+// Singleton instance. `setRepository()` and `initialize()` are called from
+// the application bootstrap (see index.ts) after database migrations have run.
 export const modelRegistryService = new ModelRegistryService();
