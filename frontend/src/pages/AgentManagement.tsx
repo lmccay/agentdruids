@@ -43,6 +43,11 @@ interface AgentFormData {
   agenticLoopEnabled: boolean;
   agenticLoopMaxIterations: number;
   agenticLoopTrackCosts: boolean;
+  agenticLoopStopOnNoTools: boolean;
+  agenticLoopContextStrategy: 'full' | 'sliding-window' | 'summarized';
+  agenticLoopSlidingWindowSize: number;
+  agenticLoopMaxToolResultTokens: number;
+  agenticLoopSummarizeToolResults: boolean;
   // Prompt composition configuration (NEW)
   usePromptComposition: boolean; // Toggle to use new system
   baseTemplate: 'standard' | 'minimal';
@@ -245,6 +250,11 @@ function AgentModal({
     agenticLoopEnabled: agent?.llmConfig?.agenticLoop?.enabled || false,
     agenticLoopMaxIterations: agent?.llmConfig?.agenticLoop?.maxIterations || 10,
     agenticLoopTrackCosts: agent?.llmConfig?.agenticLoop?.trackCosts ?? true,
+    agenticLoopStopOnNoTools: agent?.llmConfig?.agenticLoop?.stopOnNoTools ?? true,
+    agenticLoopContextStrategy: agent?.llmConfig?.agenticLoop?.contextStrategy || 'summarized',
+    agenticLoopSlidingWindowSize: agent?.llmConfig?.agenticLoop?.slidingWindowSize || 5,
+    agenticLoopMaxToolResultTokens: agent?.llmConfig?.agenticLoop?.maxToolResultTokens || 1000,
+    agenticLoopSummarizeToolResults: agent?.llmConfig?.agenticLoop?.summarizeToolResults ?? true,
     // Prompt composition config
     usePromptComposition: !!agent?.promptConfig,
     baseTemplate: agent?.promptConfig?.baseTemplate || 'standard',
@@ -277,6 +287,11 @@ function AgentModal({
         agenticLoopEnabled: agent.llmConfig?.agenticLoop?.enabled || false,
         agenticLoopMaxIterations: agent.llmConfig?.agenticLoop?.maxIterations || 10,
         agenticLoopTrackCosts: agent.llmConfig?.agenticLoop?.trackCosts ?? true,
+        agenticLoopStopOnNoTools: agent.llmConfig?.agenticLoop?.stopOnNoTools ?? true,
+        agenticLoopContextStrategy: agent.llmConfig?.agenticLoop?.contextStrategy || 'summarized',
+        agenticLoopSlidingWindowSize: agent.llmConfig?.agenticLoop?.slidingWindowSize || 5,
+        agenticLoopMaxToolResultTokens: agent.llmConfig?.agenticLoop?.maxToolResultTokens || 1000,
+        agenticLoopSummarizeToolResults: agent.llmConfig?.agenticLoop?.summarizeToolResults ?? true,
         // Prompt composition config
         usePromptComposition: !!agent.promptConfig,
         baseTemplate: agent.promptConfig?.baseTemplate || 'standard',
@@ -307,6 +322,11 @@ function AgentModal({
         agenticLoopEnabled: false,
         agenticLoopMaxIterations: 10,
         agenticLoopTrackCosts: true,
+        agenticLoopStopOnNoTools: true,
+        agenticLoopContextStrategy: 'summarized',
+        agenticLoopSlidingWindowSize: 5,
+        agenticLoopMaxToolResultTokens: 1000,
+        agenticLoopSummarizeToolResults: true,
         // Prompt composition config
         usePromptComposition: true, // Enable by default for new agents
         baseTemplate: 'standard',
@@ -932,6 +952,121 @@ https://specific.com/endpoint`}
                       Track total token usage and costs across all iterations
                     </label>
                   </div>
+
+                  <div className="flex items-start space-x-3">
+                    <input
+                      type="checkbox"
+                      id="agenticLoopStopOnNoTools"
+                      checked={formData.agenticLoopStopOnNoTools}
+                      onChange={(e) => setFormData({ ...formData, agenticLoopStopOnNoTools: e.target.checked })}
+                      disabled={isReadOnly}
+                      className="mt-1 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+                    />
+                    <div>
+                      <label htmlFor="agenticLoopStopOnNoTools" className="text-sm text-gray-700 cursor-pointer">
+                        Stop on no tool calls
+                      </label>
+                      <p className="text-xs text-gray-500">
+                        End the loop early when the agent stops producing tool calls (recommended).
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="pt-3 border-t border-blue-200">
+                    <h5 className="text-sm font-semibold text-gray-800 mb-2">Token / context handling</h5>
+                    <p className="text-xs text-gray-600 mb-3">
+                      Controls how tool results and conversation history are managed across iterations.
+                      Defaults are tuned for paid-API providers where tokens cost money. For local
+                      models (Ollama), prefer <code className="px-1 bg-white rounded">full</code> context
+                      and disabled summarization for faithful pass-through of agent outputs.
+                    </p>
+
+                    <div className="mb-3">
+                      <label className="block text-sm font-medium text-gray-700 mb-1">
+                        Context strategy
+                      </label>
+                      <select
+                        value={formData.agenticLoopContextStrategy}
+                        onChange={(e) => setFormData({
+                          ...formData,
+                          agenticLoopContextStrategy: e.target.value as 'full' | 'sliding-window' | 'summarized'
+                        })}
+                        disabled={isReadOnly}
+                        className="w-64 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-primary-500"
+                      >
+                        <option value="full">full — keep entire conversation</option>
+                        <option value="sliding-window">sliding-window — keep last N messages</option>
+                        <option value="summarized">summarized — LLM-compresses older context</option>
+                      </select>
+                      <p className="text-xs text-gray-500 mt-1">
+                        <code className="px-1 bg-white rounded">full</code> is most faithful but uses more context window;
+                        <code className="px-1 bg-white rounded"> summarized</code> (default) is most compact but can lose detail.
+                      </p>
+                    </div>
+
+                    {formData.agenticLoopContextStrategy === 'sliding-window' && (
+                      <div className="mb-3">
+                        <label className="block text-sm font-medium text-gray-700 mb-1">
+                          Sliding window size
+                        </label>
+                        <input
+                          type="number"
+                          min="1"
+                          max="50"
+                          value={formData.agenticLoopSlidingWindowSize}
+                          onChange={(e) => setFormData({ ...formData, agenticLoopSlidingWindowSize: parseInt(e.target.value) || 5 })}
+                          disabled={isReadOnly}
+                          className="w-32 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-primary-500"
+                        />
+                        <p className="text-xs text-gray-500 mt-1">
+                          Number of most-recent messages to keep (default: 5).
+                        </p>
+                      </div>
+                    )}
+
+                    <div className="mb-3">
+                      <label className="block text-sm font-medium text-gray-700 mb-1">
+                        Max tool result tokens
+                      </label>
+                      <input
+                        type="number"
+                        min="100"
+                        max="100000"
+                        step="100"
+                        value={formData.agenticLoopMaxToolResultTokens}
+                        onChange={(e) => setFormData({ ...formData, agenticLoopMaxToolResultTokens: parseInt(e.target.value) || 1000 })}
+                        disabled={isReadOnly}
+                        className="w-32 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-primary-500"
+                      />
+                      <p className="text-xs text-gray-500 mt-1">
+                        Per-tool-result truncation cap (default: 1000). For coordinator druids that
+                        receive long elemental outputs via <code className="px-1 bg-white rounded">delegate_task</code>,
+                        raise this to 8000 or higher.
+                      </p>
+                    </div>
+
+                    <div className="flex items-start space-x-3">
+                      <input
+                        type="checkbox"
+                        id="agenticLoopSummarizeToolResults"
+                        checked={formData.agenticLoopSummarizeToolResults}
+                        onChange={(e) => setFormData({ ...formData, agenticLoopSummarizeToolResults: e.target.checked })}
+                        disabled={isReadOnly}
+                        className="mt-1 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+                      />
+                      <div>
+                        <label htmlFor="agenticLoopSummarizeToolResults" className="text-sm text-gray-700 cursor-pointer">
+                          Summarize large tool results via LLM
+                        </label>
+                        <p className="text-xs text-gray-500">
+                          When a tool result exceeds the cap above, run it through an LLM summarization
+                          pass before returning. Saves tokens but can drop important details from agent
+                          outputs. Recommended OFF for coordinator druids; ON for paid-API agents with
+                          tight cost constraints.
+                        </p>
+                      </div>
+                    </div>
+                  </div>
                 </div>
               )}
             </div>
@@ -1171,7 +1306,12 @@ ${extension}`;
         agenticLoop: {
           enabled: data.agenticLoopEnabled,
           maxIterations: data.agenticLoopMaxIterations,
-          trackCosts: data.agenticLoopTrackCosts
+          trackCosts: data.agenticLoopTrackCosts,
+          stopOnNoTools: data.agenticLoopStopOnNoTools,
+          contextStrategy: data.agenticLoopContextStrategy,
+          slidingWindowSize: data.agenticLoopSlidingWindowSize,
+          maxToolResultTokens: data.agenticLoopMaxToolResultTokens,
+          summarizeToolResults: data.agenticLoopSummarizeToolResults
         },
         // Prompt composition configuration (NEW)
         promptConfig: data.usePromptComposition ? {
@@ -1254,7 +1394,12 @@ ${extension}`;
           agenticLoop: {
             enabled: data.agenticLoopEnabled,
             maxIterations: data.agenticLoopMaxIterations,
-            trackCosts: data.agenticLoopTrackCosts
+            trackCosts: data.agenticLoopTrackCosts,
+            stopOnNoTools: data.agenticLoopStopOnNoTools,
+            contextStrategy: data.agenticLoopContextStrategy,
+            slidingWindowSize: data.agenticLoopSlidingWindowSize,
+            maxToolResultTokens: data.agenticLoopMaxToolResultTokens,
+            summarizeToolResults: data.agenticLoopSummarizeToolResults
           }
         },
         modelId: data.modelId, // Include the selected model profile

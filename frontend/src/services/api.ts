@@ -30,6 +30,11 @@ export interface Agent {
       enabled: boolean;
       maxIterations?: number;
       trackCosts?: boolean;
+      stopOnNoTools?: boolean;
+      contextStrategy?: 'full' | 'sliding-window' | 'summarized';
+      slidingWindowSize?: number;
+      maxToolResultTokens?: number;
+      summarizeToolResults?: boolean;
     };
   };
   systemPrompt?: string;
@@ -88,6 +93,11 @@ export interface CreateAgentRequest {
     enabled: boolean;
     maxIterations?: number;
     trackCosts?: boolean;
+    stopOnNoTools?: boolean;
+    contextStrategy?: 'full' | 'sliding-window' | 'summarized';
+    slidingWindowSize?: number;
+    maxToolResultTokens?: number;
+    summarizeToolResults?: boolean;
   };
   promptConfig?: {
     baseTemplate: 'standard' | 'minimal';
@@ -123,6 +133,11 @@ export interface UpdateAgentRequest {
       enabled: boolean;
       maxIterations?: number;
       trackCosts?: boolean;
+      stopOnNoTools?: boolean;
+      contextStrategy?: 'full' | 'sliding-window' | 'summarized';
+      slidingWindowSize?: number;
+      maxToolResultTokens?: number;
+      summarizeToolResults?: boolean;
     };
   }>;
   type?: 'druid' | 'elemental' | 'gaia' | 'worldtree';
