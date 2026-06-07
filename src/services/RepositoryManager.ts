@@ -1,6 +1,7 @@
 import { DatabaseService } from './DatabaseService';
 import { AgentRepository } from './AgentRepository';
 import { RealmRepository } from './RealmRepository';
+import { ModelRepository } from './ModelRepository';
 
 /**
  * Central repository manager that coordinates all entity repositories
@@ -11,11 +12,13 @@ export class RepositoryManager {
   private db: DatabaseService;
   private agentRepo: AgentRepository;
   private realmRepo: RealmRepository;
+  private modelRepo: ModelRepository;
 
   private constructor(db: DatabaseService) {
     this.db = db;
     this.agentRepo = new AgentRepository(db);
     this.realmRepo = new RealmRepository(db);
+    this.modelRepo = new ModelRepository(db);
   }
 
   /**
@@ -50,6 +53,13 @@ export class RepositoryManager {
    */
   public get realms(): RealmRepository {
     return this.realmRepo;
+  }
+
+  /**
+   * Get Model configuration repository
+   */
+  public get models(): ModelRepository {
+    return this.modelRepo;
   }
 
   /**

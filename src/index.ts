@@ -3,6 +3,8 @@
 import { DruidApp } from './app';
 import * as dotenv from 'dotenv';
 import { migrationService } from './services/MigrationService';
+import { RepositoryManager } from './services/RepositoryManager';
+import { modelRegistryService } from './services/ModelRegistryService';
 
 // Load environment variables
 dotenv.config();
@@ -34,6 +36,12 @@ async function main(): Promise<void> {
     console.log('');
     console.log('🚀 Application Startup');
     console.log('─────────────────────────');
+
+    // Wire repository-backed services that must be ready before requests.
+    // The model registry loads its rows from the database (see migration 005).
+    const repositoryManager = await RepositoryManager.initialize();
+    modelRegistryService.setRepository(repositoryManager.models);
+    await modelRegistryService.initialize();
 
     // Create and start the application
     const app = new DruidApp();
