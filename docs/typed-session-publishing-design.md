@@ -10,7 +10,7 @@ A coordination session today produces two kinds of value:
 1. The **coordinator's synthesized result** — a single integrated summary.
 2. The **individual contributions** from each participating agent — the raw work product.
 
-The pre-corpus publish path wrote only (1) to the WorldTree. (2) survived only as per-step JSON files inside a Docker named volume at `/app/data/published_content/sessions/{sessionId}/`. Two consequences:
+The previous publish path wrote only (1) to the WorldTree. (2) survived only as per-step JSON files inside a Docker named volume at `/app/data/published_content/sessions/{sessionId}/`. Two consequences:
 
 - A `down -v` or `db-reset.sh` wiped every contribution that had ever been produced.
 - Even within retention, the queryable WorldTree only saw the summary. The detail needed for downstream analysis — comparing how each agent handled the same task, building feedback loops, assembling datasets — was gone the moment synthesis happened.
@@ -64,7 +64,7 @@ Migration `007_sub_contributions.sql` adds finer-grained per-collaborator captur
 
 The named Docker volume `druids-data` survives `docker-compose restart` but not `down -v`. Two complementary mechanisms make session data survive any local environment reset:
 
-1. **Postgres-backed contributions.** Once contributions live in `druids_core.session_contributions`, they survive as long as `druids-postgres-data` does. Even when a fresh app container starts up, the historical corpus is intact.
+1. **Postgres-backed contributions.** Once contributions live in `druids_core.session_contributions`, they survive as long as `druids-postgres-data` does. Even when a fresh app container starts up, the historical WorldTree is intact.
 2. **Always-on host bind for published artifacts.** `docker-compose.yml` mounts `~/druids-data/sessions:/app/data/sessions` for both `druids-main` and `druids-mcp-server`. Every publication's `content_uri` for a `file://` target resolves into this bind, so artifacts land on the host filesystem by default — survives any volume reset, can be committed/archived/fed to other tools without `docker cp`.
 
 Postgres holds the canonical record; the host bind holds the rendered artifacts.
@@ -115,8 +115,8 @@ A new `CreativePublisher` in `src/services/publishing/` renders the creative art
 **Migration of the old pipeline:**
 
 - `publishCreativeContent()` and `publishCreativeToWorldTree()` are removed once `CreativePublisher` ships.
-- The legacy URI pattern (`worldtree://public/creative-sessions/...`) can either be preserved by having `CreativePublisher` write to that path additionally, or retired in favor of the standard `file://{sessionId}/creative.md` location. Decision: retire — one URI scheme is simpler, and corpus discovery (Phase A) treats all modes uniformly anyway.
-- The per-content-type and date-bucketed directory structure (`creative/{type}/{YYYY-MM-DD}/`) is replaced by the standard session directory. Discovery happens via `corpus://` queries, not directory walking.
+- The legacy URI pattern (`worldtree://public/creative-sessions/...`) can either be preserved by having `CreativePublisher` write to that path additionally, or retired in favor of the standard `file://{sessionId}/creative.md` location. Decision: retire — one URI scheme is simpler, and WorldTree discovery (Phase A) treats all modes uniformly anyway.
+- The per-content-type and date-bucketed directory structure (`creative/{type}/{YYYY-MM-DD}/`) is replaced by the standard session directory. Discovery happens via `worldtree://` queries, not directory walking.
 
 ## Open questions
 
