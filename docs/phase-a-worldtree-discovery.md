@@ -1,24 +1,24 @@
-# Phase A: Conversational Corpus Discovery via MCP
+# Phase A: Conversational WorldTree Discovery via MCP
 
 **Status:** Design
-**Builds on:** `session-corpus-vision.md`, migrations 006 + 007
+**Builds on:** `worldtree-vision.md`, migrations 006 + 007
 **Scope:** Read-only MCP surface; no new ML; no embeddings; designed forward-compatible with success-metric attachment
 
 ## Goals
 
-1. Any MCP-speaking client can browse the session corpus interactively.
+1. Any MCP-speaking client can browse the WorldTree interactively.
 2. All queries served from existing tables (`coordination_sessions`, `session_contributions`, `session_publications`, `publishing_modes`). No background jobs, no new services beyond a thin query layer.
 3. The data model leaves space for outcome metrics to be attached later without reshaping anything.
-4. Performance: every query returns in < 100 ms for a corpus up to ~10⁴ sessions / ~10⁵ contributions. Indexing is already adequate.
+4. Performance: every query returns in < 100 ms for a WorldTree of up to ~10⁴ sessions / ~10⁵ contributions. Indexing is already adequate.
 
 ## Where the surface lives
 
 Two options were considered:
 
-- **A.** Extend the existing `druids-mcp-server` (`SimpleMCPServer.ts`) with corpus tools alongside coordination tools.
-- **B.** Stand up a separate `druids-corpus-mcp` server on its own port.
+- **A.** Extend the existing `druids-mcp-server` (`SimpleMCPServer.ts`) with WorldTree tools alongside coordination tools.
+- **B.** Stand up a separate `druids-worldtree-mcp` server on its own port.
 
-**Decision: A.** One MCP endpoint for external clients is simpler to configure and document. Corpus tools are a natural complement to coordination tools — a client asking "what should I plan for this campaign?" can pull historical context and then trigger a new session in one connection. Separation can come later if scaling demands it.
+**Decision: A.** One MCP endpoint for external clients is simpler to configure and document. WorldTree tools are a natural complement to coordination tools — a client asking "what should I plan for this campaign?" can pull historical context and then trigger a new session in one connection. Separation can come later if scaling demands it.
 
 ## Surface inventory
 
@@ -28,15 +28,17 @@ Resources are read-only URIs. Each returns JSON. The MCP `resources/list` and `r
 
 | URI | Returns |
 |---|---|
-| `corpus://sessions` | Paginated index of all sessions (id, status, started_at, coordinator, realm) |
-| `corpus://sessions/{sessionId}` | Full session record incl. all contributions and publications |
-| `corpus://sessions/{sessionId}/contributions` | Just the contribution rows for that session |
-| `corpus://sessions/{sessionId}/publications` | Just the publication rows |
-| `corpus://sessions/{sessionId}/publications/{mode}` | The rendered artifact content for a specific mode |
-| `corpus://agents/{agentId}/contributions` | All contributions an agent has made, across sessions (paginated) |
-| `corpus://agents/{agentId}/summary` | Aggregate stats for that agent (count, total content, avg duration, distinct sessions) |
-| `corpus://realms/{realmId}/sessions` | All sessions that ran in a realm |
-| `corpus://modes` | The `publishing_modes` catalog |
+| `worldtree://sessions` | Paginated index of all sessions (id, status, started_at, coordinator, realm) |
+| `worldtree://sessions/{sessionId}` | Full session record incl. all contributions and publications |
+| `worldtree://sessions/{sessionId}/contributions` | Just the contribution rows for that session |
+| `worldtree://sessions/{sessionId}/publications` | Just the publication rows |
+| `worldtree://sessions/{sessionId}/publications/{mode}` | The rendered artifact content for a specific mode |
+| `worldtree://agents/{agentId}/contributions` | All contributions an agent has made, across sessions (paginated) |
+| `worldtree://agents/{agentId}/summary` | Aggregate stats for that agent (count, total content, avg duration, distinct sessions) |
+| `worldtree://realms/{realmId}/sessions` | All sessions that ran in a realm |
+| `worldtree://modes` | The `publishing_modes` catalog |
+
+These sit alongside existing WorldTree URIs (`worldtree://public/async_results/...`, `worldtree://public/creative-sessions/...`) — different second segments, no conflict.
 
 Resources support standard pagination params (`?limit=`, `?offset=`) and a `since`/`until` ISO-8601 filter where time-bounded.
 
@@ -53,7 +55,6 @@ Tools are callable, take JSON arguments, return JSON results. These are the conv
 | `aggregate_contributions` | `{ groupBy: 'agent_id' \| 'agent_role' \| 'action_type' \| 'day', filters? }` | grouped counts, total duration, total content length |
 | `compare_sessions` | `{ sessionIdA, sessionIdB }` | side-by-side: prompt diff, contribution counts per role, plan-shape diff |
 | `agent_activity` | `{ agentId, since?, until? }` | timeline of an agent's contributions with summary stats |
-| `recent_sessions` | `{ limit? }` | most recent sessions, default 10 |
 
 All tools return `{ content: [{ type: 'text', text: JSON.stringify(data) }] }` per the existing MCP convention (see CLAUDE.md and `SimpleMCPServer.ts`).
 
@@ -64,40 +65,40 @@ MCP "prompts" are pre-canned conversational starters a client can offer the user
 - **`recap_agent`** — args: `{ agentId, days? }`. Expands to a natural-language query that summarizes that agent's recent work using `agent_activity` and `search_contributions`.
 - **`compare_two_sessions`** — args: `{ sessionIdA, sessionIdB }`. Expands to a structured comparison using `compare_sessions`.
 - **`find_similar_work`** — args: `{ prompt }`. Expands to a text-match search using `find_sessions_by_prompt`, with instruction to summarize commonalities. (Semantic similarity is Phase B.)
-- **`corpus_health`** — no args. Expands to a summary of session counts, agent activity, mode distribution. Useful for sanity-checking the system.
+- **`worldtree_health`** — no args. Expands to a summary of session counts, agent activity, mode distribution. Useful for sanity-checking the system.
 
 Prompts are sugar — they compose existing tools. Worth shipping in Phase A because they make the MCP client immediately useful without the user needing to know the tool surface.
 
 ## File structure
 
-New code lands in `src/mcp/corpus/` and `src/services/`:
+New code lands in `src/mcp/worldtree/` and `src/services/`:
 
 ```
 src/
 ├── services/
-│   └── CorpusQueryService.ts          # All SQL; the only file that touches the corpus tables
+│   └── WorldTreeQueryService.ts        # All SQL; the only file that touches the WorldTree tables
 ├── mcp/
-│   ├── SimpleMCPServer.ts              # existing — extended with corpus tools/resources
-│   └── corpus/
-│       ├── corpusResources.ts          # resource URI parser + dispatcher
-│       ├── corpusTools.ts              # tool name → handler map
-│       └── corpusPrompts.ts            # prompt templates
+│   ├── SimpleMCPServer.ts              # existing — extended with WorldTree tools/resources
+│   └── worldtree/
+│       ├── worldtreeResources.ts       # resource URI parser + dispatcher
+│       ├── worldtreeTools.ts           # tool name → handler map
+│       └── worldtreePrompts.ts         # prompt templates
 └── api/
     └── outcomes.ts                     # (stub; ingestion API for Phase F — see below)
 ```
 
-**`CorpusQueryService`** owns every SQL statement. Tools and resources call into it; they don't write SQL themselves. This keeps the query surface auditable and indexable: when a query is slow, there's one file to look at.
+**`WorldTreeQueryService`** owns every SQL statement. Tools and resources call into it; they don't write SQL themselves. This keeps the query surface auditable and indexable: when a query is slow, there's one file to look at.
 
-**`corpusResources.ts`** parses `corpus://...` URIs (regex + URL parsing) and dispatches to the appropriate `CorpusQueryService` method. Returns the standard MCP resource payload.
+**`worldtreeResources.ts`** parses `worldtree://...` URIs (regex + URL parsing) and dispatches to the appropriate `WorldTreeQueryService` method. Returns the standard MCP resource payload. Only the new second-segment patterns (`sessions/...`, `agents/...`, `realms/...`, `modes`) are routed here; existing `worldtree://public/...` and `worldtree://sessions/{id}/` session-isolated paths continue to be handled by `SessionContentManager`.
 
-**`corpusTools.ts`** exports a map `{ toolName: handlerFn }`. Each handler validates args, calls `CorpusQueryService`, formats the response.
+**`worldtreeTools.ts`** exports a map `{ toolName: handlerFn }`. Each handler validates args, calls `WorldTreeQueryService`, formats the response.
 
-**`corpusPrompts.ts`** holds the prompt templates as a `{ name, description, arguments[], template }` array. MCP's `prompts/list` and `prompts/get` methods serve from this.
+**`worldtreePrompts.ts`** holds the prompt templates as a `{ name, description, arguments[], template }` array. MCP's `prompts/list` and `prompts/get` methods serve from this.
 
 The existing `SimpleMCPServer.ts` gets three small additions:
-- Register corpus tool handlers in its dispatch map.
-- Register corpus resource patterns in its resource dispatcher.
-- Register corpus prompts in its prompt list.
+- Register WorldTree tool handlers in its dispatch map.
+- Register WorldTree resource patterns in its resource dispatcher.
+- Register WorldTree prompts in its prompt list.
 
 No changes to the JSON-RPC framing, transport, or session-id handling.
 
@@ -152,7 +153,7 @@ These three queries cover ~80% of the conversational discovery patterns. The rem
 
 ## Forward-compatibility: success metrics
 
-The user explicitly called out the need to attach external success metrics (clicks, GitHub stars, post engagement) to past sessions. Phase A doesn't implement this, but the schema and surface are designed so adding it is additive, not breaking.
+The need to attach external success metrics (clicks, GitHub stars, post engagement) to past sessions is real. Phase A doesn't implement this, but the schema and surface are designed so adding it is additive, not breaking.
 
 ### Schema preview (defer to Phase F, but committed-to here)
 
@@ -192,7 +193,7 @@ Three small accommodations now, so Phase F drops in cleanly:
 
 1. **`get_session` result includes an `outcomes: []` field.** Always empty in Phase A; populated by JOIN against `session_outcomes` once that table exists. Clients that build against Phase A won't need to change.
 2. **`list_sessions` accepts a `hasOutcomes?: boolean` filter argument.** Validated, ignored, and documented as "Phase F." When the data exists, the filter activates without an API change.
-3. **A `corpus_health` prompt's output schema includes an `outcomes_attached_count` field.** Zero in Phase A.
+3. **A `worldtree_health` prompt's output schema includes an `outcomes_attached_count` field.** Zero in Phase A.
 
 These are < 10 lines of code combined. They make the contract honest about what's coming.
 
@@ -204,25 +205,25 @@ So the scope is sharp and reviewable:
 - No outcome ingestion API implementation. (Phase F)
 - No rubric scoring or critic agents. (Phase D)
 - No write operations from the MCP surface at all — it's read-only.
-- No new background workers. The retention sweeper from Phase A.0 stays; nothing else added.
+- No new background workers. The retention sweeper from the typed-publishing work stays; nothing else added.
 - No changes to the existing coordination MCP tools. They sit alongside, untouched.
 
 ## Test plan
 
-The corpus surface is testable end-to-end with curl + the existing session data:
+The WorldTree surface is testable end-to-end with curl + the existing session data:
 
 - **Resource read smoke tests** — `resources/read` against each URI pattern with a known sessionId, verify the response schema.
 - **Tool happy paths** — `tools/call` for each tool with realistic args, verify counts and field presence.
 - **Pagination correctness** — multi-page `list_sessions` and `search_contributions`, verify no duplicates / no gaps.
 - **Filter combinations** — `search_contributions` with multiple filters, verify AND semantics.
-- **Empty-corpus behavior** — against an empty database, every tool returns empty arrays without errors.
+- **Empty-WorldTree behavior** — against an empty database, every tool returns empty arrays without errors.
 
-Integration tests live in `tests/integration/corpus-mcp.test.ts` (new file). Contract tests for the JSON-RPC shape live in `tests/contract/corpus-mcp-contract.test.ts`.
+Integration tests live in `tests/integration/worldtree-mcp.test.ts` (new file). Contract tests for the JSON-RPC shape live in `tests/contract/worldtree-mcp-contract.test.ts`.
 
 ## Estimated effort
 
-- `CorpusQueryService` + queries: half a day.
-- `corpusResources`, `corpusTools`, `corpusPrompts`: half a day each.
+- `WorldTreeQueryService` + queries: half a day.
+- `worldtreeResources`, `worldtreeTools`, `worldtreePrompts`: half a day each.
 - Wiring into `SimpleMCPServer`: a few hours.
 - Tests (happy paths + a few edge cases): half a day.
 - Forward-compat touches + outcome stub: an hour.
@@ -233,7 +234,7 @@ Integration tests live in `tests/integration/corpus-mcp.test.ts` (new file). Con
 
 - **Session-isolation read boundary.** The constitution forbids cross-session mutation, but cross-session reads are exactly what conversational discovery is. Confirming the constitution allows what I'm assuming.
 - **Pagination defaults.** What's a sensible `limit` default for resource reads? 50 feels right for sessions; 100 for contributions. Worth a decision before implementation.
-- **Public vs. private contributions.** Today every contribution is queryable. As the corpus grows, do we want a mechanism for marking contributions as private/restricted at query time?
+- **Public vs. private contributions.** Today every contribution is queryable. As the WorldTree grows, do we want a mechanism for marking contributions as private/restricted at query time?
 - **MCP prompt argument validation.** MCP's prompt-argument schema is light. Do we want to validate `agentId`, `sessionId` server-side before expanding the prompt template, or trust the client?
 
 None block implementation — these are conversations to have before the build begins.
