@@ -54,6 +54,12 @@ export class DruidApp {
       coordinationService.setAgentService(agentService);
       console.log('🔗 Shared AgentService wired to CoordinationService');
 
+      // Reverse wiring: the AgentService instance that actually runs tools
+      // needs a reference back to CoordinationService so the tool layer can
+      // query the active orchestration step for sub-contribution recording.
+      agentService.setCoordinationService(coordinationService);
+      console.log('🔗 CoordinationService wired back into shared AgentService');
+
       // Wire shared RealmService into coordination
       coordinationService.setRealmService(realmService);
       console.log('🔗 Shared RealmService wired to CoordinationService');

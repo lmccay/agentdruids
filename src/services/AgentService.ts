@@ -20,6 +20,7 @@ import { HttpMCPClient } from './mcp/HttpMCPClient';
 import { SSEMCPClient } from './mcp/SSEMCPClient';
 import { PromptCompositionService } from './PromptCompositionService';
 import { PromptSourcesConfig } from '../models/PromptConfig';
+import { getSessionPublicationService } from './SessionPublicationService';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 
@@ -1047,7 +1048,7 @@ export class AgentService {
         messages.push({ role: 'assistant', content: response });
 
         // Process any tool calls in the response
-        const processedResponse = await this.processAgentToolCalls(agent, response, agentId);
+        const processedResponse = await this.processAgentToolCalls(agent, response, agentId, request.sessionId);
         allToolCalls.push(...processedResponse.toolCalls);
 
         // If no tool calls were made, this is the final response
@@ -2153,13 +2154,13 @@ Your responses and behavior should be appropriate to this realm's context and ch
     // Route to appropriate tool implementation
     switch (toolName) {
       case 'message_agent':
-        return await this.toolMessageAgent(agent.id, params);
-      
+        return await this.toolMessageAgent(agent.id, params, sessionId);
+
       case 'delegate_task':
-        return await this.toolDelegateTask(agent.id, params);
-      
+        return await this.toolDelegateTask(agent.id, params, sessionId);
+
       case 'assign_simple_task':
-        return await this.toolAssignSimpleTask(agent.id, params);
+        return await this.toolAssignSimpleTask(agent.id, params, sessionId);
       
       case 'get_step_content':
         return await this.toolGetStepContent(params);
@@ -2303,11 +2304,15 @@ Your responses and behavior should be appropriate to this realm's context and ch
   /**
    * Tool: Send a message to another agent
    */
-  private async toolMessageAgent(fromAgentId: AgentId, params: { agent_id: string; message: string }): Promise<any> {
+  private async toolMessageAgent(
+    fromAgentId: AgentId,
+    params: { agent_id: string; message: string },
+    sessionId?: string
+  ): Promise<any> {
     // Resolve agent name to ID if needed
     const resolvedAgentId = await this.resolveAgentId(params.agent_id);
     const targetAgent = await this.getAgent(resolvedAgentId as AgentId);
-    
+
     if (targetAgent.status !== 'active') {
       throw new Error(`Target agent ${resolvedAgentId} is not active`);
     }
@@ -2321,6 +2326,15 @@ Your responses and behavior should be appropriate to this realm's context and ch
       }
     });
 
+    await this.recordToolSubContribution({
+      sessionId,
+      targetAgent,
+      actionType: 'message_agent',
+      description: params.message,
+      content: response.response,
+      durationMs: response.executionTime,
+    });
+
     return {
       target_agent: resolvedAgentId,
       message_sent: params.message,
@@ -2332,13 +2346,17 @@ Your responses and behavior should be appropriate to this realm's context and ch
   /**
    * Tool: Delegate a task to another agent
    */
-  private async toolDelegateTask(fromAgentId: AgentId, params: { agent_id: string; task: string }): Promise<any> {
+  private async toolDelegateTask(
+    fromAgentId: AgentId,
+    params: { agent_id: string; task: string },
+    sessionId?: string
+  ): Promise<any> {
     const fromAgent = await this.getAgent(fromAgentId);
-    
+
     // Resolve agent name to ID if needed
     const resolvedAgentId = await this.resolveAgentId(params.agent_id);
     const targetAgent = await this.getAgent(resolvedAgentId as AgentId);
-    
+
     if (targetAgent.status !== 'active') {
       throw new Error(`Target agent ${resolvedAgentId} is not active`);
     }
@@ -2361,6 +2379,15 @@ Your responses and behavior should be appropriate to this realm's context and ch
       }
     });
 
+    await this.recordToolSubContribution({
+      sessionId,
+      targetAgent,
+      actionType: 'delegate_task',
+      description: params.task,
+      content: response.response,
+      durationMs: response.executionTime,
+    });
+
     return {
       target_agent: resolvedAgentId,
       task_delegated: params.task,
@@ -2372,7 +2399,11 @@ Your responses and behavior should be appropriate to this realm's context and ch
   /**
    * Tool: Assign a simple task to another agent (no interactive collaboration)
    */
-  private async toolAssignSimpleTask(fromAgentId: AgentId, params: { agent_id: string; task: string }): Promise<any> {
+  private async toolAssignSimpleTask(
+    fromAgentId: AgentId,
+    params: { agent_id: string; task: string },
+    sessionId?: string
+  ): Promise<any> {
     const fromAgent = await this.getAgent(fromAgentId);
     
     // Resolve agent name to ID if needed
@@ -2412,6 +2443,15 @@ Please use your available tools to execute this task now and provide your comple
       }
     });
 
+    await this.recordToolSubContribution({
+      sessionId,
+      targetAgent,
+      actionType: 'assign_simple_task',
+      description: params.task,
+      content: response.response,
+      durationMs: response.executionTime,
+    });
+
     return {
       target_agent: resolvedAgentId,
       task_assigned: params.task,
@@ -2419,6 +2459,40 @@ Please use your available tools to execute this task now and provide your comple
       execution_time: response.executionTime,
       completion_type: 'simple_assignment'
     };
+  }
+
+  /**
+   * Record a sub-contribution captured from a delegation/messaging tool.
+   * Looks up the parent orchestration step from the active CoordinationService.
+   * Best-effort — never throws back into the tool flow.
+   */
+  private async recordToolSubContribution(args: {
+    sessionId: string | undefined;
+    targetAgent: { id: AgentId; type?: string };
+    actionType: string;
+    description: string;
+    content: string;
+    durationMs?: number | undefined;
+  }): Promise<void> {
+    if (!args.sessionId) return;
+    const parentStep = this.coordinationService?.getActiveStep?.(args.sessionId);
+    if (typeof parentStep !== 'number') return;
+    try {
+      await getSessionPublicationService().recordSubContribution({
+        sessionId: args.sessionId,
+        parentStepNumber: parentStep,
+        agentId: args.targetAgent.id,
+        agentRole: args.targetAgent.type ?? null,
+        agentType: args.targetAgent.type ?? null,
+        actionType: args.actionType,
+        description: args.description,
+        content: args.content,
+        contentFormat: 'markdown',
+        durationMs: args.durationMs ?? null,
+      });
+    } catch (err) {
+      console.warn(`Failed to record sub-contribution for session ${args.sessionId}:`, err);
+    }
   }
 
   /**
