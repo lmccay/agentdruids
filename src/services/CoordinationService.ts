@@ -9,6 +9,11 @@ import { OllamaClient, ChatRequest, createDefaultOllamaConfig } from './OllamaCl
 import { SessionAgentManagerImpl } from './SessionAgentManager';
 import { SessionContentManagerImpl } from './SessionContentManager';
 import { CoordinatorConcurrencyManagerImpl } from './CoordinatorConcurrencyManager';
+import { getSessionPublicationService } from './SessionPublicationService';
+import type {
+  ContributionRecord,
+  SessionRecord,
+} from './publishing/types';
 
 // Types for coordination
 export type AgentId = string;
@@ -42,6 +47,8 @@ export interface CoordinationRequest {
   timeoutMinutes: number;
   coordinationStyle: 'collaborative' | 'consultative' | 'directive';
   publishTo?: string[];
+  // Typed publishing modes (catalogued in druids_core.publishing_modes). Defaults to ['report'].
+  publishAs?: string[];
   // Caller-supplied per-request extras (e.g., workflowMode='diagram',
   // originalWorkflow for PlantUML workflows). Forwarded to the session's
   // metadata.
@@ -66,6 +73,12 @@ export interface CoordinationSession {
   // session so that rerun and the simple-coordination fallback can both honor
   // the original request's publish intent.
   publishTo?: string[];
+
+  // Typed publishing modes captured from the original request
+  publishAs?: string[];
+
+  // Realm context for the session (used in publication records)
+  realmId?: string;
 
   // Session-scoped agent management for concurrency safety
   sessionAgentManager: SessionAgentManagerImpl;
@@ -163,6 +176,12 @@ export interface OrchestrationPlan {
 export class CoordinationService {
   private sessions: Map<string, CoordinationSession> = new Map();
   private coordinators: Map<string, Coordinator> = new Map();
+  /**
+   * Active orchestration step per session. Set when a step begins executing,
+   * cleared when it completes. Read by the tool layer (AgentService) to attach
+   * sub-contributions to their parent orchestration step.
+   */
+  private activeSteps: Map<string, number> = new Map();
   private agentService: AgentService | null = null;
   private realmService: RealmService | null = null;
   // private knowledgeService: KnowledgeService | null = null;
@@ -275,7 +294,8 @@ export class CoordinationService {
       participantTasks: [],
       sessionAgentManager,
       sessionContentManager,
-      ...(request.publishTo !== undefined && { publishTo: request.publishTo })
+      ...(request.publishTo !== undefined && { publishTo: request.publishTo }),
+      ...(request.publishAs !== undefined && { publishAs: request.publishAs })
     };
     
     // Initialize session-scoped agent states
@@ -775,14 +795,31 @@ CRITICAL: Only assign tasks to DRUIDs. If an Elemental's expertise is needed, as
         // Build step context from previous outputs
         const stepContext = await this.buildStepContext(plan, step);
 
-        // Execute the step with session context
-        const stepOutput = await this.executeOrchestrationStep(step, stepContext, session.id);
-        
-        // Store step output in session-isolated storage
-        step.contentId = await this.storeStepContent(step, stepOutput, session);
-        step.output = stepOutput;
-        step.status = 'completed';
-        step.completedAt = new Date();
+        // Mark this step as active so tool calls can attribute their
+        // sub-contributions back to it.
+        this.activeSteps.set(session.id, step.stepNumber);
+
+        // Ensure the coordination_sessions row exists before any tool call can
+        // insert sub-contributions (FK target). Best-effort; sweep at end will reconcile.
+        await getSessionPublicationService().ensureSessionRecord({
+          sessionId: session.id,
+          coordinatorAgentId: session.coordinatorId,
+          realmId: session.realmId ?? null,
+          prompt: session.scenarioPrompt,
+          participantAgentIds: session.participantIds,
+        }).catch((err) => console.warn(`ensureSessionRecord failed for ${session.id}:`, err));
+        try {
+          // Execute the step with session context
+          const stepOutput = await this.executeOrchestrationStep(step, stepContext, session.id);
+
+          // Store step output in session-isolated storage
+          step.contentId = await this.storeStepContent(step, stepOutput, session);
+          step.output = stepOutput;
+          step.status = 'completed';
+          step.completedAt = new Date();
+        } finally {
+          this.activeSteps.delete(session.id);
+        }
 
         console.log(`✅ Step ${step.stepNumber} completed, content stored as ${step.contentId}`);
 
@@ -799,6 +836,12 @@ CRITICAL: Only assign tasks to DRUIDs. If an Elemental's expertise is needed, as
 
       // Generate final result
       await this.generateOrchestrationResult(session, plan);
+
+      // Persist session + contributions and publish typed artifacts.
+      // Best-effort — does not fail the session if publishing errors.
+      await this.persistAndPublishSession(session, plan).catch((err) => {
+        console.error(`⚠️ persistAndPublishSession failed for ${session.id}:`, err);
+      });
 
       // Clean up session-scoped resources
       session.sessionAgentManager.cleanup();
@@ -1401,7 +1444,8 @@ CRITICAL: Only assign tasks to DRUIDs. If an Elemental's expertise is needed, as
       sessionAgentManager,
       sessionContentManager,
       ...(request.metadata !== undefined && { metadata: request.metadata }),
-      ...(request.publishTo !== undefined && { publishTo: request.publishTo })
+      ...(request.publishTo !== undefined && { publishTo: request.publishTo }),
+      ...(request.publishAs !== undefined && { publishAs: request.publishAs })
     };
 
     // Initialize session-scoped agent states
@@ -1632,7 +1676,8 @@ CRITICAL: Only assign tasks to DRUIDs. If an Elemental's expertise is needed, as
       sessionAgentManager,
       sessionContentManager,
       ...(resolvedRequest.metadata !== undefined && { metadata: resolvedRequest.metadata }),
-      ...(resolvedRequest.publishTo !== undefined && { publishTo: resolvedRequest.publishTo })
+      ...(resolvedRequest.publishTo !== undefined && { publishTo: resolvedRequest.publishTo }),
+      ...(resolvedRequest.publishAs !== undefined && { publishAs: resolvedRequest.publishAs })
     };
 
     // Initialize session-scoped agent states
@@ -1670,6 +1715,15 @@ CRITICAL: Only assign tasks to DRUIDs. If an Elemental's expertise is needed, as
    */
   getSession(sessionId: string): CoordinationSession | undefined {
     return this.sessions.get(sessionId);
+  }
+
+  /**
+   * Returns the orchestration step number currently executing for a session,
+   * or undefined if no step is active. Used by the tool layer to attach
+   * sub-contributions to their parent step.
+   */
+  getActiveStep(sessionId: string): number | undefined {
+    return this.activeSteps.get(sessionId);
   }
 
   /**
@@ -2068,9 +2122,17 @@ When synthesizing results, focus on:
       }
       
       session.status = 'completed';
+      session.completedAt = session.completedAt ?? new Date();
       console.log(`✅ Coordination session ${sessionId} completed successfully`);
-      
-      // Optionally publish to WorldTree if requested
+
+      // Republish after post-orchestration synthesis so publications carry the
+      // final integratedContent. Idempotent — ON CONFLICT UPDATE in publishers.
+      await this.persistAndPublishSession(session).catch((err) => {
+        console.error(`⚠️ persistAndPublishSession failed for ${session.id}:`, err);
+      });
+
+      // Legacy publishTo paths kept for backward compatibility with external callers
+      // that haven't migrated to publishAs.
       if (request.publishTo && request.publishTo.length > 0 && session.finalResult?.integratedContent) {
         try {
           for (const publishKey of request.publishTo) {
@@ -2748,6 +2810,98 @@ EXPECTATION: Deliver enhanced story content that seamlessly integrates technical
   /**
    * Publish content to session-isolated WorldTree knowledge system
    */
+  /**
+   * Persist session metadata + per-contributor records to Postgres, then publish
+   * artifacts in the modes requested on the session (defaulting to ['report']).
+   * Best-effort: errors are logged, not thrown — publication never fails a session.
+   */
+  private async persistAndPublishSession(
+    session: CoordinationSession,
+    plan?: OrchestrationPlan
+  ): Promise<void> {
+    const pubService = getSessionPublicationService();
+
+    const completedSteps = plan?.steps.filter((s) => s.status === 'completed') ?? [];
+
+    const contributions: ContributionRecord[] = completedSteps.length > 0
+      ? completedSteps.map((step) => ({
+          sessionId: session.id,
+          stepNumber: step.stepNumber,
+          subStepNumber: 0,
+          agentId: step.agentId,
+          agentRole: 'coordinator',
+          agentType: null,
+          actionType: step.actionType,
+          description: step.description,
+          content: step.output ?? '',
+          contentFormat: 'markdown' as const,
+          tokenCount: null,
+          durationMs:
+            step.startedAt && step.completedAt
+              ? step.completedAt.getTime() - step.startedAt.getTime()
+              : null,
+          createdAt: step.completedAt ?? new Date(),
+        }))
+      : session.participantTasks
+          .filter((t) => t.status === 'completed' && t.result)
+          .map((task, idx) => ({
+            sessionId: session.id,
+            stepNumber: idx + 1,
+            subStepNumber: 0,
+            agentId: task.agentId,
+            agentRole: 'participant',
+            agentType: null,
+            actionType: null,
+            description: task.task,
+            content: task.result ?? '',
+            contentFormat: 'markdown' as const,
+            tokenCount: null,
+            durationMs:
+              task.assignedAt && task.completedAt
+                ? task.completedAt.getTime() - task.assignedAt.getTime()
+                : null,
+            createdAt: task.completedAt ?? new Date(),
+          }));
+
+    const sessionRecord: SessionRecord = {
+      sessionId: session.id,
+      coordinatorAgentId: session.coordinatorId,
+      realmId: session.realmId ?? null,
+      prompt: session.scenarioPrompt,
+      status: session.status,
+      startedAt: session.startedAt,
+      completedAt: session.completedAt ?? null,
+      participantAgentIds: session.participantIds,
+      metadata: session.metadata ?? {},
+      synthesis:
+        session.finalResult?.integratedContent ??
+        session.finalResult?.coordinatorSummary ??
+        session.finalResult?.summary ??
+        null,
+    };
+
+    try {
+      await pubService.persistSession(sessionRecord);
+      if (contributions.length > 0) {
+        await pubService.persistContributions(contributions);
+      }
+      const publications = await pubService.publish(
+        sessionRecord,
+        contributions,
+        session.publishAs
+      );
+      if (session.finalResult) {
+        for (const pub of publications) {
+          if (pub.status === 'published' && !session.finalResult.publishedTo.includes(pub.contentUri)) {
+            session.finalResult.publishedTo.push(pub.contentUri);
+          }
+        }
+      }
+    } catch (err) {
+      console.error(`⚠️ persistAndPublishSession error for ${session.id}:`, err);
+    }
+  }
+
   private async publishToWorldTree(content: string, publishPaths: string[], session: CoordinationSession): Promise<void> {
     try {
       // Use session-isolated content storage

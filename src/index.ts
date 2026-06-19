@@ -5,6 +5,7 @@ import * as dotenv from 'dotenv';
 import { migrationService } from './services/MigrationService';
 import { RepositoryManager } from './services/RepositoryManager';
 import { modelRegistryService } from './services/ModelRegistryService';
+import { getRetentionSweeperService } from './services/RetentionSweeperService';
 
 // Load environment variables
 dotenv.config();
@@ -56,6 +57,9 @@ async function main(): Promise<void> {
 
     // Start MCP-compliant server for external clients
     await app.startMCPServer(mcpPort);
+
+    // Start retention sweeper for expired session publications
+    getRetentionSweeperService().start();
 
     console.log('');
     console.log('✅ Druids system started successfully!');

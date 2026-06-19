@@ -16,7 +16,7 @@ services:
       - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:3000,http://localhost:8080,http://localhost:3001}
       - LOG_LEVEL=debug
       - DRUIDS_ENV=docker-dev
-      - OLLAMA_BASE_URL=http://druids-ollama:11434
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://druids-ollama:11434}
       - OLLAMA_MODEL=qwen2.5:1.5b
       - OLLAMA_TIMEOUT=300000
       # OpenAI API Configuration (enabled)
@@ -32,6 +32,9 @@ services:
       - .:/app
       - /app/node_modules
       - druids-data:/app/data
+      # Host-bound session publications archive (survives `docker-compose down -v`).
+      # Rendered artifacts for `report` / `dataset` / `transcript` modes land here.
+      - ~/druids-data/sessions:/app/data/sessions
 
       # HOST FILE ACCESS: Uncomment and customize to give agents access to your host machine's files
       # Format: <host-path>:<container-path>:<ro|rw>
@@ -88,6 +91,8 @@ services:
       - .:/app
       - /app/node_modules
       - druids-data:/app/data
+      # Host-bound session publications archive (matches druids-main mount)
+      - ~/druids-data/sessions:/app/data/sessions
 
       # HOST FILE ACCESS: Same mounts as druids-app for consistent file access
       # Uncomment the same host mounts you enabled in druids-app above
@@ -231,7 +236,7 @@ services:
       - OPENAI_DEFAULT_MODEL=gpt-4
       - OPENAI_TIMEOUT=60000
       # Ollama Configuration (fallback for local development)
-      - OLLAMA_BASE_URL=http://druids-ollama:11434
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://druids-ollama:11434}
       - OLLAMA_MODEL=qwen2.5:1.5b
       - OLLAMA_TIMEOUT=300000
       - DATABASE_URL=postgresql://druids_user:druids_pass_dev@druids-postgres:5432/druids
