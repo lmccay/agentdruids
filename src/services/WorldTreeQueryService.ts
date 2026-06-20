@@ -1,0 +1,598 @@
+import { DatabaseService } from './DatabaseService';
+
+/**
+ * WorldTreeQueryService — the single owner of every SQL statement that powers
+ * the read-only WorldTree discovery surface (Phase A).
+ *
+ * Tools, resources, and REST routes call into this service; they never write
+ * SQL themselves. Keeping all WorldTree queries in one file makes the surface
+ * auditable and indexable: when a query is slow, there is exactly one place to
+ * look.
+ *
+ * All queries serve from existing tables (coordination_sessions,
+ * session_contributions, session_publications, publishing_modes). No new ML,
+ * no embeddings, no background jobs — text matching (ILIKE) only.
+ *
+ * Forward-compatibility with success metrics (Phase F) is honored without a
+ * schema change: getSession returns an always-empty `outcomes` array, and
+ * worldtreeHealth reports `outcomesAttachedCount: 0`. When session_outcomes
+ * lands, these populate via JOIN without changing the contract.
+ *
+ * See docs/phase-a-worldtree-discovery.md.
+ */
+
+/** Default page sizes (see the doc's "Pagination defaults" open question). */
+export const DEFAULT_SESSION_LIMIT = 50;
+export const DEFAULT_CONTRIBUTION_LIMIT = 100;
+const MAX_LIMIT = 500;
+
+export interface SessionSummary {
+  sessionId: string;
+  status: string;
+  coordinatorAgentId: string | null;
+  realmId: string | null;
+  startedAt: Date | null;
+  completedAt: Date | null;
+  participantAgentIds: string[];
+}
+
+export interface SessionContribution {
+  sessionId: string;
+  stepNumber: number;
+  subStepNumber: number;
+  agentId: string;
+  agentRole: string | null;
+  agentType: string | null;
+  actionType: string | null;
+  description: string | null;
+  content: string;
+  contentFormat: string;
+  tokenCount: number | null;
+  durationMs: number | null;
+  createdAt: Date;
+}
+
+export interface SessionPublication {
+  id: string;
+  sessionId: string;
+  modeName: string;
+  status: string;
+  contentUri: string;
+  contentSizeBytes: number | null;
+  publishedAt: Date | null;
+  expiresAt: Date | null;
+}
+
+// Input DTOs are loose bags assembled from query strings / tool args, so every
+// optional field may be explicitly undefined (exactOptionalPropertyTypes).
+export interface ListSessionsFilters {
+  status?: string | undefined;
+  coordinatorId?: string | undefined;
+  realmId?: string | undefined;
+  since?: string | undefined;
+  until?: string | undefined;
+  limit?: number | undefined;
+  offset?: number | undefined;
+  /** Phase F: filter to sessions that have attached outcome metrics. Validated, ignored in Phase A. */
+  hasOutcomes?: boolean | undefined;
+}
+
+export interface SearchContributionsFilters {
+  text?: string | undefined;
+  agentId?: string | undefined;
+  agentRole?: string | undefined;
+  actionType?: string | undefined;
+  sessionId?: string | undefined;
+  since?: string | undefined;
+  until?: string | undefined;
+  limit?: number | undefined;
+  offset?: number | undefined;
+}
+
+export type AggregateGroupBy = 'agent_id' | 'agent_role' | 'action_type' | 'day';
+
+const AGGREGATE_COLUMNS: Record<AggregateGroupBy, string> = {
+  agent_id: 'agent_id',
+  agent_role: 'agent_role',
+  action_type: 'action_type',
+  day: "DATE_TRUNC('day', created_at)",
+};
+
+interface SessionRow {
+  session_id: string;
+  status: string;
+  coordinator_agent_id: string | null;
+  realm_id: string | null;
+  prompt: string | null;
+  started_at: Date | null;
+  completed_at: Date | null;
+  participant_agent_ids: string[] | null;
+  metadata: Record<string, unknown> | null;
+}
+
+interface ContributionRow {
+  session_id: string;
+  step_number: number;
+  sub_step_number: number;
+  agent_id: string;
+  agent_role: string | null;
+  agent_type: string | null;
+  action_type: string | null;
+  description: string | null;
+  content: string;
+  content_format: string;
+  token_count: number | null;
+  duration_ms: number | null;
+  created_at: Date;
+}
+
+interface PublicationRow {
+  id: string;
+  session_id: string;
+  mode_name: string;
+  status: string;
+  content_uri: string;
+  content_size_bytes: string | number | null;
+  published_at: Date | null;
+  expires_at: Date | null;
+}
+
+function clampLimit(limit: number | undefined, fallback: number): number {
+  if (limit == null || Number.isNaN(limit)) return fallback;
+  return Math.min(Math.max(1, Math.floor(limit)), MAX_LIMIT);
+}
+
+function clampOffset(offset: number | undefined): number {
+  if (offset == null || Number.isNaN(offset) || offset < 0) return 0;
+  return Math.floor(offset);
+}
+
+function mapSessionRow(r: SessionRow): SessionSummary {
+  return {
+    sessionId: r.session_id,
+    status: r.status,
+    coordinatorAgentId: r.coordinator_agent_id,
+    realmId: r.realm_id,
+    startedAt: r.started_at,
+    completedAt: r.completed_at,
+    participantAgentIds: r.participant_agent_ids ?? [],
+  };
+}
+
+function mapContributionRow(r: ContributionRow): SessionContribution {
+  return {
+    sessionId: r.session_id,
+    stepNumber: r.step_number,
+    subStepNumber: r.sub_step_number,
+    agentId: r.agent_id,
+    agentRole: r.agent_role,
+    agentType: r.agent_type,
+    actionType: r.action_type,
+    description: r.description,
+    content: r.content,
+    contentFormat: r.content_format,
+    tokenCount: r.token_count,
+    durationMs: r.duration_ms,
+    createdAt: r.created_at,
+  };
+}
+
+function mapPublicationRow(r: PublicationRow): SessionPublication {
+  return {
+    id: r.id,
+    sessionId: r.session_id,
+    modeName: r.mode_name,
+    status: r.status,
+    contentUri: r.content_uri,
+    contentSizeBytes: r.content_size_bytes == null ? null : Number(r.content_size_bytes),
+    publishedAt: r.published_at,
+    expiresAt: r.expires_at,
+  };
+}
+
+export class WorldTreeQueryService {
+  private db: DatabaseService;
+
+  constructor(db?: DatabaseService) {
+    this.db = db ?? DatabaseService.getInstance();
+  }
+
+  /** Paginated index of sessions, newest first, with optional filters. */
+  async listSessions(filters: ListSessionsFilters = {}): Promise<{ sessions: SessionSummary[]; limit: number; offset: number }> {
+    const limit = clampLimit(filters.limit, DEFAULT_SESSION_LIMIT);
+    const offset = clampOffset(filters.offset);
+    const { rows } = await this.db.query<SessionRow>(
+      `SELECT session_id, status, coordinator_agent_id, realm_id, prompt,
+              started_at, completed_at, participant_agent_ids, metadata
+         FROM druids_core.coordination_sessions
+        WHERE ($1::varchar IS NULL OR status = $1::varchar)
+          AND ($2::varchar IS NULL OR coordinator_agent_id = $2::varchar)
+          AND ($3::varchar IS NULL OR realm_id = $3::varchar)
+          AND ($4::timestamptz IS NULL OR started_at >= $4::timestamptz)
+          AND ($5::timestamptz IS NULL OR started_at <= $5::timestamptz)
+        ORDER BY started_at DESC
+        LIMIT $6 OFFSET $7`,
+      [
+        filters.status ?? null,
+        filters.coordinatorId ?? null,
+        filters.realmId ?? null,
+        filters.since ?? null,
+        filters.until ?? null,
+        limit,
+        offset,
+      ]
+    );
+    // Note: filters.hasOutcomes is intentionally not applied — Phase F (see docs).
+    return { sessions: rows.map(mapSessionRow), limit, offset };
+  }
+
+  /** Full session record, optionally with contributions and/or publications. */
+  async getSession(
+    sessionId: string,
+    opts: { includeContributions?: boolean; includePublications?: boolean } = {}
+  ): Promise<
+    | (SessionSummary & {
+        prompt: string | null;
+        metadata: Record<string, unknown>;
+        synthesis: string | null;
+        outcomes: never[];
+        contributions?: SessionContribution[];
+        publications?: SessionPublication[];
+      })
+    | null
+  > {
+    const { rows } = await this.db.query<SessionRow>(
+      `SELECT session_id, status, coordinator_agent_id, realm_id, prompt,
+              started_at, completed_at, participant_agent_ids, metadata
+         FROM druids_core.coordination_sessions
+        WHERE session_id = $1::varchar`,
+      [sessionId]
+    );
+    const row = rows[0];
+    if (!row) return null;
+
+    const metadata = row.metadata ?? {};
+    const synthesis = typeof metadata['synthesis'] === 'string' ? (metadata['synthesis'] as string) : null;
+    const base = {
+      ...mapSessionRow(row),
+      prompt: row.prompt,
+      metadata,
+      synthesis,
+      // Forward-compat (Phase F): always empty in Phase A, populated by JOIN later.
+      outcomes: [] as never[],
+    };
+
+    const result: typeof base & { contributions?: SessionContribution[]; publications?: SessionPublication[] } = base;
+    if (opts.includeContributions) {
+      result.contributions = await this.getSessionContributions(sessionId);
+    }
+    if (opts.includePublications) {
+      result.publications = await this.getSessionPublications(sessionId);
+    }
+    return result;
+  }
+
+  /** All contribution rows for a session, ordered by position. */
+  async getSessionContributions(sessionId: string): Promise<SessionContribution[]> {
+    const { rows } = await this.db.query<ContributionRow>(
+      `SELECT session_id, step_number, sub_step_number, agent_id, agent_role,
+              agent_type, action_type, description, content, content_format,
+              token_count, duration_ms, created_at
+         FROM druids_core.session_contributions
+        WHERE session_id = $1::varchar
+        ORDER BY step_number, sub_step_number`,
+      [sessionId]
+    );
+    return rows.map(mapContributionRow);
+  }
+
+  /** Publication rows for a session, joined to mode names. */
+  async getSessionPublications(sessionId: string): Promise<SessionPublication[]> {
+    const { rows } = await this.db.query<PublicationRow>(
+      `SELECT p.id, p.session_id, m.name AS mode_name, p.status, p.content_uri,
+              p.content_size_bytes, p.published_at, p.expires_at
+         FROM druids_core.session_publications p
+         JOIN druids_core.publishing_modes m ON m.id = p.mode_id
+        WHERE p.session_id = $1::varchar
+        ORDER BY m.sort_order`,
+      [sessionId]
+    );
+    return rows.map(mapPublicationRow);
+  }
+
+  /** A single publication for a session by mode name. */
+  async getSessionPublicationByMode(sessionId: string, modeName: string): Promise<SessionPublication | null> {
+    const { rows } = await this.db.query<PublicationRow>(
+      `SELECT p.id, p.session_id, m.name AS mode_name, p.status, p.content_uri,
+              p.content_size_bytes, p.published_at, p.expires_at
+         FROM druids_core.session_publications p
+         JOIN druids_core.publishing_modes m ON m.id = p.mode_id
+        WHERE p.session_id = $1::varchar AND m.name = $2::varchar`,
+      [sessionId, modeName]
+    );
+    return rows[0] ? mapPublicationRow(rows[0]) : null;
+  }
+
+  /** Sessions whose prompt matches the text (ILIKE). */
+  async findSessionsByPrompt(text: string, limit?: number): Promise<SessionSummary[]> {
+    const lim = clampLimit(limit, DEFAULT_SESSION_LIMIT);
+    const { rows } = await this.db.query<SessionRow>(
+      `SELECT session_id, status, coordinator_agent_id, realm_id, prompt,
+              started_at, completed_at, participant_agent_ids, metadata
+         FROM druids_core.coordination_sessions
+        WHERE prompt ILIKE '%' || $1::text || '%'
+        ORDER BY started_at DESC
+        LIMIT $2`,
+      [text, lim]
+    );
+    return rows.map(mapSessionRow);
+  }
+
+  /** Search contributions with AND-combined filters. */
+  async searchContributions(
+    filters: SearchContributionsFilters = {}
+  ): Promise<{ contributions: SessionContribution[]; limit: number; offset: number }> {
+    const limit = clampLimit(filters.limit, DEFAULT_CONTRIBUTION_LIMIT);
+    const offset = clampOffset(filters.offset);
+    const { rows } = await this.db.query<ContributionRow>(
+      `SELECT session_id, step_number, sub_step_number, agent_id, agent_role,
+              agent_type, action_type, description, content, content_format,
+              token_count, duration_ms, created_at
+         FROM druids_core.session_contributions
+        WHERE ($1::varchar IS NULL OR agent_id = $1::varchar)
+          AND ($2::varchar IS NULL OR agent_role = $2::varchar)
+          AND ($3::varchar IS NULL OR action_type = $3::varchar)
+          AND ($4::varchar IS NULL OR session_id = $4::varchar)
+          AND ($5::text    IS NULL OR content ILIKE '%' || $5::text || '%')
+          AND ($6::timestamptz IS NULL OR created_at >= $6::timestamptz)
+          AND ($7::timestamptz IS NULL OR created_at <= $7::timestamptz)
+        ORDER BY created_at DESC
+        LIMIT $8 OFFSET $9`,
+      [
+        filters.agentId ?? null,
+        filters.agentRole ?? null,
+        filters.actionType ?? null,
+        filters.sessionId ?? null,
+        filters.text ?? null,
+        filters.since ?? null,
+        filters.until ?? null,
+        limit,
+        offset,
+      ]
+    );
+    return { contributions: rows.map(mapContributionRow), limit, offset };
+  }
+
+  /** Grouped contribution counts, total duration, total content length. */
+  async aggregateContributions(
+    groupBy: AggregateGroupBy,
+    filters: {
+      agentId?: string | undefined;
+      agentRole?: string | undefined;
+      actionType?: string | undefined;
+      sessionId?: string | undefined;
+    } = {}
+  ): Promise<Array<{ group: unknown; contributionCount: number; totalContentChars: number; avgDurationMs: number | null; distinctSessions: number }>> {
+    const column = AGGREGATE_COLUMNS[groupBy];
+    if (!column) {
+      throw new Error(`Invalid groupBy: ${groupBy}`);
+    }
+    const { rows } = await this.db.query<{
+      group: unknown;
+      contribution_count: string;
+      total_content_chars: string | null;
+      avg_duration_ms: string | null;
+      distinct_sessions: string;
+    }>(
+      `SELECT ${column} AS group,
+              COUNT(*) AS contribution_count,
+              SUM(LENGTH(content)) AS total_content_chars,
+              AVG(duration_ms) AS avg_duration_ms,
+              COUNT(DISTINCT session_id) AS distinct_sessions
+         FROM druids_core.session_contributions
+        WHERE ($1::varchar IS NULL OR agent_id = $1::varchar)
+          AND ($2::varchar IS NULL OR agent_role = $2::varchar)
+          AND ($3::varchar IS NULL OR action_type = $3::varchar)
+          AND ($4::varchar IS NULL OR session_id = $4::varchar)
+          AND ${column} IS NOT NULL
+        GROUP BY ${column}
+        ORDER BY contribution_count DESC`,
+      [filters.agentId ?? null, filters.agentRole ?? null, filters.actionType ?? null, filters.sessionId ?? null]
+    );
+    return rows.map((r) => ({
+      group: r.group,
+      contributionCount: Number(r.contribution_count),
+      totalContentChars: r.total_content_chars == null ? 0 : Number(r.total_content_chars),
+      avgDurationMs: r.avg_duration_ms == null ? null : Number(r.avg_duration_ms),
+      distinctSessions: Number(r.distinct_sessions),
+    }));
+  }
+
+  /** Side-by-side comparison of two sessions: prompts, per-role counts, contribution totals. */
+  async compareSessions(sessionIdA: string, sessionIdB: string): Promise<{
+    a: { session: SessionSummary & { prompt: string | null }; rolesByCount: Record<string, number>; contributionCount: number } | null;
+    b: { session: SessionSummary & { prompt: string | null }; rolesByCount: Record<string, number>; contributionCount: number } | null;
+  }> {
+    const [a, b] = await Promise.all([this.sessionComparisonSide(sessionIdA), this.sessionComparisonSide(sessionIdB)]);
+    return { a, b };
+  }
+
+  private async sessionComparisonSide(sessionId: string) {
+    const { rows } = await this.db.query<SessionRow>(
+      `SELECT session_id, status, coordinator_agent_id, realm_id, prompt,
+              started_at, completed_at, participant_agent_ids, metadata
+         FROM druids_core.coordination_sessions
+        WHERE session_id = $1::varchar`,
+      [sessionId]
+    );
+    const row = rows[0];
+    if (!row) return null;
+    const roleRows = await this.db.query<{ agent_role: string | null; count: string }>(
+      `SELECT agent_role, COUNT(*) AS count
+         FROM druids_core.session_contributions
+        WHERE session_id = $1::varchar
+        GROUP BY agent_role`,
+      [sessionId]
+    );
+    const rolesByCount: Record<string, number> = {};
+    let contributionCount = 0;
+    for (const rr of roleRows.rows) {
+      const n = Number(rr.count);
+      contributionCount += n;
+      rolesByCount[rr.agent_role ?? 'unknown'] = n;
+    }
+    return { session: { ...mapSessionRow(row), prompt: row.prompt }, rolesByCount, contributionCount };
+  }
+
+  /** All contributions an agent made across sessions, paginated. */
+  async agentContributions(
+    agentId: string,
+    pagination: { limit?: number | undefined; offset?: number | undefined } = {}
+  ): Promise<{ contributions: SessionContribution[]; limit: number; offset: number }> {
+    return this.searchContributions({ agentId, limit: pagination.limit, offset: pagination.offset });
+  }
+
+  /** Aggregate stats for one agent. */
+  async agentSummary(agentId: string): Promise<{
+    agentId: string;
+    contributionCount: number;
+    totalContentChars: number;
+    avgDurationMs: number | null;
+    distinctSessions: number;
+  }> {
+    const { rows } = await this.db.query<{
+      contribution_count: string;
+      total_content_chars: string | null;
+      avg_duration_ms: string | null;
+      distinct_sessions: string;
+    }>(
+      `SELECT COUNT(*) AS contribution_count,
+              SUM(LENGTH(content)) AS total_content_chars,
+              AVG(duration_ms) AS avg_duration_ms,
+              COUNT(DISTINCT session_id) AS distinct_sessions
+         FROM druids_core.session_contributions
+        WHERE agent_id = $1::varchar`,
+      [agentId]
+    );
+    const r = rows[0];
+    return {
+      agentId,
+      contributionCount: r ? Number(r.contribution_count) : 0,
+      totalContentChars: r && r.total_content_chars != null ? Number(r.total_content_chars) : 0,
+      avgDurationMs: r && r.avg_duration_ms != null ? Number(r.avg_duration_ms) : null,
+      distinctSessions: r ? Number(r.distinct_sessions) : 0,
+    };
+  }
+
+  /** Timeline of an agent's contributions with summary stats. */
+  async agentActivity(
+    agentId: string,
+    opts: { since?: string | undefined; until?: string | undefined } = {}
+  ): Promise<{ summary: Awaited<ReturnType<WorldTreeQueryService['agentSummary']>>; timeline: SessionContribution[] }> {
+    const summary = await this.agentSummary(agentId);
+    const { contributions } = await this.searchContributions({
+      agentId,
+      since: opts.since,
+      until: opts.until,
+      limit: DEFAULT_CONTRIBUTION_LIMIT,
+    });
+    return { summary, timeline: contributions };
+  }
+
+  /** All sessions that ran in a realm, paginated. */
+  async realmSessions(
+    realmId: string,
+    pagination: { limit?: number | undefined; offset?: number | undefined } = {}
+  ): Promise<{ sessions: SessionSummary[]; limit: number; offset: number }> {
+    return this.listSessions({ realmId, limit: pagination.limit, offset: pagination.offset });
+  }
+
+  /** The publishing_modes catalog. */
+  async listModes(): Promise<Array<{
+    name: string;
+    description: string;
+    outputFormat: string;
+    includesSynthesis: boolean;
+    includesContributions: boolean;
+    includesTranscript: boolean;
+    defaultRetentionDays: number | null;
+    enabled: boolean;
+  }>> {
+    const { rows } = await this.db.query<{
+      name: string;
+      description: string;
+      output_format: string;
+      includes_synthesis: boolean;
+      includes_contributions: boolean;
+      includes_transcript: boolean;
+      default_retention_days: number | null;
+      enabled: boolean;
+    }>(
+      `SELECT name, description, output_format, includes_synthesis,
+              includes_contributions, includes_transcript, default_retention_days, enabled
+         FROM druids_core.publishing_modes
+        ORDER BY sort_order`
+    );
+    return rows.map((r) => ({
+      name: r.name,
+      description: r.description,
+      outputFormat: r.output_format,
+      includesSynthesis: r.includes_synthesis,
+      includesContributions: r.includes_contributions,
+      includesTranscript: r.includes_transcript,
+      defaultRetentionDays: r.default_retention_days,
+      enabled: r.enabled,
+    }));
+  }
+
+  /** Sanity-check rollup: session counts, agent activity, mode distribution. */
+  async worldtreeHealth(): Promise<{
+    sessionCount: number;
+    sessionsByStatus: Record<string, number>;
+    contributionCount: number;
+    distinctAgents: number;
+    publicationsByMode: Record<string, number>;
+    outcomesAttachedCount: number;
+  }> {
+    const [statusRes, contribRes, agentRes, modeRes] = await Promise.all([
+      this.db.query<{ status: string; count: string }>(
+        `SELECT status, COUNT(*) AS count FROM druids_core.coordination_sessions GROUP BY status`
+      ),
+      this.db.query<{ count: string }>(`SELECT COUNT(*) AS count FROM druids_core.session_contributions`),
+      this.db.query<{ count: string }>(`SELECT COUNT(DISTINCT agent_id) AS count FROM druids_core.session_contributions`),
+      this.db.query<{ mode_name: string; count: string }>(
+        `SELECT m.name AS mode_name, COUNT(*) AS count
+           FROM druids_core.session_publications p
+           JOIN druids_core.publishing_modes m ON m.id = p.mode_id
+          GROUP BY m.name`
+      ),
+    ]);
+
+    const sessionsByStatus: Record<string, number> = {};
+    let sessionCount = 0;
+    for (const r of statusRes.rows) {
+      const n = Number(r.count);
+      sessionCount += n;
+      sessionsByStatus[r.status] = n;
+    }
+    const publicationsByMode: Record<string, number> = {};
+    for (const r of modeRes.rows) {
+      publicationsByMode[r.mode_name] = Number(r.count);
+    }
+    return {
+      sessionCount,
+      sessionsByStatus,
+      contributionCount: contribRes.rows[0] ? Number(contribRes.rows[0].count) : 0,
+      distinctAgents: agentRes.rows[0] ? Number(agentRes.rows[0].count) : 0,
+      publicationsByMode,
+      // Forward-compat (Phase F): zero until session_outcomes exists.
+      outcomesAttachedCount: 0,
+    };
+  }
+}
+
+let singleton: WorldTreeQueryService | null = null;
+export function getWorldTreeQueryService(): WorldTreeQueryService {
+  if (!singleton) singleton = new WorldTreeQueryService();
+  return singleton;
+}
