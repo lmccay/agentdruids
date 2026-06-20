@@ -4,6 +4,20 @@ import { v4 as uuidv4 } from 'uuid';
 import axios from 'axios';
 import { CoordinationService } from '../services/CoordinationService';
 import ServiceContainer from '../services/ServiceContainer';
+import {
+  WORLDTREE_TOOL_DEFINITIONS,
+  WORLDTREE_TOOL_NAMES,
+  createWorldTreeToolHandlers,
+  type WorldTreeToolHandler,
+} from './worldtree/worldtreeTools';
+import {
+  WORLDTREE_RESOURCE_DEFINITIONS,
+  readWorldTreeResource,
+} from './worldtree/worldtreeResources';
+import {
+  WORLDTREE_PROMPT_DEFINITIONS,
+  getWorldTreePrompt,
+} from './worldtree/worldtreePrompts';
 
 /**
  * Simplified MCP-compliant server for external clients
@@ -35,6 +49,7 @@ export class SimpleMCPServer {
   private sessions: Map<string, Session> = new Map();
   private mainAppUrl: string;
   private coordinationService: CoordinationService | null = null;
+  private worldTreeToolHandlers: Record<string, WorldTreeToolHandler> | null = null;
 
   constructor(
     port: number = 3003,
@@ -78,6 +93,14 @@ export class SimpleMCPServer {
       this.coordinationService = serviceContainer.getCoordinationService();
     }
     return this.coordinationService;
+  }
+
+  // WorldTree discovery tool handlers, bound to this server's HTTP apiCall.
+  private getWorldTreeToolHandlers(): Record<string, WorldTreeToolHandler> {
+    if (!this.worldTreeToolHandlers) {
+      this.worldTreeToolHandlers = createWorldTreeToolHandlers(this.apiCall.bind(this));
+    }
+    return this.worldTreeToolHandlers;
   }
 
   private setupMiddleware(): void {
@@ -402,7 +425,8 @@ export class SimpleMCPServer {
           protocolVersion: '2025-06-18',
           capabilities: {
             tools: { listChanged: false },
-            resources: { subscribe: false, listChanged: false }
+            resources: { subscribe: false, listChanged: false },
+            prompts: { listChanged: false }
           },
           serverInfo: {
             name: 'druids-mcp-server',
@@ -1154,7 +1178,9 @@ export class SimpleMCPServer {
                 },
                 required: ['content_id']
               }
-            }
+            },
+            // Read-only WorldTree discovery tools (Phase A)
+            ...WORLDTREE_TOOL_DEFINITIONS
           ]
         };
 
@@ -1196,14 +1222,28 @@ export class SimpleMCPServer {
             {
               uri: 'druids://realms',
               name: 'System Realms',
-              description: 'List of all realms in the system', 
+              description: 'List of all realms in the system',
               mimeType: 'application/json'
-            }
+            },
+            // Read-only WorldTree discovery resources (Phase A)
+            ...WORLDTREE_RESOURCE_DEFINITIONS
           ]
         };
 
       case 'resources/read':
         return await this.handleResourceRead(message.params);
+
+      case 'prompts/list':
+        return { prompts: WORLDTREE_PROMPT_DEFINITIONS };
+
+      case 'prompts/get': {
+        const { name, arguments: promptArgs } = message.params ?? {};
+        const prompt = getWorldTreePrompt(name, promptArgs ?? {});
+        if (!prompt) {
+          throw new Error(`Prompt not found: ${name}`);
+        }
+        return prompt;
+      }
 
       case 'notifications/initialized':
         // MCP protocol notification - client confirms initialization
@@ -3002,6 +3042,13 @@ Use \`get_coordination_session\` to monitor progress.`,
         }
 
       default:
+        // Read-only WorldTree discovery tools (Phase A)
+        if (WORLDTREE_TOOL_NAMES.has(name)) {
+          const handler = this.getWorldTreeToolHandlers()[name];
+          if (handler) {
+            return await handler(args ?? {});
+          }
+        }
         throw new Error(`Tool not found: ${name}`);
     }
   }
@@ -3098,6 +3145,13 @@ Use \`get_coordination_session\` to monitor progress.`,
 
   private async handleResourceRead(params: any): Promise<any> {
     const { uri } = params;
+
+    // Read-only WorldTree discovery resources (Phase A). Returns null when the
+    // URI is not a discovery resource, so we fall through to existing handling.
+    const worldTreeResult = await readWorldTreeResource(uri, this.apiCall.bind(this));
+    if (worldTreeResult) {
+      return worldTreeResult;
+    }
 
     switch (uri) {
       case 'druids://agents':

@@ -15,6 +15,7 @@ import systemRouter from './api/system';
 import modelsRouter from './api/models';
 import asyncResultsRouter from './api/async-results';
 import contentRouter from './api/content';
+import worldtreeRouter from './api/worldtree';
 
 // Import MCP server
 import SimpleMCPServer from './mcp/SimpleMCPServer';
@@ -112,6 +113,7 @@ export class DruidApp {
     this.app.use('/api/async-requests', asyncResultsRouter); // Async result management
     this.app.use('/api/async-results', asyncResultsRouter); // Async result retrieval
     this.app.use('/api/content', contentRouter); // Published content browsing
+    this.app.use('/api/worldtree', worldtreeRouter); // Read-only WorldTree discovery (Phase A)
 
     // API documentation endpoint
     this.app.get('/api/v1', (_req: Request, res: Response) => {
