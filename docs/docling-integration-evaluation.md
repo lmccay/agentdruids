@@ -107,10 +107,13 @@ CREATE TABLE druids_core.worldtree_chunks (
 );
 CREATE INDEX idx_worldtree_chunks_source ON druids_core.worldtree_chunks(source_type, source_id);
 
+-- Default vector store (PgVectorStore). Populated ONLY when an embedding
+-- provider is configured; otherwise retrieval stays lexical (see §4.6).
+-- External stores (Pinecone, etc.) replace this table via the VectorStore seam.
 CREATE TABLE druids_core.chunk_embeddings (
   id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
   chunk_id        UUID NOT NULL REFERENCES druids_core.worldtree_chunks(id) ON DELETE CASCADE,
-  embedding       vector(768),                    -- dimension pinned to the chosen model
+  embedding       vector(768),                    -- dim = the deployment's active embedding space (default 768; see §4.6)
   model_name      VARCHAR(128) NOT NULL,
   created_at      TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
   UNIQUE(chunk_id, model_name)
@@ -125,20 +128,37 @@ CREATE INDEX idx_chunk_embeddings_vec
 
 | Change | Type | Why |
 |---|---|---|
-| `CREATE EXTENSION vector` | new | embeddings unsupported today |
+| `CREATE EXTENSION vector` | new | for the default `PgVectorStore`; only when embeddings are enabled |
 | `worldtree_documents` + `document_renderings` | new tables | document lineage (catalog + typed renderings) |
 | **Generalize Phase B `contribution_embeddings` → `worldtree_chunks` + `chunk_embeddings`** | **revise not-yet-built design** | one unified semantic index across earned + seeded knowledge |
 | `curation_decisions` gains a document path (`reviewer='seed:…'`, supersession bypass) | extend Phase B | earned-vs-seeded model |
 | Legacy `druids_knowledge.entries` (+ `namespaces`, `KnowledgeService`, `/api/knowledge`) | **removed** (separate cleanup PR) | deprecated, unused by the live system |
 | `coordination_sessions` / `session_contributions` / `session_publications` | **no change** | documents are parallel; sessions untouched |
 | New on-disk store `/app/data/documents/{id}/` | new (mirror sessions) | bytes-on-disk pattern |
+| Pluggable `EmbeddingProvider` + `VectorStore` seams | new (interfaces) | provider/store not hardcoded; embeddings optional (§4.6) |
+
+### 4.6 Embedding provider and vector store are both pluggable
+
+Embeddings split into two independently swappable layers, mirroring how Druids already abstracts generation LLMs (`OllamaClient` / `OpenAIClient`, selected via config):
+
+- **`EmbeddingProvider`** (text → vector): `none` | **TEI** (HuggingFace Text-Embeddings-Inference — the recommended *local* default: purpose-built and far faster than Ollama for embeddings) | OpenAI-compatible API | Ollama. Chosen per deployment.
+- **`VectorStore`** (store + ANN search): **`PgVectorStore` (default)** keeps vectors in the `chunk_embeddings` table (§4.4); external stores (Pinecone, Qdrant, Weaviate) implement the same interface, holding only the vector + an id while Postgres keeps the catalog/chunk text and an external reference.
+
+Note these are *different layers*: an embedding provider turns text into a vector; a vector store persists and searches vectors. A SaaS like **Pinecone is primarily a vector store**, not an embedding provider (though it can also host embedding models in "integrated" mode).
+
+Two principles fall out:
+
+1. **Embeddings are optional, with graceful degradation.** Ingestion, curation, and the WorldTree all function with *no* provider configured; only semantic *retrieval* depends on one, and it falls back to the Phase A lexical (ILIKE) search. This is what lets resource-constrained or air-gapped deployments run text-only. Nothing hard-fails because embeddings are absent — and **nothing hard-requires Ollama** (which, in practice, has proven too slow in-container to be a sensible default).
+2. **Similarity is scoped to one embedding space.** Cosine distance is meaningful only within a single model's vector space, so `model_name` + dimension are intrinsic to each embedding. A deployment runs **one active embedding space**; its dimension sets the `vector(N)` column at migration/config time (default 768). Switching models or stores is a deliberate **re-embed**, not an in-place change.
+
+`WorldTreeQueryService` owns semantic SQL only for the `PgVectorStore` path; external stores route retrieval through the `VectorStore` implementation. **Recommendation: ship `PgVectorStore` as the only initial implementation** — local-first, atomic with the catalog, and ample at the ~10⁵-chunk target — and design the seam so SaaS stores can be added when scale or a managed tier justifies the egress + dual-write consistency cost (§8).
 
 ## 5. Integration architecture
 
 Mirror the Phase A REST-backed pattern (Druids owns persistence; the external service is stateless):
 
 - **Container `druids-docling`**: `docling-serve` (CPU torch, models baked or volume-cached). Reuses the existing **`druids-redis`** for its async job queue.
-- **Druids `DoclingService`** (in `src/services/`, sole owner of ingest SQL): calls docling-serve over HTTP, writes renderings to `/app/data/documents/{id}/`, catalogs `worldtree_documents` + `document_renderings`, then (Phase B pipeline) chunks via Docling's `HybridChunker` and enqueues embeddings into `worldtree_chunks`/`chunk_embeddings`.
+- **Druids `DoclingService`** (in `src/services/`, sole owner of ingest SQL): calls docling-serve over HTTP, writes renderings to `/app/data/documents/{id}/`, catalogs `worldtree_documents` + `document_renderings`, then chunks via Docling's `HybridChunker`. *When* an embedding provider is configured it writes vectors through the `VectorStore` (default `PgVectorStore` → `chunk_embeddings`); with no provider it stops after chunking and retrieval stays lexical (§4.6).
 - **REST routes** `/api/ingest` + **MCP tools** `ingest_url` / `ingest_document` on the existing `SimpleMCPServer` — one MCP endpoint for external clients, MCP container stays dependency-light (`apiCall`).
 - **Immediate evaluation path:** run the `docling-serve` container and register `docling-mcp` in Goose (`DOCLING_CONVERSION_MODE=remote`) — evaluate end-to-end with zero Druids code.
 
@@ -162,16 +182,17 @@ docling-serve is **stateless**: it converts and returns; Druids decides what to 
 - **CPU conversion is slow** for large PDFs/VLM — use the async API + poll (and Druids' existing async-result pattern); Redis queue scales it.
 - **Model licenses** vary (core MIT, GraniteDocling Apache-2.0; OCR/VLM models differ) — check per model if redistributing the image.
 - **Polymorphic `source_id`** trades a hard FK for service-layer integrity — flagged in §4.4 with a hard-FK variant.
+- **External vector stores add a dual-write consistency cost.** With `PgVectorStore` a curation exclude/supersede/delete is one transaction; an external store (Pinecone/Qdrant/Weaviate) must fan writes out to both systems and can drift — an orphaned vector keeps surfacing in search after its row is gone. This is the main reason the default is pgvector (§4.6).
 
 ## 9. Decisions (resolved)
 
 1. **Unify chunks/embeddings — Option B (decided).** One polymorphic `worldtree_chunks` + one `chunk_embeddings`. Phase B's migration 008 is revised accordingly (no standalone `contribution_embeddings`).
 2. **Polymorphic `source_id` — (decided).** `worldtree_chunks.source_id` references `{contribution, document}` polymorphically; referential integrity is enforced at the service layer.
-3. **Embedding model + dimension — `nomic-embed-text` (768), local via Ollama (decided).** Pins the column to `vector(768)`. Requires pulling `nomic-embed-text` into the Ollama container (it currently holds only the `qwen2.5:1.5b` generation model).
+3. **Embedding provider and vector store are both pluggable; embeddings are optional (decided).** See §4.6. Default = `PgVectorStore` (vectors in Postgres) + a pluggable `EmbeddingProvider` (`none` | TEI | OpenAI-compatible | Ollama). With no provider, semantic search degrades to the Phase A lexical search — **Ollama is not required** and is a poor default given its in-container slowness; TEI is the recommended local provider. The reference embedding space is `nomic-embed-text`/768, setting the default `vector(768)` dimension. SaaS vector stores (Pinecone, Qdrant, Weaviate) are anticipated behind the `VectorStore` seam but deferred — pgvector ships first.
 4. **Remove the legacy knowledge store (decided).** Drop `druids_knowledge.entries` (and `namespaces`/schema), delete the `KnowledgeService` stub and `/api/knowledge` router. Tracked as a **separate cleanup PR** (see below), not part of the Docling work. The live system does not depend on it (`SimpleMCPServer` is the active MCP server and does not use it; `MCPCompliantServer`, which does, is dead code).
 
 ## 10. Next steps
 
-1. Confirm decisions in §9 (especially the Phase B schema generalization).
+1. Fold the chunk/embedding generalization (§4.2) and the `EmbeddingProvider` + `VectorStore` seams (§4.6) into the Phase B implementation plan so the two land coherently — pgvector as the only initial store, embeddings optional.
 2. Thin PoC: `druids-docling` compose service + a single `ingest_url` round-trip that catalogs one `worldtree_document` and its renderings — no chunking/embeddings yet — to validate the container, the storage pattern, and provenance against real sources.
-3. Fold the chunk/embedding generalization into the Phase B implementation plan so the two land coherently.
+3. Land the legacy `druids_knowledge` removal as its own cleanup PR (§9.4).
