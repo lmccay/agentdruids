@@ -55,7 +55,7 @@ Phase B's draft proposed `contribution_embeddings(contribution_id → session_co
 
 - **Provenance** (required for citeable research/curriculum seeding): the document catalog carries `source_uri`, `fetched_at`, `checksum`, `content_format`, `license`.
 - **Earned vs. seeded** reuses Phase B's `curation_decisions` mechanism: seeded documents get `reviewer = 'seed:<source>'` and **bypass the supersession gate** (they are ground truth, not iterative output) while carrying provenance. Session contributions still go through the LLM-checklist gate.
-- **Namespace / access / realm**: documents carry `namespace`, `access_level` (`public|private|restricted`, matching the existing convention), and optional `realm_id` — so domain-specific corpora bind to a realm, which is the substrate for domain fine-tuning (Phase E) and realm-scoped retrieval (Phase C).
+- **Namespace / access / scope**: documents carry `namespace` and `access_level` (`public|private|restricted`, matching the existing convention). Realm/scope association is **many-to-many** with a **`global`** tier for universal truths — a document may serve several realms or be globally available — modeled via `worldtree_item_scopes` (see `realm-grounded-assessment.md` §2.0/§7), not a single `realm_id`. This scoping is the substrate for domain fine-tuning (Phase E) and scoped retrieval (Phase C).
 
 ### 4.4 Proposed tables (DDL sketch)
 
@@ -70,7 +70,10 @@ CREATE TABLE druids_core.worldtree_documents (
   source_format   VARCHAR(32),                   -- pdf, docx, html, epub, ...
   namespace       VARCHAR(500) NOT NULL DEFAULT 'worldtree://public/documents',
   access_level    VARCHAR(20) NOT NULL DEFAULT 'public',
-  realm_id        VARCHAR(255) REFERENCES druids_core.realms(id),
+  -- Realm/scope association is MANY-TO-MANY (a document may serve several realms)
+  -- and supports a 'global' tier for universal truths — modeled via
+  -- worldtree_item_scopes, NOT a single column here. See
+  -- realm-grounded-assessment.md §2.0 / §7.
   checksum        VARCHAR(64),                   -- of the canonical artifact
   fetched_at      TIMESTAMP WITH TIME ZONE,
   license         VARCHAR(128),
