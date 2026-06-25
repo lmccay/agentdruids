@@ -174,6 +174,19 @@ docling-serve is **stateless**: it converts and returns; Druids decides what to 
 - **Phase C (retrieval-augmented coordination):** ingested authoritative docs become retrievable context; one index means a single similarity query spans both system-produced and seeded knowledge.
 - **Phase E (domain fine-tuning):** Docling normalizes a domain corpus into consistent chunks/JSON/DocTags → the training-set front-end. Realm-bound documents scope a domain's corpus.
 
+### 6.1 Deferred: an Arrow/DuckDB transform lane (Phase B/E only)
+
+Postgres is the **system of record + serving** for the catalog, lexical search, and pgvector retrieval — and stays so. A separate, *ephemeral* analytical lane built on **DuckDB + Apache Arrow** was considered for the bulk **transform** workloads (Phase B embedding backfill, Phase E training-corpus assembly), where zero-copy columnar scans into ML tooling are genuinely valuable.
+
+**Decision: deferred, not adopted now.** A second engine is only worth it when *all* of these hold; otherwise stay on Postgres:
+
+1. the workload is analytical/columnar (batch scans, aggregations, transforms) — **not** point/keyword lookups (which Postgres serves directly);
+2. the consumer is **Arrow-native** (zero-copy is only realized in, e.g., a Python embedding/training worker — a Node service marshals across the boundary anyway);
+3. it reads **derived/ephemeral exports** (Parquet/Arrow of the Postgres-of-record data) and is **never** the system of record;
+4. corpus scale actually strains the row store (the ~10⁵-chunk target does not).
+
+The serving/search path (the lexical document surface) fails (1) and (2) outright, and adding an external engine reintroduces a **dual-write consistency cost** (cf. §8). Cheap door-opener: rendering/chunk data is already trivially exportable to Parquet, so this lane can be added later without re-ingesting anything. Revisit as a Phase E (and possibly Phase B-backfill) decision, framed as an Arrow-native worker over Postgres exports.
+
 ## 7. Remote loading, SSRF, provenance
 
 - Native URL ingestion is the curriculum/seeding capability — but an in-network service fetching arbitrary `http_sources` is an **SSRF surface**. Gate ingestible URLs through Druids' existing `resourceAccess.allowedLocations` allowlist (CLAUDE.md §8); do not let agents ingest unbounded URLs.
