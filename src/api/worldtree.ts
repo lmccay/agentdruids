@@ -140,6 +140,60 @@ router.get('/modes', async (_req, res) => {
   }
 });
 
+// Ingested documents (Docling) — list.
+router.get('/documents', async (req, res) => {
+  try {
+    const svc = getWorldTreeQueryService();
+    const result = await svc.listDocuments({
+      sourceUri: asString(req.query['sourceUri']),
+      namespace: asString(req.query['namespace']),
+      since: asString(req.query['since']),
+      limit: asInt(req.query['limit']),
+      offset: asInt(req.query['offset']),
+    });
+    res.json(result);
+  } catch (error) {
+    fail(res, error, 'Failed to list documents');
+  }
+});
+
+// Lexical search over ingested document text.
+router.get('/documents/search', async (req, res) => {
+  try {
+    const text = asString(req.query['text']);
+    if (!text) return res.status(400).json({ error: 'text query parameter is required' });
+    const svc = getWorldTreeQueryService();
+    const result = await svc.searchDocuments(text, { limit: asInt(req.query['limit']), offset: asInt(req.query['offset']) });
+    return res.json(result);
+  } catch (error) {
+    return fail(res, error, 'Failed to search documents');
+  }
+});
+
+// Readable text of a document (for an agent to reason over).
+router.get('/documents/:id/content', async (req, res) => {
+  try {
+    const svc = getWorldTreeQueryService();
+    const doc = await svc.readDocument(req.params.id);
+    if (!doc) return res.status(404).json({ error: 'Document not found' });
+    return res.json(doc);
+  } catch (error) {
+    return fail(res, error, 'Failed to read document');
+  }
+});
+
+// Full catalog record for one document + its renderings.
+router.get('/documents/:id', async (req, res) => {
+  try {
+    const svc = getWorldTreeQueryService();
+    const document = await svc.getDocument(req.params.id);
+    if (!document) return res.status(404).json({ error: 'Document not found' });
+    return res.json({ document });
+  } catch (error) {
+    return fail(res, error, 'Failed to get document');
+  }
+});
+
 // Health rollup.
 router.get('/health', async (_req, res) => {
   try {

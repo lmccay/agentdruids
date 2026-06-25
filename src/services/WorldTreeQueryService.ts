@@ -24,6 +24,7 @@ import { DatabaseService } from './DatabaseService';
 /** Default page sizes (see the doc's "Pagination defaults" open question). */
 export const DEFAULT_SESSION_LIMIT = 50;
 export const DEFAULT_CONTRIBUTION_LIMIT = 100;
+export const DEFAULT_DOCUMENT_LIMIT = 50;
 const MAX_LIMIT = 500;
 
 export interface SessionSummary {
@@ -50,6 +51,26 @@ export interface SessionContribution {
   tokenCount: number | null;
   durationMs: number | null;
   createdAt: Date;
+}
+
+export interface DocumentSummary {
+  id: string;
+  sourceUri: string;
+  title: string | null;
+  sourceFormat: string | null;
+  namespace: string;
+  accessLevel: string;
+  checksum: string | null;
+  fetchedAt: Date | null;
+  createdAt: Date;
+  formats: string[];
+}
+
+export interface DocumentRendering {
+  format: string;
+  contentUri: string;
+  contentSizeBytes: number | null;
+  checksum: string | null;
 }
 
 export interface SessionPublication {
@@ -135,6 +156,33 @@ interface PublicationRow {
   content_size_bytes: string | number | null;
   published_at: Date | null;
   expires_at: Date | null;
+}
+
+interface DocumentRow {
+  id: string;
+  source_uri: string;
+  title: string | null;
+  source_format: string | null;
+  namespace: string;
+  access_level: string;
+  checksum: string | null;
+  fetched_at: Date | null;
+  created_at: Date;
+}
+
+function mapDocumentRow(r: DocumentRow & { formats?: string[] | null }): DocumentSummary {
+  return {
+    id: r.id,
+    sourceUri: r.source_uri,
+    title: r.title,
+    sourceFormat: r.source_format,
+    namespace: r.namespace,
+    accessLevel: r.access_level,
+    checksum: r.checksum,
+    fetchedAt: r.fetched_at,
+    createdAt: r.created_at,
+    formats: r.formats ?? [],
+  };
 }
 
 function clampLimit(limit: number | undefined, fallback: number): number {
@@ -587,6 +635,96 @@ export class WorldTreeQueryService {
       publicationsByMode,
       // Forward-compat (Phase F): zero until session_outcomes exists.
       outcomesAttachedCount: 0,
+    };
+  }
+
+  // ── Ingested documents (Docling) — Layer 1 lexical "talk to" surface ────────
+
+  /** Paginated index of ingested documents (metadata + available rendering formats). */
+  async listDocuments(
+    filters: { sourceUri?: string | undefined; namespace?: string | undefined; since?: string | undefined; limit?: number | undefined; offset?: number | undefined } = {}
+  ): Promise<{ documents: DocumentSummary[]; limit: number; offset: number }> {
+    const limit = clampLimit(filters.limit, DEFAULT_DOCUMENT_LIMIT);
+    const offset = clampOffset(filters.offset);
+    const { rows } = await this.db.query<DocumentRow & { formats: string[] | null }>(
+      `SELECT d.id, d.source_uri, d.title, d.source_format, d.namespace, d.access_level,
+              d.checksum, d.fetched_at, d.created_at,
+              COALESCE(array_agg(r.format) FILTER (WHERE r.format IS NOT NULL), '{}') AS formats
+         FROM druids_core.worldtree_documents d
+         LEFT JOIN druids_core.document_renderings r ON r.document_id = d.id
+        WHERE ($1::text IS NULL OR d.source_uri ILIKE '%' || $1::text || '%')
+          AND ($2::varchar IS NULL OR d.namespace = $2::varchar)
+          AND ($3::timestamptz IS NULL OR d.created_at >= $3::timestamptz)
+        GROUP BY d.id
+        ORDER BY d.created_at DESC
+        LIMIT $4 OFFSET $5`,
+      [filters.sourceUri ?? null, filters.namespace ?? null, filters.since ?? null, limit, offset]
+    );
+    return { documents: rows.map(mapDocumentRow), limit, offset };
+  }
+
+  /** Full catalog record for one document plus its renderings (pointers, no inline text). */
+  async getDocument(id: string): Promise<(DocumentSummary & { renderings: DocumentRendering[] }) | null> {
+    const docRes = await this.db.query<DocumentRow>(
+      `SELECT id, source_uri, title, source_format, namespace, access_level, checksum, fetched_at, created_at
+         FROM druids_core.worldtree_documents WHERE id = $1::uuid`,
+      [id]
+    );
+    const row = docRes.rows[0];
+    if (!row) return null;
+    const rendRes = await this.db.query<{
+      format: string;
+      content_uri: string;
+      content_size_bytes: string | number | null;
+      checksum: string | null;
+    }>(
+      `SELECT format, content_uri, content_size_bytes, checksum
+         FROM druids_core.document_renderings WHERE document_id = $1::uuid ORDER BY format`,
+      [id]
+    );
+    return {
+      ...mapDocumentRow({ ...row, formats: rendRes.rows.map((r) => r.format) }),
+      renderings: rendRes.rows.map((r) => ({
+        format: r.format,
+        contentUri: r.content_uri,
+        contentSizeBytes: r.content_size_bytes == null ? null : Number(r.content_size_bytes),
+        checksum: r.checksum,
+      })),
+    };
+  }
+
+  /** The readable text of a document (the inline markdown), for an agent to reason over. */
+  async readDocument(id: string): Promise<{ id: string; title: string | null; sourceUri: string; contentText: string | null } | null> {
+    const { rows } = await this.db.query<{ id: string; title: string | null; source_uri: string; content_text: string | null }>(
+      `SELECT id, title, source_uri, content_text
+         FROM druids_core.worldtree_documents WHERE id = $1::uuid`,
+      [id]
+    );
+    const row = rows[0];
+    if (!row) return null;
+    return { id: row.id, title: row.title, sourceUri: row.source_uri, contentText: row.content_text };
+  }
+
+  /** Lexical (ILIKE) search over ingested document text; returns matches with a short preview. */
+  async searchDocuments(
+    text: string,
+    pagination: { limit?: number | undefined; offset?: number | undefined } = {}
+  ): Promise<{ documents: Array<DocumentSummary & { preview: string | null }>; limit: number; offset: number }> {
+    const limit = clampLimit(pagination.limit, DEFAULT_DOCUMENT_LIMIT);
+    const offset = clampOffset(pagination.offset);
+    const { rows } = await this.db.query<DocumentRow & { preview: string | null }>(
+      `SELECT id, source_uri, title, source_format, namespace, access_level, checksum, fetched_at, created_at,
+              LEFT(content_text, 240) AS preview
+         FROM druids_core.worldtree_documents
+        WHERE content_text ILIKE '%' || $1::text || '%'
+        ORDER BY created_at DESC
+        LIMIT $2 OFFSET $3`,
+      [text, limit, offset]
+    );
+    return {
+      documents: rows.map((r) => ({ ...mapDocumentRow({ ...r, formats: [] }), preview: r.preview })),
+      limit,
+      offset,
     };
   }
 }

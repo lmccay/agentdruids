@@ -131,6 +131,55 @@ export const WORLDTREE_TOOL_DEFINITIONS = [
       additionalProperties: false,
     },
   },
+  {
+    name: 'list_documents',
+    description: 'List documents ingested into the WorldTree (via Docling), newest first.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        sourceUri: { type: 'string', description: 'Filter by source URI substring' },
+        namespace: { type: 'string', description: 'Filter by namespace' },
+        since: { type: 'string', description: 'ISO-8601 lower bound on created_at' },
+        limit: { type: 'number', description: 'Max documents (default 50)' },
+        offset: { type: 'number', description: 'Pagination offset' },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'get_document',
+    description: 'Get the catalog record and renderings (provenance, formats) for one ingested document.',
+    inputSchema: {
+      type: 'object',
+      properties: { id: { type: 'string', description: 'The document id' } },
+      required: ['id'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'read_document',
+    description: 'Read the readable text (markdown) of an ingested document, to reason over its content.',
+    inputSchema: {
+      type: 'object',
+      properties: { id: { type: 'string', description: 'The document id' } },
+      required: ['id'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'search_documents',
+    description: 'Lexical (substring) search over ingested document text; returns matching documents with a preview.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        text: { type: 'string', description: 'Text to match within document content' },
+        limit: { type: 'number', description: 'Max documents (default 50)' },
+        offset: { type: 'number', description: 'Pagination offset' },
+      },
+      required: ['text'],
+      additionalProperties: false,
+    },
+  },
 ];
 
 export const WORLDTREE_TOOL_NAMES: ReadonlySet<string> = new Set(
@@ -197,6 +246,29 @@ export function createWorldTreeToolHandlers(apiCall: ApiCall): Record<string, Wo
       const { agentId, since, until } = args;
       if (!agentId) throw new Error('agentId is required');
       return apiCall(`/worldtree/agents/${encodeURIComponent(agentId)}/activity${qs({ since, until })}`);
+    },
+
+    list_documents: async (args) => {
+      const { sourceUri, namespace, since, limit, offset } = args;
+      return apiCall(`/worldtree/documents${qs({ sourceUri, namespace, since, limit, offset })}`);
+    },
+
+    get_document: async (args) => {
+      const { id } = args;
+      if (!id) throw new Error('id is required');
+      return apiCall(`/worldtree/documents/${encodeURIComponent(id)}`);
+    },
+
+    read_document: async (args) => {
+      const { id } = args;
+      if (!id) throw new Error('id is required');
+      return apiCall(`/worldtree/documents/${encodeURIComponent(id)}/content`);
+    },
+
+    search_documents: async (args) => {
+      const { text, limit, offset } = args;
+      if (!text) throw new Error('text is required');
+      return apiCall(`/worldtree/documents/search${qs({ text, limit, offset })}`);
     },
   };
 }

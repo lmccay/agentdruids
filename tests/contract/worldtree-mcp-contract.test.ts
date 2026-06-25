@@ -36,9 +36,10 @@ describe('WorldTree MCP contract — tool definitions', () => {
     }
   });
 
-  it('exposes the seven Phase A tools', () => {
+  it('exposes the Phase A session/agent tools and the document tools', () => {
     expect([...WORLDTREE_TOOL_NAMES].sort()).toEqual(
       [
+        // Phase A — sessions / agents
         'aggregate_contributions',
         'agent_activity',
         'compare_sessions',
@@ -46,6 +47,11 @@ describe('WorldTree MCP contract — tool definitions', () => {
         'get_session',
         'list_sessions',
         'search_contributions',
+        // Layer 1 — ingested documents
+        'list_documents',
+        'get_document',
+        'read_document',
+        'search_documents',
       ].sort()
     );
   });
@@ -103,6 +109,33 @@ describe('WorldTree MCP contract — tool handlers build the right REST endpoint
     const { handlers, calls } = captureEndpoints();
     await handlers['agent_activity']!({ agentId: 'agent-1', since: '2026-01-01T00:00:00Z' });
     expect(calls[0]).toBe('/worldtree/agents/agent-1/activity?since=2026-01-01T00%3A00%3A00Z');
+  });
+
+  it('list_documents forwards filters', async () => {
+    const { handlers, calls } = captureEndpoints();
+    await handlers['list_documents']!({ namespace: 'worldtree://public/documents', limit: 5 });
+    expect(calls[0]).toBe('/worldtree/documents?namespace=worldtree%3A%2F%2Fpublic%2Fdocuments&limit=5');
+  });
+
+  it('get_document and read_document encode the id and hit the right endpoints', async () => {
+    const { handlers, calls } = captureEndpoints();
+    await handlers['get_document']!({ id: 'doc/1' });
+    await handlers['read_document']!({ id: 'doc/1' });
+    expect(calls[0]).toBe('/worldtree/documents/doc%2F1');
+    expect(calls[1]).toBe('/worldtree/documents/doc%2F1/content');
+  });
+
+  it('search_documents requires text and targets the search endpoint', async () => {
+    const { handlers, calls } = captureEndpoints();
+    await expect(handlers['search_documents']!({})).rejects.toThrow('text is required');
+    await handlers['search_documents']!({ text: 'docling' });
+    expect(calls[0]).toBe('/worldtree/documents/search?text=docling');
+  });
+
+  it('get_document and read_document reject a missing id', async () => {
+    const { handlers } = captureEndpoints();
+    await expect(handlers['get_document']!({})).rejects.toThrow('id is required');
+    await expect(handlers['read_document']!({})).rejects.toThrow('id is required');
   });
 });
 

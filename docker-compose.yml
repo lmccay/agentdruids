@@ -28,6 +28,8 @@ services:
       - GITHUB_TOKEN=${GITHUB_TOKEN}
       - DATABASE_URL=postgresql://druids_user:druids_pass_dev@druids-postgres:5432/druids
       - REDIS_URL=redis://:druids_redis_dev@druids-redis:6379
+      # Docling document-ingestion service (druids-docling / docling-serve)
+      - DOCLING_SERVICE_URL=${DOCLING_SERVICE_URL:-http://druids-docling:5001}
     volumes:
       - .:/app
       - /app/node_modules
@@ -114,6 +116,31 @@ services:
       timeout: 10s
       retries: 3
       start_period: 20s
+
+  # Docling document-ingestion service (docling-serve, CPU).
+  # Stateless conversion: Druids' DoclingService calls it over HTTP and owns
+  # all persistence. Default in-process (local) engine — no Redis needed.
+  # First start downloads model weights (GB-scale, several minutes).
+  druids-docling:
+    image: quay.io/docling-project/docling-serve
+    container_name: druids-docling
+    ports:
+      - "5001:5001"   # docling-serve REST API
+    environment:
+      - UVICORN_HOST=0.0.0.0
+      - UVICORN_PORT=5001
+      - DOCLING_SERVE_ENABLE_UI=false
+      - DOCLING_DEVICE=cpu
+      - OMP_NUM_THREADS=4
+    networks:
+      - druids-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
 
   # Frontend UI
   druids-frontend:
