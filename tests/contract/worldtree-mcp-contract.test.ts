@@ -52,6 +52,12 @@ describe('WorldTree MCP contract — tool definitions', () => {
         'get_document',
         'read_document',
         'search_documents',
+        // Pipeline — retrieval + ingestion + gaps
+        'search_corpus',
+        'ingest_url',
+        'ingest_directory',
+        'get_ingest_run',
+        'list_knowledge_gaps',
       ].sort()
     );
   });
@@ -136,6 +142,34 @@ describe('WorldTree MCP contract — tool handlers build the right REST endpoint
     const { handlers } = captureEndpoints();
     await expect(handlers['get_document']!({})).rejects.toThrow('id is required');
     await expect(handlers['read_document']!({})).rejects.toThrow('id is required');
+  });
+
+  it('search_corpus targets the chunk search endpoint with realms', async () => {
+    const { handlers, calls } = captureEndpoints();
+    await handlers['search_corpus']!({ text: 'vector db', realms: ['realm-A', 'realm-B'], limit: 3 });
+    expect(calls[0]).toBe('/worldtree/search/chunks?text=vector+db&limit=3&realms=realm-A%2Crealm-B');
+  });
+
+  it('ingest_url posts to the ingest endpoint and requires url', async () => {
+    const { handlers, calls } = captureEndpoints();
+    await expect(handlers['ingest_url']!({})).rejects.toThrow('url is required');
+    await handlers['ingest_url']!({ url: 'https://example.com/a.pdf' });
+    expect(calls[0]).toBe('/ingest/url');
+  });
+
+  it('ingest_directory posts and requires path; get_ingest_run encodes the id', async () => {
+    const { handlers, calls } = captureEndpoints();
+    await expect(handlers['ingest_directory']!({})).rejects.toThrow('path is required');
+    await handlers['ingest_directory']!({ path: 'site' });
+    await handlers['get_ingest_run']!({ id: 'run/1' });
+    expect(calls[0]).toBe('/ingest/directory');
+    expect(calls[1]).toBe('/ingest/runs/run%2F1');
+  });
+
+  it('list_knowledge_gaps targets the gaps endpoint', async () => {
+    const { handlers, calls } = captureEndpoints();
+    await handlers['list_knowledge_gaps']!({ status: 'open' });
+    expect(calls[0]).toBe('/worldtree/knowledge-gaps?status=open');
   });
 });
 
