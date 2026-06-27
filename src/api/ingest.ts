@@ -1,5 +1,6 @@
 import express from 'express';
 import { getDoclingService, type DoclingFormat } from '../services/DoclingService';
+import { getWorldTreeQueryService } from '../services/WorldTreeQueryService';
 
 /**
  * Document ingestion API (thin PoC) — fetch + convert a remote source through
@@ -134,6 +135,18 @@ router.post('/documents/:id/embed', async (req, res) => {
   } catch (error) {
     console.error('Embedding error:', error);
     return res.status(502).json({ error: 'Failed to embed document', details: error instanceof Error ? error.message : String(error) });
+  }
+});
+
+// Resolve a knowledge gap (addressed once ingested, or dismissed).
+router.post('/knowledge-gaps/:id/resolve', async (req, res) => {
+  try {
+    const status = req.body?.status === 'dismissed' ? 'dismissed' : 'addressed';
+    const ok = await getWorldTreeQueryService().resolveKnowledgeGap(req.params.id, status);
+    if (!ok) return res.status(404).json({ error: 'Knowledge gap not found' });
+    return res.json({ id: req.params.id, status });
+  } catch (error) {
+    return res.status(500).json({ error: 'Failed to resolve knowledge gap', details: error instanceof Error ? error.message : String(error) });
   }
 });
 
