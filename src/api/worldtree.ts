@@ -73,6 +73,19 @@ router.get('/search/sessions', async (req, res) => {
   }
 });
 
+// Relevance-ranked retrieval over document chunks (the in-session RAG primitive).
+router.get('/search/chunks', async (req, res) => {
+  try {
+    const text = asString(req.query['text']);
+    if (!text) return res.status(400).json({ error: 'text query parameter is required' });
+    const svc = getWorldTreeQueryService();
+    const chunks = await svc.searchChunks(text, asInt(req.query['limit']));
+    return res.json({ chunks });
+  } catch (error) {
+    return fail(res, error, 'Failed to search chunks');
+  }
+});
+
 // Filtered contribution search.
 router.get('/search/contributions', async (req, res) => {
   try {
