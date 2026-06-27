@@ -4,6 +4,8 @@ import crypto from 'crypto';
 import axios from 'axios';
 import { v4 as uuidv4 } from 'uuid';
 import { DatabaseService } from './DatabaseService';
+import { getWorldTreeQueryService } from './WorldTreeQueryService';
+import { getEmbeddingProvider } from './EmbeddingProvider';
 
 /**
  * DoclingService — document ingestion via the druids-docling (docling-serve)
@@ -384,8 +386,41 @@ export class DoclingService {
     try {
       const n = await this.chunkDocument(documentId);
       console.log(`Chunked document ${documentId}: ${n} chunks`);
+      await this.maybeEmbed(documentId);
     } catch (e) {
       console.warn(`Auto-chunk failed for ${documentId}:`, e instanceof Error ? e.message : e);
+    }
+  }
+
+  /**
+   * Embed a document's chunks via the configured EmbeddingProvider and store
+   * the vectors (PgVectorStore). No-op when no provider is configured
+   * (retrieval stays lexical). Returns the number of chunks embedded.
+   */
+  async embedDocumentChunks(documentId: string): Promise<number> {
+    const provider = getEmbeddingProvider();
+    if (!provider.isEnabled()) return 0;
+    const qs = getWorldTreeQueryService();
+    const chunks = await qs.getChunkRowsForSource('document', documentId);
+    if (chunks.length === 0) return 0;
+    const vectors = await provider.embed(chunks.map((c) => c.text));
+    const items: Array<{ chunkId: string; vector: number[] }> = [];
+    for (let i = 0; i < chunks.length; i++) {
+      const v = vectors[i];
+      const chunk = chunks[i];
+      if (chunk && Array.isArray(v) && v.length > 0) items.push({ chunkId: chunk.id, vector: v });
+    }
+    await qs.storeChunkEmbeddings(items, provider.modelName);
+    return items.length;
+  }
+
+  /** Best-effort embed after chunking: never fails ingest if embedding errors. */
+  private async maybeEmbed(documentId: string): Promise<void> {
+    try {
+      const n = await this.embedDocumentChunks(documentId);
+      if (n > 0) console.log(`Embedded ${n} chunks for document ${documentId}`);
+    } catch (e) {
+      console.warn(`Auto-embed failed for ${documentId}:`, e instanceof Error ? e.message : e);
     }
   }
 

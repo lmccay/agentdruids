@@ -1,4 +1,5 @@
 import { DatabaseService } from './DatabaseService';
+import { getEmbeddingProvider } from './EmbeddingProvider';
 
 /**
  * WorldTreeQueryService — the single owner of every SQL statement that powers
@@ -198,6 +199,28 @@ function mapDocumentRow(r: DocumentRow & { formats?: string[] | null }): Documen
     fetchedAt: r.fetched_at,
     createdAt: r.created_at,
     formats: r.formats ?? [],
+  };
+}
+
+interface ChunkSearchRow {
+  source_id: string;
+  chunk_index: number;
+  text: string;
+  metadata: Record<string, unknown> | null;
+  source_uri: string;
+  title: string | null;
+  rank: number;
+}
+
+function mapChunkSearchRow(r: ChunkSearchRow): ChunkSearchResult {
+  return {
+    documentId: r.source_id,
+    sourceUri: r.source_uri,
+    title: r.title,
+    chunkIndex: r.chunk_index,
+    text: r.text,
+    headings: (r.metadata ?? {})['headings'] ?? null,
+    rank: Number(r.rank),
   };
 }
 
@@ -781,15 +804,26 @@ export class WorldTreeQueryService {
    */
   async searchChunks(query: string, limit?: number): Promise<ChunkSearchResult[]> {
     const lim = clampLimit(limit, 5);
-    const { rows } = await this.db.query<{
-      source_id: string;
-      chunk_index: number;
-      text: string;
-      metadata: Record<string, unknown> | null;
-      source_uri: string;
-      title: string | null;
-      rank: number;
-    }>(
+    // Semantic when an embedding provider is configured; lexical fallback
+    // otherwise (the retriever swaps under the same entry point — the
+    // search_worldtree tool and REST route don't change). See phase-b-embeddings.md.
+    const provider = getEmbeddingProvider();
+    if (provider.isEnabled()) {
+      try {
+        const [vec] = await provider.embed([query]);
+        if (vec && vec.length > 0) {
+          return await this.searchChunksByVector(vec, lim);
+        }
+      } catch (e) {
+        console.warn('Semantic search failed, falling back to lexical:', e instanceof Error ? e.message : e);
+      }
+    }
+    return this.searchChunksLexical(query, lim);
+  }
+
+  /** Lexical (Postgres full-text) chunk retrieval — the fallback / no-provider path. */
+  private async searchChunksLexical(query: string, lim: number): Promise<ChunkSearchResult[]> {
+    const { rows } = await this.db.query<ChunkSearchRow>(
       `SELECT c.source_id, c.chunk_index, c.text, c.metadata,
               d.source_uri, d.title,
               ts_rank(to_tsvector('english', c.text), plainto_tsquery('english', $1)) AS rank
@@ -801,15 +835,51 @@ export class WorldTreeQueryService {
         LIMIT $2`,
       [query, lim]
     );
-    return rows.map((r) => ({
-      documentId: r.source_id,
-      sourceUri: r.source_uri,
-      title: r.title,
-      chunkIndex: r.chunk_index,
-      text: r.text,
-      headings: (r.metadata ?? {})['headings'] ?? null,
-      rank: Number(r.rank),
-    }));
+    return rows.map(mapChunkSearchRow);
+  }
+
+  /** Semantic (pgvector cosine) chunk retrieval. rank = cosine similarity (1 - distance). */
+  async searchChunksByVector(queryVector: number[], limit?: number): Promise<ChunkSearchResult[]> {
+    const lim = clampLimit(limit, 5);
+    const literal = `[${queryVector.join(',')}]`;
+    const { rows } = await this.db.query<ChunkSearchRow>(
+      `SELECT c.source_id, c.chunk_index, c.text, c.metadata,
+              d.source_uri, d.title,
+              1 - (ce.embedding <=> $1::vector) AS rank
+         FROM druids_core.chunk_embeddings ce
+         JOIN druids_core.worldtree_chunks c ON c.id = ce.chunk_id
+         JOIN druids_core.worldtree_documents d ON d.id = c.source_id::uuid
+        WHERE c.source_type = 'document'
+        ORDER BY ce.embedding <=> $1::vector
+        LIMIT $2`,
+      [literal, lim]
+    );
+    return rows.map(mapChunkSearchRow);
+  }
+
+  /** Chunk rows (id + text) for a source, used to compute embeddings. */
+  async getChunkRowsForSource(sourceType: 'document' | 'contribution', sourceId: string): Promise<Array<{ id: string; text: string }>> {
+    const { rows } = await this.db.query<{ id: string; text: string }>(
+      `SELECT id, text FROM druids_core.worldtree_chunks
+        WHERE source_type = $1 AND source_id = $2 ORDER BY chunk_index`,
+      [sourceType, sourceId]
+    );
+    return rows;
+  }
+
+  /** Upsert embeddings for chunks (one per chunk per model). */
+  async storeChunkEmbeddings(items: Array<{ chunkId: string; vector: number[] }>, modelName: string): Promise<void> {
+    if (items.length === 0) return;
+    await this.db.transaction(async (client) => {
+      for (const it of items) {
+        await client.query(
+          `INSERT INTO druids_core.chunk_embeddings (chunk_id, embedding, model_name)
+           VALUES ($1, $2::vector, $3)
+           ON CONFLICT (chunk_id, model_name) DO UPDATE SET embedding = EXCLUDED.embedding`,
+          [it.chunkId, `[${it.vector.join(',')}]`, modelName]
+        );
+      }
+    });
   }
 }
 

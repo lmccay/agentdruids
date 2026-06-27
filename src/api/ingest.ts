@@ -113,11 +113,25 @@ router.get('/runs', async (req, res) => {
 // chunked automatically.
 router.post('/documents/:id/chunk', async (req, res) => {
   try {
-    const chunks = await getDoclingService().chunkDocument(req.params.id);
-    return res.json({ documentId: req.params.id, chunks });
+    const svc = getDoclingService();
+    const chunks = await svc.chunkDocument(req.params.id);
+    const embedded = await svc.embedDocumentChunks(req.params.id); // 0 if no provider
+    return res.json({ documentId: req.params.id, chunks, embedded });
   } catch (error) {
     console.error('Chunking error:', error);
     return res.status(502).json({ error: 'Failed to chunk document', details: error instanceof Error ? error.message : String(error) });
+  }
+});
+
+// (Re)embed a document's existing chunks — backfill, or re-embed after an
+// embedding-model change (no re-chunk). No-op if no provider is configured.
+router.post('/documents/:id/embed', async (req, res) => {
+  try {
+    const embedded = await getDoclingService().embedDocumentChunks(req.params.id);
+    return res.json({ documentId: req.params.id, embedded });
+  } catch (error) {
+    console.error('Embedding error:', error);
+    return res.status(502).json({ error: 'Failed to embed document', details: error instanceof Error ? error.message : String(error) });
   }
 });
 
