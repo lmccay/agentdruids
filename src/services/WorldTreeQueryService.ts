@@ -73,6 +73,12 @@ export interface DocumentRendering {
   checksum: string | null;
 }
 
+export interface WorldTreeChunk {
+  chunkIndex: number;
+  text: string;
+  metadata: Record<string, unknown>;
+}
+
 export interface SessionPublication {
   id: string;
   sessionId: string;
@@ -723,6 +729,35 @@ export class WorldTreeQueryService {
     );
     return {
       documents: rows.map((r) => ({ ...mapDocumentRow({ ...r, formats: [] }), preview: r.preview })),
+      limit,
+      offset,
+    };
+  }
+
+  /** Retrieval chunks for a document (Docling HybridChunker output), ordered. */
+  async getDocumentChunks(
+    documentId: string,
+    pagination: { limit?: number | undefined; offset?: number | undefined } = {}
+  ): Promise<{ chunks: WorldTreeChunk[]; total: number; limit: number; offset: number }> {
+    const limit = clampLimit(pagination.limit, 200);
+    const offset = clampOffset(pagination.offset);
+    const [rowsRes, countRes] = await Promise.all([
+      this.db.query<{ chunk_index: number; text: string; metadata: Record<string, unknown> | null }>(
+        `SELECT chunk_index, text, metadata
+           FROM druids_core.worldtree_chunks
+          WHERE source_type = 'document' AND source_id = $1
+          ORDER BY chunk_index
+          LIMIT $2 OFFSET $3`,
+        [documentId, limit, offset]
+      ),
+      this.db.query<{ count: string }>(
+        `SELECT COUNT(*) AS count FROM druids_core.worldtree_chunks WHERE source_type = 'document' AND source_id = $1`,
+        [documentId]
+      ),
+    ]);
+    return {
+      chunks: rowsRes.rows.map((r) => ({ chunkIndex: r.chunk_index, text: r.text, metadata: r.metadata ?? {} })),
+      total: countRes.rows[0] ? Number(countRes.rows[0].count) : 0,
       limit,
       offset,
     };
