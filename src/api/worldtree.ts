@@ -225,6 +225,21 @@ router.get('/documents/:id', async (req, res) => {
   }
 });
 
+// Knowledge gaps (coverage demand signals) — what the in-scope corpus lacked.
+router.get('/knowledge-gaps', async (req, res) => {
+  try {
+    const svc = getWorldTreeQueryService();
+    const gaps = await svc.getKnowledgeGaps({
+      status: asString(req.query['status']),
+      limit: asInt(req.query['limit']),
+      offset: asInt(req.query['offset']),
+    });
+    res.json({ gaps });
+  } catch (error) {
+    fail(res, error, 'Failed to list knowledge gaps');
+  }
+});
+
 // Health rollup.
 router.get('/health', async (_req, res) => {
   try {

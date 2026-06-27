@@ -2221,7 +2221,7 @@ Your responses and behavior should be appropriate to this realm's context and ch
         return await this.toolFetchUrl(agent, params);
 
       case 'search_worldtree':
-        return await this.toolSearchWorldtree(agent, params);
+        return await this.toolSearchWorldtree(agent, params, sessionId);
 
       default:
         throw new Error(`Unknown built-in tool: ${toolName}`);
@@ -3272,14 +3272,20 @@ Your entire response will be written to a file. Start with the formatted content
    * agent's reasoning (in-session RAG). Semantic/lexical ranking, scoped to the
    * agent's in-scope set: global ∪ the agent's realms (rung #5a).
    */
-  private async toolSearchWorldtree(agent: Agent, params: { query?: string; limit?: number }): Promise<any> {
+  private async toolSearchWorldtree(agent: Agent, params: { query?: string; limit?: number }, sessionId?: string): Promise<any> {
     const query = typeof params.query === 'string' ? params.query.trim() : '';
     if (!query) {
       return { success: false, error: 'query is required' };
     }
     const limit = typeof params.limit === 'number' && params.limit > 0 ? Math.min(params.limit, 20) : 5;
     const realms = collectAgentRealms(agent.realmAccess);
-    const results = await getWorldTreeQueryService().searchChunks(query, limit, { realms });
+    const qs = getWorldTreeQueryService();
+    const results = await qs.searchChunks(query, limit, { realms });
+    // Coverage demand signal (rung #5b): in-scope corpus had nothing → record a gap.
+    if (results.length === 0) {
+      qs.recordKnowledgeGap({ query, realms, agentId: agent.id, sessionId: sessionId ?? null })
+        .catch((e) => console.warn('recordKnowledgeGap failed:', e instanceof Error ? e.message : e));
+    }
     return {
       success: true,
       query,

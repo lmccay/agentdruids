@@ -97,6 +97,18 @@ export interface ScopeFilter {
 
 export type ScopeAssoc = { scopeType: 'global' | 'realm' | 'agent' | 'session'; scopeRef?: string | null };
 
+export interface KnowledgeGap {
+  id: string;
+  query: string;
+  realms: string[];
+  agentId: string | null;
+  sessionId: string | null;
+  hitCount: number;
+  status: string;
+  createdAt: Date;
+  lastSeenAt: Date;
+}
+
 export interface SessionPublication {
   id: string;
   sessionId: string;
@@ -873,6 +885,52 @@ export class WorldTreeQueryService {
       params
     );
     return rows.map(mapChunkSearchRow);
+  }
+
+  // ── Coverage demand signals (rung #5b) ─────────────────────────────────────
+
+  /** Record a coverage gap (in-scope search returned nothing). Deduped on (query, sorted realms). */
+  async recordKnowledgeGap(p: { query: string; realms: string[]; agentId?: string | null; sessionId?: string | null }): Promise<void> {
+    const realms = [...new Set(p.realms)].sort();
+    await this.db.query(
+      `INSERT INTO druids_core.knowledge_gaps (query, realms, agent_id, session_id)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (query, realms) DO UPDATE SET
+         hit_count = druids_core.knowledge_gaps.hit_count + 1,
+         last_seen_at = CURRENT_TIMESTAMP,
+         status = CASE WHEN druids_core.knowledge_gaps.status = 'dismissed' THEN 'dismissed' ELSE 'open' END`,
+      [p.query, realms, p.agentId ?? null, p.sessionId ?? null]
+    );
+  }
+
+  /** List knowledge gaps (demand signals), newest-seen first. */
+  async getKnowledgeGaps(opts: { status?: string | undefined; limit?: number | undefined; offset?: number | undefined } = {}): Promise<KnowledgeGap[]> {
+    const limit = clampLimit(opts.limit, 100);
+    const offset = clampOffset(opts.offset);
+    const { rows } = await this.db.query<{
+      id: string; query: string; realms: string[] | null; agent_id: string | null;
+      session_id: string | null; hit_count: number; status: string; created_at: Date; last_seen_at: Date;
+    }>(
+      `SELECT id, query, realms, agent_id, session_id, hit_count, status, created_at, last_seen_at
+         FROM druids_core.knowledge_gaps
+        WHERE ($1::varchar IS NULL OR status = $1::varchar)
+        ORDER BY last_seen_at DESC
+        LIMIT $2 OFFSET $3`,
+      [opts.status ?? null, limit, offset]
+    );
+    return rows.map((r) => ({
+      id: r.id, query: r.query, realms: r.realms ?? [], agentId: r.agent_id, sessionId: r.session_id,
+      hitCount: r.hit_count, status: r.status, createdAt: r.created_at, lastSeenAt: r.last_seen_at,
+    }));
+  }
+
+  /** Mark a gap addressed or dismissed. */
+  async resolveKnowledgeGap(id: string, status: 'addressed' | 'dismissed'): Promise<boolean> {
+    const { rowCount } = await this.db.query(
+      `UPDATE druids_core.knowledge_gaps SET status = $2 WHERE id = $1::uuid`,
+      [id, status]
+    );
+    return rowCount > 0;
   }
 
   /** Set an item's scopes (replace-semantics). global => scope_ref NULL. */
