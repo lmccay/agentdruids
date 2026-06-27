@@ -30,6 +30,8 @@ services:
       - REDIS_URL=redis://:druids_redis_dev@druids-redis:6379
       # Docling document-ingestion service (druids-docling / docling-serve)
       - DOCLING_SERVICE_URL=${DOCLING_SERVICE_URL:-http://druids-docling:5001}
+      # Staging root for directory ingestion (operator drops mirrors/archives here)
+      - DOCUMENT_STAGING_DIR=${DOCUMENT_STAGING_DIR:-/app/data/staging}
     volumes:
       - .:/app
       - /app/node_modules
@@ -37,6 +39,10 @@ services:
       # Host-bound session publications archive (survives `docker-compose down -v`).
       # Rendered artifacts for `report` / `dataset` / `transcript` modes land here.
       - ~/druids-data/sessions:/app/data/sessions
+      # Document ingestion staging area: operator drops wget mirrors / extracted
+      # archives here, then triggers POST /api/ingest/directory. Defaults to the
+      # druids-data volume; uncomment to stage from a host directory instead:
+      # - ~/druids-data/staging:/app/data/staging:rw
 
       # HOST FILE ACCESS: Uncomment and customize to give agents access to your host machine's files
       # Format: <host-path>:<container-path>:<ro|rw>
