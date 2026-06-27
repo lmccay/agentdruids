@@ -33,6 +33,13 @@ const DOCUMENT_STAGING_DIR = process.env['DOCUMENT_STAGING_DIR'] || '/app/data/s
 const CONVERT_TIMEOUT_MS = Number(process.env['DOCLING_CONVERT_TIMEOUT_MS'] || 300000);
 const INGEST_CONCURRENCY = Math.max(1, Number(process.env['INGEST_CONCURRENCY'] || 3));
 
+// Chunking (rung #2). max_tokens / tokenizer should align with the embedding
+// model when embeddings land (rung #4 / Phase B); the default is Docling's.
+// Re-chunking from stored JSON is cheap, so changing these later is low-cost.
+const CHUNK_MAX_TOKENS = Math.max(1, Number(process.env['CHUNK_MAX_TOKENS'] || 512));
+const CHUNK_TOKENIZER = process.env['CHUNK_TOKENIZER'] || 'sentence-transformers/all-MiniLM-L6-v2';
+const ENABLE_AUTO_CHUNK = (process.env['ENABLE_AUTO_CHUNK'] ?? 'true') !== 'false';
+
 export type DoclingFormat = 'md' | 'json' | 'html' | 'text' | 'doctags';
 
 const DEFAULT_FORMATS: DoclingFormat[] = ['md', 'json'];
@@ -175,7 +182,9 @@ export class DoclingService {
     const namespace = options.namespace ?? 'worldtree://public/documents';
     const accessLevel = options.accessLevel ?? 'public';
     const doc = await this.convertSource({ kind: 'http', url }, toFormats);
-    return this.persistDocument({ sourceUri: url, doc, toFormats, namespace, accessLevel, runId: null });
+    const ingested = await this.persistDocument({ sourceUri: url, doc, toFormats, namespace, accessLevel, runId: null });
+    await this.maybeChunk(ingested.id);
+    return ingested;
   }
 
   /** Convert + catalog a local file (read → base64 → docling-serve file source). */
@@ -192,7 +201,9 @@ export class DoclingService {
       { kind: 'file', base64_string: bytes.toString('base64'), filename: path.basename(absPath) },
       toFormats
     );
-    return this.persistDocument({ sourceUri, doc, toFormats, namespace, accessLevel, runId });
+    const ingested = await this.persistDocument({ sourceUri, doc, toFormats, namespace, accessLevel, runId });
+    await this.maybeChunk(ingested.id);
+    return ingested;
   }
 
   /** POST a single source to docling-serve and return the `document` object. */
@@ -299,6 +310,83 @@ export class DoclingService {
       fetchedAt: fetchedAt.toISOString(),
       renderings,
     };
+  }
+
+  // ── Chunking (rung #2) ──────────────────────────────────────────────────────
+
+  /**
+   * Chunk a document's stored DoclingDocument JSON via docling-serve's
+   * HybridChunker (json_docling input → no re-conversion of the original) and
+   * replace its rows in worldtree_chunks. Returns the chunk count.
+   */
+  async chunkDocument(documentId: string): Promise<number> {
+    const jsonPath = path.join(DOCUMENTS_BASE_DIR, documentId, 'content.json');
+    let jsonBytes: Buffer;
+    try {
+      jsonBytes = await fs.readFile(jsonPath);
+    } catch {
+      throw new Error(`No JSON rendering on disk to chunk for document ${documentId} (re-ingest with 'json' format)`);
+    }
+
+    const resp = await axios.post(
+      `${DOCLING_SERVICE_URL}/v1/chunk/hybrid/source`,
+      {
+        sources: [{ kind: 'file', base64_string: jsonBytes.toString('base64'), filename: 'content.json' }],
+        convert_options: { from_formats: ['json_docling'] },
+        chunking_options: {
+          max_tokens: CHUNK_MAX_TOKENS,
+          merge_peers: true,
+          include_raw_text: true,
+          tokenizer: CHUNK_TOKENIZER,
+        },
+      },
+      { timeout: CONVERT_TIMEOUT_MS, headers: { 'Content-Type': 'application/json' } }
+    );
+
+    const data = resp.data ?? {};
+    if (data.status && data.status !== 'success' && data.status !== 'partial_success') {
+      const errs = Array.isArray(data.errors) ? data.errors.join('; ') : 'unknown error';
+      throw new Error(`docling-serve chunking failed (${data.status}): ${errs}`);
+    }
+    const chunks: any[] = Array.isArray(data.chunks) ? data.chunks : [];
+
+    await this.db.transaction(async (client) => {
+      await client.query(
+        `DELETE FROM druids_core.worldtree_chunks WHERE source_type = 'document' AND source_id = $1`,
+        [documentId]
+      );
+      for (let i = 0; i < chunks.length; i++) {
+        const c = chunks[i] ?? {};
+        const text = typeof c.text === 'string' ? c.text : '';
+        if (!text) continue;
+        const chunkIndex = Number.isInteger(c.chunk_index) ? c.chunk_index : i;
+        const metadata = {
+          headings: c.headings ?? null,
+          captions: c.captions ?? null,
+          pageNumbers: c.page_numbers ?? null,
+          numTokens: c.num_tokens ?? null,
+          rawText: typeof c.raw_text === 'string' ? c.raw_text : null,
+        };
+        await client.query(
+          `INSERT INTO druids_core.worldtree_chunks (source_type, source_id, chunk_index, text, metadata)
+           VALUES ('document', $1, $2, $3, $4::jsonb)`,
+          [documentId, chunkIndex, text, JSON.stringify(metadata)]
+        );
+      }
+    });
+
+    return chunks.length;
+  }
+
+  /** Best-effort chunk after ingest: never fails the ingest if chunking errors. */
+  private async maybeChunk(documentId: string): Promise<void> {
+    if (!ENABLE_AUTO_CHUNK) return;
+    try {
+      const n = await this.chunkDocument(documentId);
+      console.log(`Chunked document ${documentId}: ${n} chunks`);
+    } catch (e) {
+      console.warn(`Auto-chunk failed for ${documentId}:`, e instanceof Error ? e.message : e);
+    }
   }
 
   // ── Directory (batch) ingestion ─────────────────────────────────────────────

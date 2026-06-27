@@ -108,6 +108,19 @@ router.get('/runs', async (req, res) => {
   }
 });
 
+// (Re)chunk a document on demand — backfill for documents ingested before
+// chunking, or to re-chunk after changing chunk settings. New ingests are
+// chunked automatically.
+router.post('/documents/:id/chunk', async (req, res) => {
+  try {
+    const chunks = await getDoclingService().chunkDocument(req.params.id);
+    return res.json({ documentId: req.params.id, chunks });
+  } catch (error) {
+    console.error('Chunking error:', error);
+    return res.status(502).json({ error: 'Failed to chunk document', details: error instanceof Error ? error.message : String(error) });
+  }
+});
+
 // Reading/listing/searching ingested documents lives on the read-only
 // discovery surface (/api/worldtree); this router is write-only (ingest).
 

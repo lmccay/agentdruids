@@ -182,6 +182,20 @@ router.get('/documents/:id/content', async (req, res) => {
   }
 });
 
+// Retrieval chunks for a document (Docling HybridChunker output).
+router.get('/documents/:id/chunks', async (req, res) => {
+  try {
+    const svc = getWorldTreeQueryService();
+    const result = await svc.getDocumentChunks(req.params.id, {
+      limit: asInt(req.query['limit']),
+      offset: asInt(req.query['offset']),
+    });
+    return res.json(result);
+  } catch (error) {
+    return fail(res, error, 'Failed to get document chunks');
+  }
+});
+
 // Full catalog record for one document + its renderings.
 router.get('/documents/:id', async (req, res) => {
   try {
