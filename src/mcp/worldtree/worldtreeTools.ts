@@ -180,6 +180,70 @@ export const WORLDTREE_TOOL_DEFINITIONS = [
       additionalProperties: false,
     },
   },
+  {
+    name: 'search_corpus',
+    description: 'Relevance-ranked retrieval over document chunks (semantic when embeddings are configured, lexical otherwise) — the in-session RAG primitive. Use to find passages relevant to a question. Optional realms scope to global ∪ those realms.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        text: { type: 'string', description: 'Natural-language query' },
+        limit: { type: 'number', description: 'Max chunks (default 5)' },
+        realms: { type: 'array', items: { type: 'string' }, description: 'Restrict to global ∪ these realms (omit for all)' },
+      },
+      required: ['text'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'ingest_url',
+    description: 'Ingest a document from a URL via Docling (convert, catalog, chunk, embed). Optional scopeRealms target realms (default global).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        url: { type: 'string', description: 'http(s) URL to ingest' },
+        toFormats: { type: 'array', items: { type: 'string' }, description: "Output formats (default ['md','json'])" },
+        scopeRealms: { type: 'array', items: { type: 'string' }, description: 'Realms to scope the document to (default global)' },
+      },
+      required: ['url'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'ingest_directory',
+    description: 'Batch-ingest a staged directory (under the allowed staging root). Returns a run id to poll with get_ingest_run.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Directory under the staging root' },
+        includeExtensions: { type: 'array', items: { type: 'string' }, description: 'Restrict to these file extensions (e.g. ["html","pdf"])' },
+        scopeRealms: { type: 'array', items: { type: 'string' }, description: 'Realms to scope the documents to (default global)' },
+      },
+      required: ['path'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'get_ingest_run',
+    description: 'Get the status and per-file results of a directory ingest run.',
+    inputSchema: {
+      type: 'object',
+      properties: { id: { type: 'string', description: 'The ingest run id' } },
+      required: ['id'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'list_knowledge_gaps',
+    description: 'List coverage demand signals — queries the in-scope corpus could not answer (candidates to ingest).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        status: { type: 'string', description: 'Filter by status: open | addressed | dismissed' },
+        limit: { type: 'number', description: 'Max gaps (default 100)' },
+      },
+      additionalProperties: false,
+    },
+  },
 ];
 
 export const WORLDTREE_TOOL_NAMES: ReadonlySet<string> = new Set(
@@ -269,6 +333,36 @@ export function createWorldTreeToolHandlers(apiCall: ApiCall): Record<string, Wo
       const { text, limit, offset } = args;
       if (!text) throw new Error('text is required');
       return apiCall(`/worldtree/documents/search${qs({ text, limit, offset })}`);
+    },
+
+    search_corpus: async (args) => {
+      const { text, limit, realms } = args;
+      if (!text) throw new Error('text is required');
+      const realmsCsv = Array.isArray(realms) && realms.length ? realms.join(',') : undefined;
+      return apiCall(`/worldtree/search/chunks${qs({ text, limit, realms: realmsCsv })}`);
+    },
+
+    ingest_url: async (args) => {
+      const { url, toFormats, scopeRealms } = args;
+      if (!url) throw new Error('url is required');
+      return apiCall('/ingest/url', 'POST', { url, toFormats, scopeRealms });
+    },
+
+    ingest_directory: async (args) => {
+      const { path, includeExtensions, scopeRealms } = args;
+      if (!path) throw new Error('path is required');
+      return apiCall('/ingest/directory', 'POST', { path, includeExtensions, scopeRealms });
+    },
+
+    get_ingest_run: async (args) => {
+      const { id } = args;
+      if (!id) throw new Error('id is required');
+      return apiCall(`/ingest/runs/${encodeURIComponent(id)}`);
+    },
+
+    list_knowledge_gaps: async (args) => {
+      const { status, limit } = args;
+      return apiCall(`/worldtree/knowledge-gaps${qs({ status, limit })}`);
     },
   };
 }
