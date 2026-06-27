@@ -25,6 +25,17 @@ import { getSessionPublicationService } from './SessionPublicationService';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 
+/** An agent's in-scope realm set for retrieval (global is always added by the query). */
+function collectAgentRealms(ra?: RealmAccess): string[] {
+  const realms = new Set<string>();
+  if (ra?.boundRealmId) realms.add(ra.boundRealmId);
+  if (ra?.currentRealmId) realms.add(ra.currentRealmId);
+  for (const ar of ra?.accessibleRealms ?? []) {
+    if (ar?.realmId) realms.add(ar.realmId);
+  }
+  return Array.from(realms);
+}
+
 /**
  * Agent execution request for LLM operations
  */
@@ -2210,7 +2221,7 @@ Your responses and behavior should be appropriate to this realm's context and ch
         return await this.toolFetchUrl(agent, params);
 
       case 'search_worldtree':
-        return await this.toolSearchWorldtree(params);
+        return await this.toolSearchWorldtree(agent, params);
 
       default:
         throw new Error(`Unknown built-in tool: ${toolName}`);
@@ -3258,19 +3269,21 @@ Your entire response will be written to a file. Start with the formatted content
    */
   /**
    * search_worldtree — retrieve passages from the ingested corpus to ground the
-   * agent's reasoning (in-session RAG, rung #3). Lexical (full-text) ranking;
-   * scope is all document chunks for now (realm scoping is rung #5).
+   * agent's reasoning (in-session RAG). Semantic/lexical ranking, scoped to the
+   * agent's in-scope set: global ∪ the agent's realms (rung #5a).
    */
-  private async toolSearchWorldtree(params: { query?: string; limit?: number }): Promise<any> {
+  private async toolSearchWorldtree(agent: Agent, params: { query?: string; limit?: number }): Promise<any> {
     const query = typeof params.query === 'string' ? params.query.trim() : '';
     if (!query) {
       return { success: false, error: 'query is required' };
     }
     const limit = typeof params.limit === 'number' && params.limit > 0 ? Math.min(params.limit, 20) : 5;
-    const results = await getWorldTreeQueryService().searchChunks(query, limit);
+    const realms = collectAgentRealms(agent.realmAccess);
+    const results = await getWorldTreeQueryService().searchChunks(query, limit, { realms });
     return {
       success: true,
       query,
+      scopeRealms: realms,
       count: results.length,
       passages: results.map((r) => ({
         source: r.sourceUri,

@@ -37,6 +37,7 @@ router.post('/url', async (req, res) => {
     if (accessLevel === 'public' || accessLevel === 'private' || accessLevel === 'restricted') {
       opts.accessLevel = accessLevel;
     }
+    if (Array.isArray(req.body?.scopeRealms)) opts.scopeRealms = req.body.scopeRealms.map((r: unknown) => String(r));
 
     const document = await getDoclingService().ingestUrl(url, opts);
     return res.status(201).json({ document });
@@ -74,6 +75,7 @@ router.post('/directory', async (req, res) => {
     if (accessLevel === 'public' || accessLevel === 'private' || accessLevel === 'restricted') opts.accessLevel = accessLevel;
     if (Array.isArray(includeExtensions)) opts.includeExtensions = includeExtensions.map((e: unknown) => String(e));
     if (typeof triggeredBy === 'string') opts.triggeredBy = triggeredBy;
+    if (Array.isArray(req.body?.scopeRealms)) opts.scopeRealms = req.body.scopeRealms.map((r: unknown) => String(r));
 
     const run = await getDoclingService().startDirectoryIngest(stagingPath, opts);
     return res.status(202).json(run); // 202 Accepted — processing in background
