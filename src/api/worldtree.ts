@@ -74,12 +74,16 @@ router.get('/search/sessions', async (req, res) => {
 });
 
 // Relevance-ranked retrieval over document chunks (the in-session RAG primitive).
+// Optional `realms` (comma-separated) scopes results to global ∪ those realms;
+// omitted = unscoped (all). In-session agents scope by their own realms.
 router.get('/search/chunks', async (req, res) => {
   try {
     const text = asString(req.query['text']);
     if (!text) return res.status(400).json({ error: 'text query parameter is required' });
+    const realmsParam = asString(req.query['realms']);
+    const scope = realmsParam ? { realms: realmsParam.split(',').map((s) => s.trim()).filter(Boolean) } : undefined;
     const svc = getWorldTreeQueryService();
-    const chunks = await svc.searchChunks(text, asInt(req.query['limit']));
+    const chunks = await svc.searchChunks(text, asInt(req.query['limit']), scope);
     return res.json({ chunks });
   } catch (error) {
     return fail(res, error, 'Failed to search chunks');

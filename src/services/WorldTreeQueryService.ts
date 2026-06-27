@@ -90,6 +90,13 @@ export interface ChunkSearchResult {
   rank: number;
 }
 
+/** Realm scope for retrieval: in-scope = global ∪ these realms. Omit for no filter. */
+export interface ScopeFilter {
+  realms: string[];
+}
+
+export type ScopeAssoc = { scopeType: 'global' | 'realm' | 'agent' | 'session'; scopeRef?: string | null };
+
 export interface SessionPublication {
   id: string;
   sessionId: string;
@@ -211,6 +218,13 @@ interface ChunkSearchRow {
   title: string | null;
   rank: number;
 }
+
+// EXISTS clause restricting a document to the in-scope set (global ∪ realms).
+const SCOPE_EXISTS = (realmsParam: string): string =>
+  `EXISTS (SELECT 1 FROM druids_core.worldtree_item_scopes s
+            WHERE s.item_type = 'document' AND s.item_id = d.id::text
+              AND (s.scope_type = 'global'
+                   OR (s.scope_type = 'realm' AND s.scope_ref = ANY(${realmsParam}::text[]))))`;
 
 function mapChunkSearchRow(r: ChunkSearchRow): ChunkSearchResult {
   return {
@@ -802,7 +816,7 @@ export class WorldTreeQueryService {
    * document chunks for now; realm scoping is rung #5. (On-the-fly tsvector —
    * an FTS GIN index is a perf follow-up.)
    */
-  async searchChunks(query: string, limit?: number): Promise<ChunkSearchResult[]> {
+  async searchChunks(query: string, limit?: number, scope?: ScopeFilter): Promise<ChunkSearchResult[]> {
     const lim = clampLimit(limit, 5);
     // Semantic when an embedding provider is configured; lexical fallback
     // otherwise (the retriever swaps under the same entry point — the
@@ -812,17 +826,19 @@ export class WorldTreeQueryService {
       try {
         const [vec] = await provider.embed([query]);
         if (vec && vec.length > 0) {
-          return await this.searchChunksByVector(vec, lim);
+          return await this.searchChunksByVector(vec, lim, scope);
         }
       } catch (e) {
         console.warn('Semantic search failed, falling back to lexical:', e instanceof Error ? e.message : e);
       }
     }
-    return this.searchChunksLexical(query, lim);
+    return this.searchChunksLexical(query, lim, scope);
   }
 
   /** Lexical (Postgres full-text) chunk retrieval — the fallback / no-provider path. */
-  private async searchChunksLexical(query: string, lim: number): Promise<ChunkSearchResult[]> {
+  private async searchChunksLexical(query: string, lim: number, scope?: ScopeFilter): Promise<ChunkSearchResult[]> {
+    const scopeClause = scope ? ` AND ${SCOPE_EXISTS('$3')}` : '';
+    const params: unknown[] = scope ? [query, lim, scope.realms] : [query, lim];
     const { rows } = await this.db.query<ChunkSearchRow>(
       `SELECT c.source_id, c.chunk_index, c.text, c.metadata,
               d.source_uri, d.title,
@@ -830,18 +846,20 @@ export class WorldTreeQueryService {
          FROM druids_core.worldtree_chunks c
          JOIN druids_core.worldtree_documents d ON d.id = c.source_id::uuid
         WHERE c.source_type = 'document'
-          AND to_tsvector('english', c.text) @@ plainto_tsquery('english', $1)
+          AND to_tsvector('english', c.text) @@ plainto_tsquery('english', $1)${scopeClause}
         ORDER BY rank DESC, c.chunk_index
         LIMIT $2`,
-      [query, lim]
+      params
     );
     return rows.map(mapChunkSearchRow);
   }
 
   /** Semantic (pgvector cosine) chunk retrieval. rank = cosine similarity (1 - distance). */
-  async searchChunksByVector(queryVector: number[], limit?: number): Promise<ChunkSearchResult[]> {
+  async searchChunksByVector(queryVector: number[], limit?: number, scope?: ScopeFilter): Promise<ChunkSearchResult[]> {
     const lim = clampLimit(limit, 5);
     const literal = `[${queryVector.join(',')}]`;
+    const scopeClause = scope ? ` AND ${SCOPE_EXISTS('$3')}` : '';
+    const params: unknown[] = scope ? [literal, lim, scope.realms] : [literal, lim];
     const { rows } = await this.db.query<ChunkSearchRow>(
       `SELECT c.source_id, c.chunk_index, c.text, c.metadata,
               d.source_uri, d.title,
@@ -849,12 +867,29 @@ export class WorldTreeQueryService {
          FROM druids_core.chunk_embeddings ce
          JOIN druids_core.worldtree_chunks c ON c.id = ce.chunk_id
          JOIN druids_core.worldtree_documents d ON d.id = c.source_id::uuid
-        WHERE c.source_type = 'document'
+        WHERE c.source_type = 'document'${scopeClause}
         ORDER BY ce.embedding <=> $1::vector
         LIMIT $2`,
-      [literal, lim]
+      params
     );
     return rows.map(mapChunkSearchRow);
+  }
+
+  /** Set an item's scopes (replace-semantics). global => scope_ref NULL. */
+  async setItemScopes(itemType: 'document' | 'contribution' | 'chunk', itemId: string, scopes: ScopeAssoc[]): Promise<void> {
+    await this.db.transaction(async (client) => {
+      await client.query(
+        `DELETE FROM druids_core.worldtree_item_scopes WHERE item_type = $1 AND item_id = $2`,
+        [itemType, itemId]
+      );
+      for (const s of scopes) {
+        await client.query(
+          `INSERT INTO druids_core.worldtree_item_scopes (item_type, item_id, scope_type, scope_ref)
+           VALUES ($1, $2, $3, $4)`,
+          [itemType, itemId, s.scopeType, s.scopeType === 'global' ? null : (s.scopeRef ?? null)]
+        );
+      }
+    });
   }
 
   /** Chunk rows (id + text) for a source, used to compute embeddings. */

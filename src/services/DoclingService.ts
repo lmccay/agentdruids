@@ -41,6 +41,9 @@ const INGEST_CONCURRENCY = Math.max(1, Number(process.env['INGEST_CONCURRENCY'] 
 const CHUNK_MAX_TOKENS = Math.max(1, Number(process.env['CHUNK_MAX_TOKENS'] || 512));
 const CHUNK_TOKENIZER = process.env['CHUNK_TOKENIZER'] || 'sentence-transformers/all-MiniLM-L6-v2';
 const ENABLE_AUTO_CHUNK = (process.env['ENABLE_AUTO_CHUNK'] ?? 'true') !== 'false';
+// Embedding requests are batched — providers cap inputs per call (TEI's default
+// max-client-batch-size is 32). Keep conservative to avoid 413s.
+const EMBED_BATCH_SIZE = Math.max(1, Number(process.env['EMBED_BATCH_SIZE'] || 32));
 
 export type DoclingFormat = 'md' | 'json' | 'html' | 'text' | 'doctags';
 
@@ -73,6 +76,8 @@ export interface IngestOptions {
   toFormats?: DoclingFormat[];
   namespace?: string;
   accessLevel?: 'public' | 'private' | 'restricted';
+  /** Realms to scope the document to. Empty/omitted => global (see realm-grounded-assessment.md). */
+  scopeRealms?: string[];
 }
 
 export interface IngestDirectoryOptions extends IngestOptions {
@@ -184,7 +189,7 @@ export class DoclingService {
     const namespace = options.namespace ?? 'worldtree://public/documents';
     const accessLevel = options.accessLevel ?? 'public';
     const doc = await this.convertSource({ kind: 'http', url }, toFormats);
-    const ingested = await this.persistDocument({ sourceUri: url, doc, toFormats, namespace, accessLevel, runId: null });
+    const ingested = await this.persistDocument({ sourceUri: url, doc, toFormats, namespace, accessLevel, runId: null, scopeRealms: options.scopeRealms });
     await this.maybeChunk(ingested.id);
     return ingested;
   }
@@ -196,14 +201,15 @@ export class DoclingService {
     toFormats: DoclingFormat[],
     namespace: string,
     accessLevel: string,
-    runId: string | null
+    runId: string | null,
+    scopeRealms?: string[]
   ): Promise<IngestedDocument> {
     const bytes = await fs.readFile(absPath);
     const doc = await this.convertSource(
       { kind: 'file', base64_string: bytes.toString('base64'), filename: path.basename(absPath) },
       toFormats
     );
-    const ingested = await this.persistDocument({ sourceUri, doc, toFormats, namespace, accessLevel, runId });
+    const ingested = await this.persistDocument({ sourceUri, doc, toFormats, namespace, accessLevel, runId, scopeRealms });
     await this.maybeChunk(ingested.id);
     return ingested;
   }
@@ -231,8 +237,9 @@ export class DoclingService {
     namespace: string;
     accessLevel: string;
     runId: string | null;
+    scopeRealms?: string[] | undefined;
   }): Promise<IngestedDocument> {
-    const { sourceUri, doc, toFormats, namespace, accessLevel, runId } = params;
+    const { sourceUri, doc, toFormats, namespace, accessLevel, runId, scopeRealms } = params;
 
     const jsonObj =
       doc[FORMAT_FIELD.json] && typeof doc[FORMAT_FIELD.json] === 'object'
@@ -300,6 +307,13 @@ export class DoclingService {
         );
       }
     });
+
+    // Scope association (replace-semantics): realm-scoped if requested, else global.
+    const scopes =
+      scopeRealms && scopeRealms.length > 0
+        ? scopeRealms.map((r) => ({ scopeType: 'realm' as const, scopeRef: r }))
+        : [{ scopeType: 'global' as const }];
+    await getWorldTreeQueryService().setItemScopes('document', id, scopes);
 
     return {
       id,
@@ -403,7 +417,12 @@ export class DoclingService {
     const qs = getWorldTreeQueryService();
     const chunks = await qs.getChunkRowsForSource('document', documentId);
     if (chunks.length === 0) return 0;
-    const vectors = await provider.embed(chunks.map((c) => c.text));
+    // Batch — providers cap inputs per request (e.g. TEI ~32).
+    const vectors: number[][] = [];
+    for (let i = 0; i < chunks.length; i += EMBED_BATCH_SIZE) {
+      const batch = chunks.slice(i, i + EMBED_BATCH_SIZE).map((c) => c.text);
+      vectors.push(...(await provider.embed(batch)));
+    }
     const items: Array<{ chunkId: string; vector: number[] }> = [];
     for (let i = 0; i < chunks.length; i++) {
       const v = vectors[i];
@@ -452,8 +471,10 @@ export class DoclingService {
 
     const runId = await this.createRun(absInput, namespace, files.length, options.triggeredBy ?? null);
 
+    const scopeRealms = options.scopeRealms;
+
     // Background processing — do not await; the run row carries progress/result.
-    void this.processDirectory(runId, files, toFormats, namespace, accessLevel).catch(async (err) => {
+    void this.processDirectory(runId, files, toFormats, namespace, accessLevel, scopeRealms).catch(async (err) => {
       console.error('Directory ingest run failed:', err);
       await this.failRun(runId, err instanceof Error ? err.message : String(err)).catch(() => {});
     });
@@ -466,7 +487,8 @@ export class DoclingService {
     files: string[],
     toFormats: DoclingFormat[],
     namespace: string,
-    accessLevel: string
+    accessLevel: string,
+    scopeRealms?: string[]
   ): Promise<void> {
     // Dedupe by source_uri within the batch (a mirror shouldn't, but be safe).
     const seen = new Set<string>();
@@ -484,7 +506,7 @@ export class DoclingService {
     await mapPool(work, INGEST_CONCURRENCY, async (file) => {
       const sourceUri = this.sourceUriForFile(file);
       try {
-        const docu = await this.ingestFile(file, sourceUri, toFormats, namespace, accessLevel, runId);
+        const docu = await this.ingestFile(file, sourceUri, toFormats, namespace, accessLevel, runId, scopeRealms);
         ingested++;
         results.push({ file: sourceUri, status: 'ingested', documentId: docu.id });
       } catch (e) {
