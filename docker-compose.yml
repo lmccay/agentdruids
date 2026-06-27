@@ -32,6 +32,12 @@ services:
       - DOCLING_SERVICE_URL=${DOCLING_SERVICE_URL:-http://druids-docling:5001}
       # Staging root for directory ingestion (operator drops mirrors/archives here)
       - DOCUMENT_STAGING_DIR=${DOCUMENT_STAGING_DIR:-/app/data/staging}
+      # Embeddings: bundled-local by default (TEI container); pluggable per deployment.
+      # Set EMBEDDING_PROVIDER=ollama|openai|none to repoint or disable (lexical fallback).
+      - EMBEDDING_PROVIDER=${EMBEDDING_PROVIDER:-tei}
+      - EMBEDDING_SERVICE_URL=${EMBEDDING_SERVICE_URL:-http://druids-embeddings:80}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-sentence-transformers/all-MiniLM-L6-v2}
+      - EMBEDDING_DIM=${EMBEDDING_DIM:-384}
     volumes:
       - .:/app
       - /app/node_modules
@@ -148,6 +154,31 @@ services:
       retries: 3
       start_period: 120s
 
+  # Default embedding model — bundled local (Text-Embeddings-Inference).
+  # Generation models default to remote; embeddings default to local so the
+  # corpus is indexed on-box without egress. Pluggable: set EMBEDDING_PROVIDER on
+  # druids-app to point at a local Ollama or a remote API and ignore this service.
+  # all-MiniLM-L6-v2 (384-dim) aligns with the chunker's default tokenizer.
+  druids-embeddings:
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.6
+    # TEI CPU images are amd64-only; pin the platform so it runs everywhere —
+    # natively on x86, and via Rosetta x86 emulation on Apple Silicon (fine for
+    # a 22M model). One bundled default image across architectures.
+    platform: linux/amd64
+    container_name: druids-embeddings
+    command: ["--model-id", "sentence-transformers/all-MiniLM-L6-v2", "--port", "80"]
+    ports:
+      - "8090:80"   # TEI API (host 8090 -> container 80)
+    networks:
+      - druids-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
   # Frontend UI
   druids-frontend:
     build:
@@ -192,7 +223,10 @@ services:
 
   # PostgreSQL for persistent storage
   druids-postgres:
-    image: postgres:15-alpine
+    # pgvector-enabled Postgres 15 (adds the `vector` extension for embeddings).
+    # Same major version as before, and the DB uses C collation, so the existing
+    # data volume mounts cleanly (alpine/musl -> debian/glibc is collation-safe).
+    image: pgvector/pgvector:pg15
     container_name: druids-postgres
     ports:
       - "5432:5432"
