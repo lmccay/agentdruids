@@ -13,6 +13,7 @@ import { OllamaClient, ChatRequest, createDefaultOllamaConfig } from './OllamaCl
 import { OpenAIClient, OpenAIChatRequest, createDefaultOpenAIConfig } from './OpenAIClient';
 import { PolicyEngine } from './PolicyEngine';
 import { RepositoryManager } from './RepositoryManager';
+import { getWorldTreeQueryService } from './WorldTreeQueryService';
 import { RealmService } from './RealmService';
 import { generateUUID, AgentIdMapper } from '../utils/uuidUtils';
 import { MCPConfigLoader } from './mcp/MCPConfigLoader';
@@ -1387,11 +1388,23 @@ Available tools:
       );
     }
 
+    // WorldTree corpus retrieval (in-session RAG; opt-in via mcpTools: 'search_worldtree').
+    // Handled as a built-in tool (executeBuiltInTool), not routed to the MCP gateway.
+    if (agent.mcpTools?.includes('search_worldtree')) {
+      tools.push({
+        name: 'search_worldtree',
+        description: 'Search the WorldTree knowledge corpus (ingested documents) for passages relevant to a query. Returns the most relevant text chunks with their source and section headings. Use this to ground answers in the ingested corpus.',
+        parameters: { query: 'natural-language search query', limit: 'optional max passages to return (default 5)' }
+      });
+    }
+
     // MCP tools via gateway (based on agent's mcpTools configuration)
     if (agent.mcpTools && agent.mcpTools.length > 0) {
       // Add tools from agent's MCP configuration
       // These will be validated and routed through the MCP Gateway
       for (const mcpTool of agent.mcpTools) {
+        // search_worldtree is a built-in (handled above), not a gateway tool.
+        if (mcpTool === 'search_worldtree') continue;
         // Check if this is a wildcard pattern (e.g., "github:*")
         if (mcpTool.endsWith(':*')) {
           // Extract server prefix and discover actual tools
@@ -2105,7 +2118,8 @@ Your responses and behavior should be appropriate to this realm's context and ch
     const builtInTools = [
       'message_agent', 'delegate_task', 'assign_simple_task', 'get_step_content',      // Communication tools (all agents)
       'travel_to_realm', 'get_current_realm', 'get_realm_elementals',  // Realm tools (druids only)
-      'read_file', 'write_file', 'list_files', 'process_files_batch', 'fetch_url'  // Resource access tools (opt-in via resourceAccess)
+      'read_file', 'write_file', 'list_files', 'process_files_batch', 'fetch_url',  // Resource access tools (opt-in via resourceAccess)
+      'search_worldtree'  // WorldTree corpus retrieval (opt-in via mcpTools)
     ];
 
     // Check if this is a built-in tool
@@ -2131,8 +2145,14 @@ Your responses and behavior should be appropriate to this realm's context and ch
     // Define resource access tools (all agents with explicit opt-in)
     const resourceAccessTools = ['read_file', 'write_file', 'list_files', 'process_files_batch', 'fetch_url'];
 
+    // WorldTree corpus retrieval (read-only; opt-in via mcpTools).
+    const worldtreeTools = ['search_worldtree'];
+
     // Check access permissions based on agent type and tool category
-    if (communicationTools.includes(toolName)) {
+    if (worldtreeTools.includes(toolName)) {
+      // Read-only corpus retrieval — exposure is already opt-in (mcpTools).
+      console.log(`✅ Agent ${agent.id} (${agent.type}) accessing WorldTree retrieval tool: ${toolName}`);
+    } else if (communicationTools.includes(toolName)) {
       // All agents can use inter-agent communication tools
       console.log(`✅ Agent ${agent.id} (${agent.type}) accessing communication tool: ${toolName}`);
     } else if (realmTools.includes(toolName)) {
@@ -2188,6 +2208,9 @@ Your responses and behavior should be appropriate to this realm's context and ch
 
       case 'fetch_url':
         return await this.toolFetchUrl(agent, params);
+
+      case 'search_worldtree':
+        return await this.toolSearchWorldtree(params);
 
       default:
         throw new Error(`Unknown built-in tool: ${toolName}`);
@@ -3233,6 +3256,32 @@ Your entire response will be written to a file. Start with the formatted content
   /**
    * Tool: Fetch content from an HTTP/HTTPS URL
    */
+  /**
+   * search_worldtree — retrieve passages from the ingested corpus to ground the
+   * agent's reasoning (in-session RAG, rung #3). Lexical (full-text) ranking;
+   * scope is all document chunks for now (realm scoping is rung #5).
+   */
+  private async toolSearchWorldtree(params: { query?: string; limit?: number }): Promise<any> {
+    const query = typeof params.query === 'string' ? params.query.trim() : '';
+    if (!query) {
+      return { success: false, error: 'query is required' };
+    }
+    const limit = typeof params.limit === 'number' && params.limit > 0 ? Math.min(params.limit, 20) : 5;
+    const results = await getWorldTreeQueryService().searchChunks(query, limit);
+    return {
+      success: true,
+      query,
+      count: results.length,
+      passages: results.map((r) => ({
+        source: r.sourceUri,
+        title: r.title,
+        headings: r.headings,
+        documentId: r.documentId,
+        text: r.text,
+      })),
+    };
+  }
+
   private async toolFetchUrl(agent: Agent, params: { url?: string; urls?: string[]; method?: string; body?: any; headers?: Record<string, string> }): Promise<any> {
     const { ResourceAccessValidator } = await import('./ResourceAccessValidator');
 

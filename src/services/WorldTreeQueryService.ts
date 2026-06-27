@@ -79,6 +79,16 @@ export interface WorldTreeChunk {
   metadata: Record<string, unknown>;
 }
 
+export interface ChunkSearchResult {
+  documentId: string;
+  sourceUri: string;
+  title: string | null;
+  chunkIndex: number;
+  text: string;
+  headings: unknown;
+  rank: number;
+}
+
 export interface SessionPublication {
   id: string;
   sessionId: string;
@@ -761,6 +771,45 @@ export class WorldTreeQueryService {
       limit,
       offset,
     };
+  }
+
+  /**
+   * Relevance-ranked lexical search over document chunks (Postgres full-text).
+   * The retrieval primitive behind in-session RAG (rung #3). Scope is all
+   * document chunks for now; realm scoping is rung #5. (On-the-fly tsvector —
+   * an FTS GIN index is a perf follow-up.)
+   */
+  async searchChunks(query: string, limit?: number): Promise<ChunkSearchResult[]> {
+    const lim = clampLimit(limit, 5);
+    const { rows } = await this.db.query<{
+      source_id: string;
+      chunk_index: number;
+      text: string;
+      metadata: Record<string, unknown> | null;
+      source_uri: string;
+      title: string | null;
+      rank: number;
+    }>(
+      `SELECT c.source_id, c.chunk_index, c.text, c.metadata,
+              d.source_uri, d.title,
+              ts_rank(to_tsvector('english', c.text), plainto_tsquery('english', $1)) AS rank
+         FROM druids_core.worldtree_chunks c
+         JOIN druids_core.worldtree_documents d ON d.id = c.source_id::uuid
+        WHERE c.source_type = 'document'
+          AND to_tsvector('english', c.text) @@ plainto_tsquery('english', $1)
+        ORDER BY rank DESC, c.chunk_index
+        LIMIT $2`,
+      [query, lim]
+    );
+    return rows.map((r) => ({
+      documentId: r.source_id,
+      sourceUri: r.source_uri,
+      title: r.title,
+      chunkIndex: r.chunk_index,
+      text: r.text,
+      headings: (r.metadata ?? {})['headings'] ?? null,
+      rank: Number(r.rank),
+    }));
   }
 }
 
