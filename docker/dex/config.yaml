@@ -1,0 +1,45 @@
+# Dex configuration — bundled DEV-ONLY OIDC provider for Druids.
+#
+# This stands up a real OIDC Authorization Code + PKCE flow for local
+# development so the identity layer (docs/identity-and-access-control.md) can be
+# exercised without an external IdP. Production points OIDC_ISSUER at a real
+# provider (Google, enterprise, KnoxIDF) and this container is not deployed.
+#
+# Issuer note: the issuer URL must be identical to what the browser uses to
+# reach Dex AND what appears in the ID token `iss`. The browser reaches Dex at
+# localhost:5556; the Druids backend reaches the token/keys endpoints over the
+# Docker network. We keep the issuer as the browser-facing localhost URL and let
+# the backend override only the back-channel base (see OIDC_INTERNAL_ISSUER).
+issuer: http://localhost:5556/dex
+
+storage:
+  type: memory
+
+web:
+  http: 0.0.0.0:5556
+
+# Allow the PKCE public-client flow and skip the approval screen in dev.
+oauth2:
+  skipApprovalScreen: true
+
+staticClients:
+  - id: druids
+    name: Druids
+    secret: druids-dev-secret
+    redirectURIs:
+      - http://localhost:3000/auth/callback
+
+# Static dev users (password connector). Both use dev password "druids".
+enablePasswordDB: true
+staticPasswords:
+  # admin@druids.dev — matches the default ADMIN_OIDC_SUBJECT (by email) in dev,
+  # so the first login as this user is granted the admin role.
+  - email: admin@druids.dev
+    hash: "$2a$10$zGr1AdJo3ipbSUttg4l/lOahbpk5cF4rImgwVp9mkHgvUi26qPCVa"
+    username: admin
+    userID: "08a8684b-db88-4b73-90a9-3cd1661f5466"
+  # user@druids.dev — a plain (non-admin) dev principal.
+  - email: user@druids.dev
+    hash: "$2a$10$zGr1AdJo3ipbSUttg4l/lOahbpk5cF4rImgwVp9mkHgvUi26qPCVa"
+    username: user
+    userID: "41331323-6f44-45e6-b3b9-2c4b60c02be5"

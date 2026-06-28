@@ -38,6 +38,21 @@ services:
       - EMBEDDING_SERVICE_URL=${EMBEDDING_SERVICE_URL:-http://druids-embeddings:80}
       - EMBEDDING_MODEL=${EMBEDDING_MODEL:-sentence-transformers/all-MiniLM-L6-v2}
       - EMBEDDING_DIM=${EMBEDDING_DIM:-384}
+      # Identity / OIDC (docs/identity-and-access-control.md). Pluggable issuer:
+      # dev uses the bundled Dex container; prod points these at any OIDC
+      # provider (Google, enterprise, KnoxIDF). OIDC_INTERNAL_ISSUER lets the
+      # backend reach the IdP over the Docker network while the browser-facing
+      # issuer stays localhost (dev only; unset in prod).
+      - OIDC_ISSUER=${OIDC_ISSUER:-http://localhost:5556/dex}
+      - OIDC_INTERNAL_ISSUER=${OIDC_INTERNAL_ISSUER:-http://druids-dex:5556/dex}
+      - OIDC_CLIENT_ID=${OIDC_CLIENT_ID:-druids}
+      - OIDC_CLIENT_SECRET=${OIDC_CLIENT_SECRET:-druids-dev-secret}
+      - OIDC_REDIRECT_URI=${OIDC_REDIRECT_URI:-http://localhost:3000/auth/callback}
+      # First-admin break-glass: first login whose OIDC subject/email matches is admin.
+      - ADMIN_OIDC_SUBJECT=${ADMIN_OIDC_SUBJECT:-admin@druids.dev}
+      # Session signing + interim service-to-service token.
+      - SESSION_SECRET=${SESSION_SECRET:-druids-dev-session-secret}
+      - INTERNAL_SERVICE_TOKEN=${INTERNAL_SERVICE_TOKEN:-druids-dev-internal-token}
     volumes:
       - .:/app
       - /app/node_modules
@@ -76,6 +91,7 @@ services:
     depends_on:
       - druids-redis
       - druids-postgres
+      - druids-dex
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
@@ -220,6 +236,21 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+
+  # Dex — bundled DEV-ONLY OIDC provider (docs/identity-and-access-control.md).
+  # Provides a real Authorization Code + PKCE flow for local development. In
+  # production this is not deployed; OIDC_ISSUER points at a real provider.
+  druids-dex:
+    image: dexidp/dex:latest
+    container_name: druids-dex
+    command: ["dex", "serve", "/etc/dex/config.yaml"]
+    ports:
+      - "5556:5556"
+    volumes:
+      - ./docker/dex/config.yaml:/etc/dex/config.yaml:ro
+    networks:
+      - druids-network
+    restart: unless-stopped
 
   # PostgreSQL for persistent storage
   druids-postgres:

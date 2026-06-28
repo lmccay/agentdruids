@@ -1,4 +1,4 @@
-import express, { Express, Request, Response } from 'express';
+import express, { Express, Request, Response, RequestHandler } from 'express';
 import cors from 'cors';
 
 // Import API routes
@@ -26,6 +26,11 @@ import { requestLogger } from './middleware/requestLogger';
 import { healthCheck } from './middleware/healthCheck';
 import { errorHandler } from './middleware/errorHandler';
 
+// Identity / auth (docs/identity-and-access-control.md)
+import { buildSessionMiddleware } from './auth/session';
+import { resolvePrincipal } from './auth/middleware';
+import authRouter from './auth/routes';
+
 /**
  * Main Express application for the Druids multi-agent system
  */
@@ -33,9 +38,18 @@ export class DruidApp {
   public app: Express;
   private server: any;
   private mcpServer?: SimpleMCPServer;
+  // Session middleware is built asynchronously (Redis store). A lazy wrapper is
+  // registered before the routers; the real middleware is guaranteed ready in
+  // start() before the server begins serving.
+  private sessionMw: RequestHandler = (_req, _res, next) => next();
+  private sessionReady: Promise<RequestHandler>;
 
   constructor() {
     this.app = express();
+    this.sessionReady = buildSessionMiddleware();
+    this.sessionReady
+      .then((mw) => { this.sessionMw = mw; })
+      .catch((err) => console.error('❌ Failed to build session middleware:', err));
     this.configureServices();
     this.configureMiddleware();
     this.configureRoutes();
@@ -85,6 +99,11 @@ export class DruidApp {
     this.app.use(express.json({ limit: '10mb' }));
     this.app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
+    // Session + identity resolution (must precede routers). resolvePrincipal
+    // attaches req.principal without rejecting — the gates come in later slices.
+    this.app.use((req, res, next) => this.sessionMw(req, res, next));
+    this.app.use(resolvePrincipal);
+
     // Request logging
     this.app.use(requestLogger);
 
@@ -96,6 +115,9 @@ export class DruidApp {
    * Configure API routes
    */
   private configureRoutes(): void {
+    // OIDC login flow for the human console (docs/identity-and-access-control.md)
+    this.app.use('/auth', authRouter);
+
     // Register all API routes under /api prefix
     // IMPORTANT: Mount specific routes before general ones to avoid conflicts
     this.app.use('/api', agentBindingsRouter); // Mount before agents router to handle /agents/:id/bindings
@@ -162,6 +184,9 @@ export class DruidApp {
    * Start the server
    */
   public async start(port: number = 3000): Promise<void> {
+    // Ensure the real (Redis-backed) session middleware is in place before
+    // serving, so the lazy wrapper never falls through to a no-op for a request.
+    this.sessionMw = await this.sessionReady;
     return new Promise((resolve, reject) => {
       try {
         this.server = this.app.listen(port, () => {
