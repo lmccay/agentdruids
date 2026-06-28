@@ -302,6 +302,58 @@ export const authApi = {
   },
 };
 
+// Identity administration (admin-only; docs/identity-and-access-control.md).
+// Manage which druids users and groups may assume.
+export interface UserSummary {
+  id: string;
+  email: string | null;
+  displayName: string | null;
+  status: string;
+  roles: string[];
+  lastLoginAt: string | null;
+}
+
+export interface GroupSummary {
+  groupKey: string;
+  displayName: string | null;
+}
+
+export interface AssumableDruidGrant {
+  druidId: string;
+  grantedAt: string;
+}
+
+export const identityApi = {
+  async listUsers(): Promise<UserSummary[]> {
+    const { data } = await api.get('/users');
+    return data.users;
+  },
+  async listGroups(): Promise<GroupSummary[]> {
+    const { data } = await api.get('/groups');
+    return data.groups;
+  },
+  async listUserDruids(userId: string): Promise<AssumableDruidGrant[]> {
+    const { data } = await api.get(`/users/${userId}/assumable-druids`);
+    return data.assumableDruids;
+  },
+  async grantUserDruid(userId: string, druidId: string): Promise<void> {
+    await api.post(`/users/${userId}/assumable-druids`, { druidId });
+  },
+  async revokeUserDruid(userId: string, druidId: string): Promise<void> {
+    await api.delete(`/users/${userId}/assumable-druids/${encodeURIComponent(druidId)}`);
+  },
+  async listGroupDruids(groupKey: string): Promise<AssumableDruidGrant[]> {
+    const { data } = await api.get(`/groups/${encodeURIComponent(groupKey)}/assumable-druids`);
+    return data.assumableDruids;
+  },
+  async grantGroupDruid(groupKey: string, druidId: string): Promise<void> {
+    await api.post(`/groups/${encodeURIComponent(groupKey)}/assumable-druids`, { druidId });
+  },
+  async revokeGroupDruid(groupKey: string, druidId: string): Promise<void> {
+    await api.delete(`/groups/${encodeURIComponent(groupKey)}/assumable-druids/${encodeURIComponent(druidId)}`);
+  },
+};
+
 // API Services using direct REST endpoints
 export const agentApi = {
   // List all agents
