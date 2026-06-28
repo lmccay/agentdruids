@@ -125,6 +125,44 @@ export class IdentityService {
       grantedBy: r['granted_by'] ?? null,
     }));
   }
+
+  /** Whether a user may assume a specific druid (the data-plane assume-gate check). */
+  async isDruidAssumable(userId: UserId, druidId: AgentId): Promise<boolean> {
+    const result = await this.db.query(
+      `SELECT 1 FROM druids_core.user_assumable_druids
+       WHERE user_id = $1 AND druid_id = $2 LIMIT 1`,
+      [userId, druidId]
+    );
+    return result.rows.length > 0;
+  }
+
+  /** Grant a user the ability to assume a druid (admin/control-plane action). */
+  async grantAssumableDruid(userId: UserId, druidId: AgentId, grantedBy?: UserId): Promise<void> {
+    await this.db.query(
+      `INSERT INTO druids_core.user_assumable_druids (user_id, druid_id, granted_by)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (user_id, druid_id) DO NOTHING`,
+      [userId, druidId, grantedBy ?? null]
+    );
+  }
+
+  /** Revoke a user's ability to assume a druid. Returns false if no grant existed. */
+  async revokeAssumableDruid(userId: UserId, druidId: AgentId): Promise<boolean> {
+    const result = await this.db.query(
+      `DELETE FROM druids_core.user_assumable_druids WHERE user_id = $1 AND druid_id = $2`,
+      [userId, druidId]
+    );
+    return (result.rowCount ?? 0) > 0;
+  }
+
+  /** List users with their roles (admin console / grant management). */
+  async listUsers(): Promise<User[]> {
+    const result = await this.db.query(
+      `SELECT id FROM druids_core.users ORDER BY created_at`
+    );
+    const users = await Promise.all(result.rows.map((r) => this.getUserById(r['id'] as UserId)));
+    return users.filter((u): u is User => u !== null);
+  }
 }
 
 export const identityService = new IdentityService();
