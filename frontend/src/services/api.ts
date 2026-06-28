@@ -496,6 +496,65 @@ export const contentApi = {
   }
 };
 
+// WorldTree library — ingested documents, semantic corpus search, knowledge gaps
+export interface WorldtreeDocument {
+  id: string;
+  sourceUri: string;
+  title: string | null;
+  sourceFormat: string | null;
+  namespace: string;
+  accessLevel: string;
+  checksum: string | null;
+  fetchedAt: string | null;
+  createdAt: string;
+  formats: string[];
+}
+
+export interface ChunkResult {
+  documentId: string;
+  sourceUri: string;
+  title: string | null;
+  chunkIndex: number;
+  text: string;
+  headings: unknown;
+  rank: number;
+}
+
+export interface KnowledgeGap {
+  id: string;
+  query: string;
+  realms: string[];
+  hitCount: number;
+  status: string;
+  createdAt: string;
+  lastSeenAt: string;
+}
+
+export const worldtreeApi = {
+  async listDocuments(params: { sourceUri?: string; namespace?: string; limit?: number; offset?: number } = {}): Promise<{ data: { documents: WorldtreeDocument[]; limit: number; offset: number } }> {
+    const response = await api.get('/worldtree/documents', { params });
+    return { data: response.data };
+  },
+  async getDocument(id: string): Promise<{ data: WorldtreeDocument & { renderings: any[] } }> {
+    const response = await api.get(`/worldtree/documents/${id}`);
+    return { data: response.data.document };
+  },
+  async readDocument(id: string): Promise<{ data: { id: string; title: string | null; sourceUri: string; contentText: string | null } }> {
+    const response = await api.get(`/worldtree/documents/${id}/content`);
+    return { data: response.data };
+  },
+  async searchCorpus(text: string, realms?: string[]): Promise<{ data: { chunks: ChunkResult[] } }> {
+    const params: Record<string, string> = { text };
+    if (realms && realms.length) params.realms = realms.join(',');
+    const response = await api.get('/worldtree/search/chunks', { params });
+    return { data: response.data };
+  },
+  async listKnowledgeGaps(status?: string): Promise<{ data: { gaps: KnowledgeGap[] } }> {
+    const response = await api.get('/worldtree/knowledge-gaps', { params: status ? { status } : {} });
+    return { data: response.data };
+  },
+};
+
 export const systemApi = {
   async getSystemStats(): Promise<{ data: any }> {
     const response = await api.get('/system/stats');

@@ -10,7 +10,8 @@ import {
   FileText,
   Home,
   Menu,
-  X
+  X,
+  Library
 } from 'lucide-react';
 
 // Import page components
@@ -21,6 +22,7 @@ import ModernCoordinationManagement from './pages/ModernCoordinationManagement';
 import ContentBrowser from './pages/ContentBrowser';
 import SystemSettings from './pages/SystemSettings';
 import ModelManagement from './pages/ModelManagement';
+import WorldTreeLibrary from './pages/WorldTreeLibrary';
 
 interface NavItem {
   name: string;
@@ -36,6 +38,7 @@ const navigation: NavItem[] = [
   { name: 'Realms', href: '/realms', icon: Network, description: 'Federated realm management' },
   { name: 'Coordination', href: '/coordination', icon: Activity, description: 'Multi-agent coordination sessions' },
   { name: 'Content', href: '/content', icon: FileText, description: 'Browse and search published content' },
+  { name: 'Library', href: '/library', icon: Library, description: 'Browse and search the ingested knowledge corpus' },
   { name: 'Settings', href: '/settings', icon: Settings, description: 'System configuration' },
 ];
 
@@ -179,6 +182,7 @@ function App() {
                 <Route path="/realms" element={<RealmManagement />} />
                 <Route path="/coordination" element={<ModernCoordinationManagement />} />
                 <Route path="/content" element={<ContentBrowser />} />
+                <Route path="/library" element={<WorldTreeLibrary />} />
                 <Route path="/settings" element={<SystemSettings />} />
               </Routes>
             </div>
