@@ -2260,7 +2260,7 @@ Your responses and behavior should be appropriate to this realm's context and ch
         return await this.toolGetCurrentRealm(agent.id);
       
       case 'get_realm_elementals':
-        return await this.toolGetRealmElementals(params);
+        return await this.toolGetRealmElementals(agent, params);
 
       case 'read_file':
         return await this.toolReadFile(agent, params);
@@ -2762,10 +2762,29 @@ Please use your available tools to execute this task now and provide your comple
   /**
    * Tool: Get elemental agents in a specific realm
    */
-  private async toolGetRealmElementals(params: { realm_id: string }): Promise<any> {
+  /** Whether an agent may operate in / discover a given realm (mirrors travel access). */
+  private agentCanAccessRealm(agent: Agent, realmId: string): boolean {
+    const ra = agent.realmAccess;
+    if (!ra) return false;
+    if (ra.boundRealmId === realmId || ra.currentRealmId === realmId) return true;
+    return (ra.accessibleRealms ?? []).some(
+      (r: any) => (typeof r === 'string' ? r : r.realmId) === realmId
+    );
+  }
+
+  private async toolGetRealmElementals(callingAgent: Agent, params: { realm_id: string }): Promise<any> {
+    // Realm discovery is scoped: a caller may only enumerate elementals in a
+    // realm it can access (prevents cross-realm enumeration of agents the
+    // caller could never reach).
+    if (!this.agentCanAccessRealm(callingAgent, params.realm_id)) {
+      throw new Error(
+        `Agent ${callingAgent.id} does not have access to realm ${params.realm_id} and cannot list its elementals`
+      );
+    }
+
     // Get full agent data to access realmAccess information
-    const allAgents = Array.from(this.agents.values()).filter(agent => 
-      agent.type === 'elemental' && 
+    const allAgents = Array.from(this.agents.values()).filter(agent =>
+      agent.type === 'elemental' &&
       agent.status === 'active' &&
       agent.realmAccess?.boundRealmId === params.realm_id
     );
