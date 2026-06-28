@@ -88,6 +88,10 @@ export interface ChunkSearchResult {
   text: string;
   headings: unknown;
   rank: number;
+  // Provenance (for citations / deterministic references)
+  sourceFormat: string | null;
+  fetchedAt: Date | null;
+  checksum: string | null;
 }
 
 /** Realm scope for retrieval: in-scope = global ∪ these realms. Omit for no filter. */
@@ -229,6 +233,9 @@ interface ChunkSearchRow {
   source_uri: string;
   title: string | null;
   rank: number;
+  source_format: string | null;
+  fetched_at: Date | null;
+  checksum: string | null;
 }
 
 // EXISTS clause restricting a document to the in-scope set (global ∪ realms).
@@ -247,6 +254,9 @@ function mapChunkSearchRow(r: ChunkSearchRow): ChunkSearchResult {
     text: r.text,
     headings: (r.metadata ?? {})['headings'] ?? null,
     rank: Number(r.rank),
+    sourceFormat: r.source_format,
+    fetchedAt: r.fetched_at,
+    checksum: r.checksum,
   };
 }
 
@@ -853,7 +863,7 @@ export class WorldTreeQueryService {
     const params: unknown[] = scope ? [query, lim, scope.realms] : [query, lim];
     const { rows } = await this.db.query<ChunkSearchRow>(
       `SELECT c.source_id, c.chunk_index, c.text, c.metadata,
-              d.source_uri, d.title,
+              d.source_uri, d.title, d.source_format, d.fetched_at, d.checksum,
               ts_rank(to_tsvector('english', c.text), plainto_tsquery('english', $1)) AS rank
          FROM druids_core.worldtree_chunks c
          JOIN druids_core.worldtree_documents d ON d.id = c.source_id::uuid
@@ -874,7 +884,7 @@ export class WorldTreeQueryService {
     const params: unknown[] = scope ? [literal, lim, scope.realms] : [literal, lim];
     const { rows } = await this.db.query<ChunkSearchRow>(
       `SELECT c.source_id, c.chunk_index, c.text, c.metadata,
-              d.source_uri, d.title,
+              d.source_uri, d.title, d.source_format, d.fetched_at, d.checksum,
               1 - (ce.embedding <=> $1::vector) AS rank
          FROM druids_core.chunk_embeddings ce
          JOIN druids_core.worldtree_chunks c ON c.id = ce.chunk_id

@@ -58,6 +58,15 @@ interface AgentExecutionRequest {
 /**
  * Agent execution response from LLM operations
  */
+interface WorldTreeReference {
+  documentId: string;
+  source: string;
+  title: string | null;
+  sourceFormat: string | null;
+  fetchedAt: string | null;
+  checksum: string | null;
+}
+
 interface AgentExecutionResponse {
   response: string;
   usage?: {
@@ -67,6 +76,9 @@ interface AgentExecutionResponse {
   };
   executionTime: number;
   toolCalls?: AgentToolCall[];
+  // Deterministic provenance: the WorldTree sources actually retrieved via
+  // search_worldtree during this execution (not what the model chose to cite).
+  references?: WorldTreeReference[];
   metadata?: {
     agenticLoop?: {
       enabled: boolean;
@@ -74,6 +86,41 @@ interface AgentExecutionResponse {
       maxIterations: number;
     };
   };
+}
+
+/** Harvest deduped WorldTree references from this run's search_worldtree tool calls. */
+function harvestWorldTreeReferences(toolCalls: AgentToolCall[]): WorldTreeReference[] {
+  const byId = new Map<string, WorldTreeReference>();
+  for (const tc of toolCalls) {
+    if (tc.tool !== 'search_worldtree') continue;
+    const passages = tc.result?.passages;
+    if (!Array.isArray(passages)) continue;
+    for (const p of passages) {
+      const id = p?.documentId;
+      if (!id || byId.has(id)) continue;
+      byId.set(id, {
+        documentId: id,
+        source: p.source ?? '',
+        title: p.title ?? null,
+        sourceFormat: p.sourceFormat ?? null,
+        fetchedAt: p.fetchedAt ? String(p.fetchedAt) : null,
+        checksum: p.checksum ?? null,
+      });
+    }
+  }
+  return Array.from(byId.values());
+}
+
+/** Append a deterministic, citable References section reflecting what was retrieved. */
+function appendReferencesSection(text: string, refs: WorldTreeReference[]): string {
+  if (refs.length === 0) return text;
+  const lines = refs.map((r, i) => {
+    const label = r.title || r.source || r.documentId;
+    const fetched = r.fetchedAt ? new Date(r.fetchedAt).toISOString().slice(0, 10) : 'unknown date';
+    const sum = r.checksum ? r.checksum.slice(0, 12) : 'n/a';
+    return `${i + 1}. ${label} — ${r.source} (WorldTree doc ${r.documentId.slice(0, 8)}, ${r.sourceFormat || 'doc'}, ingested ${fetched}, sha256:${sum})`;
+  });
+  return `${text}\n\n## References\n\n_Grounded in the WorldTree corpus (auto-generated from retrieved sources):_\n${lines.join('\n')}`;
 }
 
 /**
@@ -1112,11 +1159,18 @@ export class AgentService {
         finalResponse = messages[messages.length - 1]?.content || 'Max iterations reached';
       }
 
+      // Deterministic references: harvest what was actually retrieved from the
+      // WorldTree (not what the model chose to cite) and append a References
+      // section. Provable grounding, independent of the model's citation behavior.
+      const references = harvestWorldTreeReferences(allToolCalls);
+      finalResponse = appendReferencesSection(finalResponse, references);
+
       return {
         response: finalResponse,
         usage: totalUsage,
         executionTime: Date.now() - startTime,
         toolCalls: allToolCalls,
+        ...(references.length > 0 && { references }),
         metadata: {
           agenticLoop: {
             enabled: true,
@@ -3300,6 +3354,9 @@ Your entire response will be written to a file. Start with the formatted content
         headings: r.headings,
         documentId: r.documentId,
         text: r.text,
+        sourceFormat: r.sourceFormat,
+        fetchedAt: r.fetchedAt,
+        checksum: r.checksum,
       })),
     };
   }
