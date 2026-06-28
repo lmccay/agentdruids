@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { realmService } from '../services/SharedServices';
+import { requireAdmin } from '../auth/authorize';
 
 const router = Router();
 
@@ -41,7 +42,7 @@ router.get('/:realmId', async (req: Request, res: Response) => {
 });
 
 // POST /realms - Create new realm
-router.post('/', async (req: Request, res: Response) => {
+router.post('/', requireAdmin, async (req: Request, res: Response) => {
   try {
     const realm = await realmService.createRealm(req.body);
     res.status(201).json(realm);
@@ -52,7 +53,7 @@ router.post('/', async (req: Request, res: Response) => {
 });
 
 // PUT /realms/:realmId - Update realm
-router.put('/:realmId', async (req: Request, res: Response) => {
+router.put('/:realmId', requireAdmin, async (req: Request, res: Response) => {
   try {
     const { realmId } = req.params;
     const updates = req.body;
@@ -78,7 +79,7 @@ router.put('/:realmId', async (req: Request, res: Response) => {
 });
 
 // DELETE /realms/:realmId - Delete realm
-router.delete('/:realmId', async (req: Request, res: Response) => {
+router.delete('/:realmId', requireAdmin, async (req: Request, res: Response) => {
   try {
     const { realmId } = req.params;
     
@@ -126,7 +127,7 @@ router.get('/:realmId/agents', async (req: Request, res: Response) => {
 });
 
 // POST /realms/:realmId/agents - Add agent to realm
-router.post('/:realmId/agents', async (req: Request, res: Response) => {
+router.post('/:realmId/agents', requireAdmin, async (req: Request, res: Response) => {
   try {
     const { realmId } = req.params;
     const { agentId, permissions = ['read', 'execute'] } = req.body;
@@ -160,7 +161,7 @@ router.post('/:realmId/agents', async (req: Request, res: Response) => {
 });
 
 // DELETE /realms/:realmId/agents/:agentId - Remove agent from realm
-router.delete('/:realmId/agents/:agentId', async (req: Request, res: Response) => {
+router.delete('/:realmId/agents/:agentId', requireAdmin, async (req: Request, res: Response) => {
   try {
     const { realmId, agentId } = req.params;
     
@@ -279,7 +280,7 @@ router.get('/:realmId/mcp-servers', async (req: Request, res: Response) => {
  * PUT /realms/:realmId/mcp-servers
  * Replace MCP servers for a realm (replaces entire list)
  */
-router.put('/:realmId/mcp-servers', async (req: Request, res: Response) => {
+router.put('/:realmId/mcp-servers', requireAdmin, async (req: Request, res: Response) => {
   try {
     const { realmId } = req.params;
     const { serverIds } = req.body;
@@ -315,7 +316,7 @@ router.put('/:realmId/mcp-servers', async (req: Request, res: Response) => {
  * POST /realms/:realmId/mcp-servers
  * Add a single MCP server to a realm
  */
-router.post('/:realmId/mcp-servers', async (req: Request, res: Response) => {
+router.post('/:realmId/mcp-servers', requireAdmin, async (req: Request, res: Response) => {
   try {
     const { realmId } = req.params;
     const { serverId } = req.body;
@@ -351,7 +352,7 @@ router.post('/:realmId/mcp-servers', async (req: Request, res: Response) => {
  * DELETE /realms/:realmId/mcp-servers/:serverId
  * Remove an MCP server from a realm
  */
-router.delete('/:realmId/mcp-servers/:serverId', async (req: Request, res: Response) => {
+router.delete('/:realmId/mcp-servers/:serverId', requireAdmin, async (req: Request, res: Response) => {
   try {
     const { realmId, serverId } = req.params;
 

@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { AgentId } from '../models/Types';
+import { requireAdmin } from '../auth/authorize';
 
 const router = Router();
 
@@ -209,7 +210,7 @@ function validatePermissions(toolId: string, requestedPermissions: string[]): st
  * POST /tools/access
  * Request tool access
  */
-router.post('/tools/access', async (req: Request, res: Response) => {
+router.post('/tools/access', requireAdmin, async (req: Request, res: Response) => {
   try {
     const {
       agentId,
@@ -467,7 +468,7 @@ router.get('/tools/access/:accessToken', async (req: Request, res: Response) => 
  * PUT /tools/access/:accessToken/revoke
  * Revoke tool access
  */
-router.put('/tools/access/:accessToken/revoke', async (req: Request, res: Response) => {
+router.put('/tools/access/:accessToken/revoke', requireAdmin, async (req: Request, res: Response) => {
   try {
     const { accessToken } = req.params;
     const { reason } = req.body;
@@ -617,7 +618,7 @@ router.post('/tools/access/:accessToken/usage', async (req: Request, res: Respon
  * DELETE /tools/access/:accessToken
  * Delete tool access record
  */
-router.delete('/tools/access/:accessToken', async (req: Request, res: Response) => {
+router.delete('/tools/access/:accessToken', requireAdmin, async (req: Request, res: Response) => {
   try {
     const { accessToken } = req.params;
 

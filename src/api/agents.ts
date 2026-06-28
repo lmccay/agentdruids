@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express';
+import { requireAdmin } from '../auth/authorize';
 import { agentService } from '../services/SharedServices';
 import { AgentId, AgentType, RealmId } from '../models/Types';
 import { CreateAgentRequest, UpdateAgentRequest } from '../models/Agent';
@@ -154,7 +155,7 @@ router.get('/', async (req: Request, res: Response) => {
  * POST /agents/create
  * Create a new agent with direct format (from frontend form)
  */
-router.post('/create', async (req: Request, res: Response) => {
+router.post('/create', requireAdmin, async (req: Request, res: Response) => {
   try {
     const {
       name,
@@ -304,7 +305,7 @@ router.post('/create', async (req: Request, res: Response) => {
  * POST /agents
  * Create a new agent (legacy format with configuration wrapper)
  */
-router.post('/', async (req: Request, res: Response) => {
+router.post('/', requireAdmin, async (req: Request, res: Response) => {
   try {
     const { id, type, realmId, configuration } = req.body;
 
@@ -667,7 +668,7 @@ router.get('/:agentId/*', async (_req: Request, res: Response) => {
  * PUT /agents/:agentId
  * Update an existing agent
  */
-router.put('/:agentId', async (req: Request, res: Response) => {
+router.put('/:agentId', requireAdmin, async (req: Request, res: Response) => {
   try {
     const { agentId } = req.params;
     const updateData = req.body;
@@ -914,7 +915,7 @@ router.put('/:agentId', async (req: Request, res: Response) => {
  * DELETE /agents/:agentId
  * Delete an agent
  */
-router.delete('/:agentId', async (req: Request, res: Response) => {
+router.delete('/:agentId', requireAdmin, async (req: Request, res: Response) => {
   try {
     const { agentId } = req.params;
 
