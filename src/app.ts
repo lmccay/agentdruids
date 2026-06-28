@@ -18,6 +18,7 @@ import contentRouter from './api/content';
 import worldtreeRouter from './api/worldtree';
 import ingestRouter from './api/ingest';
 import usersRouter from './api/users';
+import groupsRouter from './api/groups';
 
 // Import MCP server
 import SimpleMCPServer from './mcp/SimpleMCPServer';
@@ -140,6 +141,7 @@ export class DruidApp {
     this.app.use('/api/worldtree', worldtreeRouter); // Read-only WorldTree discovery (Phase A)
     this.app.use('/api/ingest', ingestRouter); // Docling document ingestion (PoC)
     this.app.use('/api/users', usersRouter); // User & assumable-druid administration (admin-only)
+    this.app.use('/api/groups', groupsRouter); // Group & group-assumable-druid administration (admin-only)
 
     // API documentation endpoint
     this.app.get('/api/v1', (_req: Request, res: Response) => {

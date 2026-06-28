@@ -25,7 +25,7 @@ router.get('/login', async (req: Request, res: Response) => {
     req.session.oidc = { state, nonce, codeVerifier };
 
     const url = client.authorizationUrl({
-      scope: 'openid email profile',
+      scope: 'openid email profile groups',
       state,
       nonce,
       code_challenge: codeChallenge,
@@ -54,11 +54,13 @@ router.get('/callback', async (req: Request, res: Response) => {
     });
     const claims = tokenSet.claims();
 
+    const groupsClaim = claims['groups'];
     const user = await identityService.upsertOnLogin({
       issuer: claims.iss,
       subject: claims.sub,
       email: (claims['email'] as string | undefined) ?? null,
       name: (claims['name'] as string | undefined) ?? null,
+      groups: Array.isArray(groupsClaim) ? (groupsClaim as string[]) : null,
     });
 
     // Establish the authenticated session; clear transient handshake state.
@@ -102,6 +104,7 @@ router.get('/me', async (req: Request, res: Response) => {
       email: user.email,
       displayName: user.displayName,
       roles: user.roles,
+      groups: user.groups,
     },
   });
 });

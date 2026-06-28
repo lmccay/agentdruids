@@ -36,6 +36,8 @@ export interface User {
   status: 'active' | 'inactive';
   /** Additive roles held by this user (e.g. ['user'], ['admin', 'user']). */
   roles: UserRole[];
+  /** Group keys from the OIDC groups claim, synced at last login. */
+  groups: string[];
   createdAt: Timestamp;
   updatedAt: Timestamp;
   lastLoginAt: Timestamp | null;
