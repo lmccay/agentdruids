@@ -48,6 +48,11 @@ When a user assumes a druid, they are temporarily acting *as* that druid — the
 - **Programmatic / MCP callers:** bearer access tokens validated as an OAuth resource server. MCP's own authorization spec is OAuth-based, so the same IdP can issue tokens that the MCP endpoint accepts — closing the current gap where `Mcp-Session-Id` carries no identity.
 - **Agent → agent / agent → external tool (future):** RFC 8693 token exchange, as above.
 
+**The OIDC issuer is pluggable (decided).** Druids is an OAuth resource server / OIDC relying party configured by issuer URL + client credentials (env); it is not tied to one provider. Postures:
+- **Dev default:** a lightweight real OIDC provider bundled in `docker-compose` (e.g. Dex or `node-oidc-provider`) so local dev exercises a genuine Authorization Code + PKCE flow with zero external dependency — consistent with the project's bundled-local-default / pluggable stance.
+- **Production:** point the issuer at any standard OIDC provider — Google, an enterprise IdP, etc. — via config; no code change.
+- **Forward path:** a candidate future issuer is Apache Knox / **KnoxIDF**, which brings Keycloak-type federation **plus** RFC 8693 token-exchange extensions. Because the issuer is pluggable and the "assume a druid" session shape (below) is already token-exchange-compatible, adopting KnoxIDF later is a configuration + Phase-4 wiring change, not a re-model. Keep nothing provider-specific in the core.
+
 What this layer must add that doesn't exist today: an authentication middleware on the Express app and the MCP endpoint that resolves a verified `userId` + roles onto the request, replacing today's open access and the unvalidated `x-requester-id` header.
 
 ## How it connects to what exists
@@ -60,11 +65,11 @@ What this layer must add that doesn't exist today: an authentication middleware 
 ## Phasing
 
 **Phase 1 — foundation + the control/data split (the thin slice):**
-1. `users` + `roles` + `user_assumable_druids` tables; OIDC login establishing a session `userId` + roles.
-2. Auth middleware on REST + MCP resolving `{ userId, roles }`; reject unauthenticated mutating calls.
+1. `users` + `roles` + `user_assumable_druids` tables; OIDC login (pluggable issuer; bundled dev IdP) establishing a session `userId` + roles. First admin via env-seeded `ADMIN_OIDC_SUBJECT`.
+2. Auth middleware on REST + MCP resolving `{ userId, roles }`; reject unauthenticated mutating calls. Internal service calls authenticated by the interim shared service token.
 3. **Control-plane gate:** admin-only on agent/realm/model definition, SSRF allowlist, `global`-scope ingest, knowledge-gap resolution.
-4. **Data-plane gate:** a session may only assume a druid in the caller's assumable set; **enforce the assumed druid's `realmAccess`/`resourceAccess`** for the session's realm travel and tool calls (turning on dormant enforcement).
-5. Attribution: stamp `userId` (and assumed druid) onto audit columns and coordination records.
+4. **Data-plane gate:** a session may assume one or more druids, each of which must be in the caller's assumable set; the coordinator may only delegate to druids in that set. **Enforce each assumed druid's `realmAccess`/`resourceAccess`** for the session's realm travel and tool calls (turning on dormant enforcement); session reach = union.
+5. Attribution: stamp `userId` (and the acting druid) onto audit columns and coordination records.
 
 This unblocks every deferred admin-only feature without building full RBAC or the outbound token vault.
 
@@ -74,10 +79,16 @@ This unblocks every deferred admin-only feature without building full RBAC or th
 
 **Phase 4 — federation / token exchange:** RFC 8693 for cross-deployment "assume" and external-tool delegation; A2A. The Phase-1 session-context shape (`user acting as druid`) is the seed.
 
+## Resolved decisions
+
+- **IdP choice & dev story** — *Resolved:* pluggable OIDC issuer; lightweight real IdP bundled for dev, any OIDC (Google, enterprise) in prod, KnoxIDF a candidate future issuer. See **Authentication** above.
+- **Assume granularity** — *Resolved:* a user may assume **several druids within one session**; reach = the union of those druids' `realmAccess`/`resourceAccess`. (Single-druid sessions are the degenerate case.) This is required for multi-agent coordination, not just convenient.
+- **Coordinator vs. assumed druid** — *Resolved:* the user assumes **druids**, not the coordinator. The coordinator is an admin-defined orchestrator that runs the session on the user's behalf but may **only delegate to druids in the user's assumable set** — it is never a privilege-escalation path. A delegation to a druid outside the user's assumable set is rejected.
+- **Service-to-service (interim)** — *Resolved:* internal callers (MCP gateway, `druids-mcp` → main API) present a **shared internal service token** from env, scoped to internal/control-plane-exempt calls. Explicitly interim; replaced by RFC 8693 token exchange in Phase 4. (Chosen over mTLS-now and network-trust: explicit and revocable without adding cert machinery, and it does not leave the main API open on the internal network.)
+- **First admin (break-glass)** — *Resolved:* an **env-seeded admin subject** (`ADMIN_OIDC_SUBJECT` / email); the first login whose verified OIDC identity matches is granted `admin`. Deterministic, no bootstrap UI, safe on a fresh deploy. (Chosen over trust-on-first-use, which races, and a manual seed step.)
+
 ## Open questions
 
-- **IdP choice & dev story** — which OIDC provider for development (a local/dev IdP in Docker) vs. production; do we ship a default?
-- **Assume granularity** — may a user assume *several* druids within one session (union of reach), or one druid per session?
-- **Coordinator vs. assumed druid** — a coordination session has a coordinator that delegates to druids. Does the user assume the *coordinator*, the *druids*, or both? (Likely: user assumes druids; the coordinator is an admin-defined orchestrator constrained to the user's assumable set.)
-- **Service-to-service today** — until token exchange exists, how do the MCP gateway and internal services authenticate to the main API? (A bootstrap service credential, scoped to control-plane-exempt internal calls.)
-- **Break-glass / first admin** — how is the initial admin established on a fresh deployment (env-seeded admin subject vs. first-login claim)?
+- **Service-token scope shape** — exactly which internal routes the interim service token may reach (the "control-plane-exempt" set), and how it is rotated.
+- **Role source of truth at scale** — when finer RBAC arrives (Phase 2), are roles authored in Druids or mapped from IdP groups/claims (natural if/when KnoxIDF or Keycloak is the issuer)?
+- **Re-assume / session elevation** — may a running session add another assumable druid mid-flight, or is the assumable set fixed at session start?
