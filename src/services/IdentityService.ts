@@ -29,6 +29,7 @@ export class IdentityService {
     subject: string;
     email?: string | null;
     name?: string | null;
+    groups?: string[] | null;
   }): Promise<User> {
     const email = claims.email ?? null;
     const name = claims.name ?? null;
@@ -58,6 +59,9 @@ export class IdentityService {
       }
     }
 
+    // Sync group membership from the OIDC groups claim (replace-semantics).
+    await this.syncUserGroups(userId, Array.isArray(claims.groups) ? claims.groups : []);
+
     const user = await this.getUserById(userId);
     if (!user) {
       throw new Error('User vanished immediately after upsert');
@@ -85,7 +89,7 @@ export class IdentityService {
     const row = result.rows[0];
     if (!row) return null;
 
-    const roles = await this.getRoles(userId);
+    const [roles, groups] = await Promise.all([this.getRoles(userId), this.getUserGroups(userId)]);
     return {
       id: row['id'],
       oidcIssuer: row['oidc_issuer'],
@@ -94,6 +98,7 @@ export class IdentityService {
       displayName: row['display_name'] ?? null,
       status: row['status'],
       roles,
+      groups,
       createdAt: row['created_at'],
       updatedAt: row['updated_at'],
       lastLoginAt: row['last_login_at'] ?? null,
@@ -126,14 +131,95 @@ export class IdentityService {
     }));
   }
 
-  /** Whether a user may assume a specific druid (the data-plane assume-gate check). */
+  /**
+   * Whether a user may assume a specific druid — the data-plane assume-gate
+   * check. Effective set = the user's direct grants UNION the grants of every
+   * group they belong to.
+   */
   async isDruidAssumable(userId: UserId, druidId: AgentId): Promise<boolean> {
     const result = await this.db.query(
       `SELECT 1 FROM druids_core.user_assumable_druids
-       WHERE user_id = $1 AND druid_id = $2 LIMIT 1`,
+        WHERE user_id = $1 AND druid_id = $2
+       UNION ALL
+       SELECT 1 FROM druids_core.group_assumable_druids g
+         JOIN druids_core.user_group_memberships m ON m.group_key = g.group_key
+        WHERE m.user_id = $1 AND g.druid_id = $2
+       LIMIT 1`,
       [userId, druidId]
     );
     return result.rows.length > 0;
+  }
+
+  /** Replace a user's group membership from the OIDC groups claim (login sync). */
+  async syncUserGroups(userId: UserId, groupKeys: string[]): Promise<void> {
+    const unique = Array.from(new Set(groupKeys.filter((g) => typeof g === 'string' && g.length > 0)));
+    await this.db.query(`DELETE FROM druids_core.user_group_memberships WHERE user_id = $1`, [userId]);
+    for (const key of unique) {
+      // Discovery cache so the admin UI can list groups, then the membership.
+      await this.db.query(
+        `INSERT INTO druids_core.groups (group_key) VALUES ($1) ON CONFLICT (group_key) DO NOTHING`,
+        [key]
+      );
+      await this.db.query(
+        `INSERT INTO druids_core.user_group_memberships (user_id, group_key) VALUES ($1, $2)
+         ON CONFLICT (user_id, group_key) DO NOTHING`,
+        [userId, key]
+      );
+    }
+  }
+
+  /** The groups a user currently belongs to (synced at last login). */
+  async getUserGroups(userId: UserId): Promise<string[]> {
+    const result = await this.db.query(
+      `SELECT group_key FROM druids_core.user_group_memberships WHERE user_id = $1 ORDER BY group_key`,
+      [userId]
+    );
+    return result.rows.map((r) => r['group_key'] as string);
+  }
+
+  /** Known groups (discovery cache) for the admin UI. */
+  async listGroups(): Promise<Array<{ groupKey: string; displayName: string | null }>> {
+    const result = await this.db.query(
+      `SELECT group_key, display_name FROM druids_core.groups ORDER BY group_key`
+    );
+    return result.rows.map((r) => ({ groupKey: r['group_key'], displayName: r['display_name'] ?? null }));
+  }
+
+  /** Druids a group may assume. */
+  async listGroupAssumableDruids(groupKey: string): Promise<AssumableDruidGrant[]> {
+    const result = await this.db.query(
+      `SELECT group_key, druid_id, granted_at, granted_by
+       FROM druids_core.group_assumable_druids WHERE group_key = $1`,
+      [groupKey]
+    );
+    return result.rows.map((r) => ({
+      userId: r['group_key'], // grant scoped to a group, not a user
+      druidId: r['druid_id'] as AgentId,
+      grantedAt: r['granted_at'],
+      grantedBy: r['granted_by'] ?? null,
+    }));
+  }
+
+  /** Grant a group the ability to assume a druid (admin/control-plane action). */
+  async grantGroupAssumableDruid(groupKey: string, druidId: AgentId, grantedBy?: UserId): Promise<void> {
+    await this.db.query(
+      `INSERT INTO druids_core.groups (group_key) VALUES ($1) ON CONFLICT (group_key) DO NOTHING`,
+      [groupKey]
+    );
+    await this.db.query(
+      `INSERT INTO druids_core.group_assumable_druids (group_key, druid_id, granted_by)
+       VALUES ($1, $2, $3) ON CONFLICT (group_key, druid_id) DO NOTHING`,
+      [groupKey, druidId, grantedBy ?? null]
+    );
+  }
+
+  /** Revoke a group's ability to assume a druid. Returns false if no grant existed. */
+  async revokeGroupAssumableDruid(groupKey: string, druidId: AgentId): Promise<boolean> {
+    const result = await this.db.query(
+      `DELETE FROM druids_core.group_assumable_druids WHERE group_key = $1 AND druid_id = $2`,
+      [groupKey, druidId]
+    );
+    return (result.rowCount ?? 0) > 0;
   }
 
   /** Grant a user the ability to assume a druid (admin/control-plane action). */
