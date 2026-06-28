@@ -27,6 +27,9 @@ staticClients:
     name: Druids
     secret: druids-dev-secret
     redirectURIs:
+      # The UI origin is the primary entry point (session cookie is first-party
+      # to the SPA). The :3000 URI is kept for direct API/curl testing.
+      - http://localhost:3004/auth/callback
       - http://localhost:3000/auth/callback
 
 # Static dev users (password connector). Both use dev password "druids".

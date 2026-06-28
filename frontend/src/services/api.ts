@@ -263,12 +263,44 @@ export interface CreateModelRequest {
 const api = axios.create({
   baseURL: '/api',
   timeout: 30000,
+  // Send the session cookie with API calls (same-origin via the nginx proxy).
+  withCredentials: true,
   headers: {
     'Content-Type': 'application/json',
     'Cache-Control': 'no-cache, no-store, must-revalidate',
     'Pragma': 'no-cache',
   },
 });
+
+// Identity / SSO (docs/identity-and-access-control.md). The OIDC flow lives
+// under /auth (proxied to the backend through the UI origin), not /api.
+export interface AuthUser {
+  id: string;
+  email: string | null;
+  displayName: string | null;
+  roles: string[];
+}
+
+const authClient = axios.create({ baseURL: '/auth', withCredentials: true });
+
+export const authApi = {
+  /** Returns the current user, or null if not authenticated. */
+  async getMe(): Promise<AuthUser | null> {
+    try {
+      const { data } = await authClient.get('/me');
+      return data.authenticated ? (data.user as AuthUser) : null;
+    } catch {
+      return null;
+    }
+  },
+  /** Full-page redirect into the OIDC login flow. */
+  login(): void {
+    window.location.href = '/auth/login';
+  },
+  async logout(): Promise<void> {
+    await authClient.post('/logout');
+  },
+};
 
 // API Services using direct REST endpoints
 export const agentApi = {

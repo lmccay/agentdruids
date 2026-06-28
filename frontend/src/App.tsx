@@ -1,18 +1,22 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { BrowserRouter as Router, Routes, Route, Link, useLocation } from 'react-router-dom';
-import { 
-  Users, 
-  Brain, 
-  Network, 
-  Settings, 
-  Activity, 
-  Play, 
+import {
+  Users,
+  Brain,
+  Network,
+  Settings,
+  Activity,
+  Play,
   FileText,
   Home,
   Menu,
   X,
-  Library
+  Library,
+  LogOut,
+  LogIn,
+  UserCircle
 } from 'lucide-react';
+import { authApi, type AuthUser } from './services/api';
 
 // Import page components
 import Dashboard from './pages/Dashboard';
@@ -127,7 +131,17 @@ function Sidebar({ isOpen, setIsOpen }: { isOpen: boolean; setIsOpen: (open: boo
   );
 }
 
-function TopBar({ onMenuClick }: { onMenuClick: () => void }) {
+function TopBar({
+  onMenuClick,
+  authUser,
+  authLoading,
+  onLogout,
+}: {
+  onMenuClick: () => void;
+  authUser: AuthUser | null;
+  authLoading: boolean;
+  onLogout: () => void;
+}) {
   return (
     <header className="bg-white shadow-sm border-b border-gray-200">
       <div className="px-4 sm:px-6 lg:px-8">
@@ -145,16 +159,43 @@ function TopBar({ onMenuClick }: { onMenuClick: () => void }) {
               </h1>
             </div>
           </div>
-          
+
           <div className="flex items-center space-x-4">
-            <div className="flex items-center space-x-2 text-sm text-gray-500">
-              <div className="h-2 w-2 bg-green-500 rounded-full"></div>
-              <span>MCP Server: Online</span>
-            </div>
-            <div className="flex items-center space-x-2 text-sm text-gray-500">
+            <div className="hidden sm:flex items-center space-x-2 text-sm text-gray-500">
               <div className="h-2 w-2 bg-green-500 rounded-full"></div>
               <span>Main API: Online</span>
             </div>
+
+            {/* Authentication state */}
+            {authLoading ? (
+              <span className="text-sm text-gray-400">…</span>
+            ) : authUser ? (
+              <div className="flex items-center space-x-3">
+                <div className="flex items-center space-x-2 text-sm text-gray-700">
+                  <UserCircle className="h-5 w-5 text-gray-400" />
+                  <span className="font-medium">{authUser.displayName || authUser.email || 'User'}</span>
+                  {authUser.roles.includes('admin') && (
+                    <span className="text-xs px-1.5 py-0.5 bg-purple-100 text-purple-700 rounded">admin</span>
+                  )}
+                </div>
+                <button
+                  onClick={onLogout}
+                  className="flex items-center space-x-1 text-sm text-gray-500 hover:text-gray-800"
+                  title="Sign out"
+                >
+                  <LogOut className="h-4 w-4" />
+                  <span>Logout</span>
+                </button>
+              </div>
+            ) : (
+              <button
+                onClick={() => authApi.login()}
+                className="flex items-center space-x-1 px-3 py-1.5 text-sm font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700"
+              >
+                <LogIn className="h-4 w-4" />
+                <span>Sign in</span>
+              </button>
+            )}
           </div>
         </div>
       </div>
@@ -164,14 +205,36 @@ function TopBar({ onMenuClick }: { onMenuClick: () => void }) {
 
 function App() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [authUser, setAuthUser] = useState<AuthUser | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
+
+  useEffect(() => {
+    authApi
+      .getMe()
+      .then(setAuthUser)
+      .finally(() => setAuthLoading(false));
+  }, []);
+
+  const handleLogout = async () => {
+    try {
+      await authApi.logout();
+    } finally {
+      setAuthUser(null);
+    }
+  };
 
   return (
     <Router>
       <div className="flex h-screen bg-gray-50">
         <Sidebar isOpen={sidebarOpen} setIsOpen={setSidebarOpen} />
-        
+
         <div className="flex flex-col flex-1 overflow-hidden">
-          <TopBar onMenuClick={() => setSidebarOpen(true)} />
+          <TopBar
+            onMenuClick={() => setSidebarOpen(true)}
+            authUser={authUser}
+            authLoading={authLoading}
+            onLogout={handleLogout}
+          />
           
           <main className="flex-1 overflow-y-auto">
             <div className="p-6">
