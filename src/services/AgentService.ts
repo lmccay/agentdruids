@@ -1399,15 +1399,18 @@ Available tools:
       );
     }
 
-    // WorldTree corpus retrieval (in-session RAG; opt-in via mcpTools: 'search_worldtree').
-    // Handled as a built-in tool (executeBuiltInTool), not routed to the MCP gateway.
-    if (agent.mcpTools?.includes('search_worldtree')) {
-      tools.push({
-        name: 'search_worldtree',
-        description: 'Search the WorldTree knowledge corpus (ingested documents) for passages relevant to a query. Returns the most relevant text chunks with their source and section headings. Use this to ground answers in the ingested corpus.',
-        parameters: { query: 'natural-language search query', limit: 'optional max passages to return (default 5)' }
-      });
-    }
+    // WorldTree corpus retrieval — a DEFAULT-AVAILABLE built-in for every agent
+    // (handled in executeBuiltInTool, not the MCP gateway). It is read-only and
+    // realm-scoped (an agent only ever sees global ∪ its own realms), so access
+    // is controlled by scope, not by withholding the tool. Availability is not a
+    // mandate — the model calls it only when the persona/task prompt makes it
+    // relevant. (No mcpTools opt-in required; that conflated a built-in with
+    // external gateway tools.)
+    tools.push({
+      name: 'search_worldtree',
+      description: 'Search the WorldTree knowledge corpus (ingested documents) for passages relevant to a query. Returns the most relevant text chunks with their source and section headings. Use this to ground answers in the ingested corpus.',
+      parameters: { query: 'natural-language search query', limit: 'optional max passages to return (default 5)' }
+    });
 
     // MCP tools via gateway (based on agent's mcpTools configuration)
     if (agent.mcpTools && agent.mcpTools.length > 0) {
