@@ -220,13 +220,34 @@ function App() {
       .finally(() => setAuthLoading(false));
   }, []);
 
+  // Auth guard: the console requires a signed-in user. Once the session check
+  // resolves with no user, send the browser into the OIDC login flow.
+  useEffect(() => {
+    if (!authLoading && !authUser) {
+      authApi.login();
+    }
+  }, [authLoading, authUser]);
+
   const handleLogout = async () => {
     try {
       await authApi.logout();
     } finally {
+      // The guard will redirect to login once authUser clears.
       setAuthUser(null);
     }
   };
+
+  // Before any page renders, require authentication.
+  if (authLoading || !authUser) {
+    return (
+      <div className="flex h-screen items-center justify-center bg-gray-50">
+        <div className="flex items-center space-x-3 text-gray-500">
+          <Activity className="h-6 w-6 text-druid-400 animate-pulse" />
+          <span>{authLoading ? 'Loading…' : 'Redirecting to sign in…'}</span>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <Router>
