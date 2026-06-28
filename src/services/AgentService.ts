@@ -9,6 +9,7 @@ import {
   RealmAccess
 } from '../models/Agent';
 import { AgentType } from '../models/Types';
+import { identityService } from './IdentityService';
 import { OllamaClient, ChatRequest, createDefaultOllamaConfig } from './OllamaClient';
 import { OpenAIClient, OpenAIChatRequest, createDefaultOpenAIConfig } from './OpenAIClient';
 import { PolicyEngine } from './PolicyEngine';
@@ -922,7 +923,8 @@ export class AgentService {
         agentId,
         request,
         systemPrompt,
-        startTime
+        startTime,
+        requesterId
       );
     } else {
       // Use traditional single-shot execution (backward compatibility)
@@ -931,7 +933,8 @@ export class AgentService {
         agentId,
         request,
         systemPrompt,
-        startTime
+        startTime,
+        requesterId
       );
     }
   }
@@ -1039,7 +1042,8 @@ export class AgentService {
     agentId: AgentId,
     request: AgentExecutionRequest,
     systemPrompt: string,
-    startTime: number
+    startTime: number,
+    requesterId?: string
   ): Promise<AgentExecutionResponse> {
     const maxIterations = agent.llmConfig.agenticLoop?.maxIterations ?? 10;
     const trackCosts = agent.llmConfig.agenticLoop?.trackCosts ?? true;
@@ -1107,7 +1111,7 @@ export class AgentService {
         messages.push({ role: 'assistant', content: response });
 
         // Process any tool calls in the response
-        const processedResponse = await this.processAgentToolCalls(agent, response, agentId, request.sessionId);
+        const processedResponse = await this.processAgentToolCalls(agent, response, agentId, request.sessionId, requesterId);
         allToolCalls.push(...processedResponse.toolCalls);
 
         // If no tool calls were made, this is the final response
@@ -1194,7 +1198,8 @@ export class AgentService {
     agentId: AgentId,
     request: AgentExecutionRequest,
     systemPrompt: string,
-    startTime: number
+    startTime: number,
+    requesterId?: string
   ): Promise<AgentExecutionResponse> {
     const messages: Array<{ role: string; content: string }> = [
       { role: 'system', content: systemPrompt },
@@ -1206,7 +1211,7 @@ export class AgentService {
       const { response, usage } = await this.callLLM(agent, messages, request.temperature);
 
       // Process tool calls in the response
-      const processedResponse = await this.processAgentToolCalls(agent, response, agentId, request.sessionId);
+      const processedResponse = await this.processAgentToolCalls(agent, response, agentId, request.sessionId, requesterId);
 
       return {
         response: processedResponse.finalResponse,
@@ -2033,7 +2038,7 @@ Your responses and behavior should be appropriate to this realm's context and ch
   /**
    * Process tool calls in an agent's response and execute them
    */
-  private async processAgentToolCalls(agent: Agent, response: string, agentId: AgentId, sessionId?: string): Promise<ProcessedAgentResponse> {
+  private async processAgentToolCalls(agent: Agent, response: string, agentId: AgentId, sessionId?: string, requesterId?: string): Promise<ProcessedAgentResponse> {
     const toolCalls: AgentToolCall[] = [];
     let processedResponse = response;
 
@@ -2116,7 +2121,7 @@ Your responses and behavior should be appropriate to this realm's context and ch
 
         try {
           // Execute the tool call through internal MCP interface (with session context if available)
-          const rawToolResult = await this.executeAgentTool(agent, toolName, params, sessionId);
+          const rawToolResult = await this.executeAgentTool(agent, toolName, params, sessionId, requesterId);
 
           // Extract and parse MCP response content for better agent consumption
           toolResult = this.extractMCPContent(rawToolResult);
@@ -2181,7 +2186,7 @@ Your responses and behavior should be appropriate to this realm's context and ch
   /**
    * Execute a specific tool call for an agent
    */
-  private async executeAgentTool(agent: Agent, toolName: string, params: any, sessionId?: string): Promise<any> {
+  private async executeAgentTool(agent: Agent, toolName: string, params: any, sessionId?: string, requesterId?: string): Promise<any> {
     // Define built-in tools that are handled internally (not via MCP Gateway)
     const builtInTools = [
       'message_agent', 'delegate_task', 'assign_simple_task', 'get_step_content',      // Communication tools (all agents)
@@ -2192,7 +2197,7 @@ Your responses and behavior should be appropriate to this realm's context and ch
 
     // Check if this is a built-in tool
     if (builtInTools.includes(toolName)) {
-      return await this.executeBuiltInTool(agent, toolName, params, sessionId);
+      return await this.executeBuiltInTool(agent, toolName, params, sessionId, requesterId);
     }
 
     // All other tools are MCP tools that must go through the gateway
@@ -2203,7 +2208,7 @@ Your responses and behavior should be appropriate to this realm's context and ch
   /**
    * Execute built-in tools (communication and realm navigation)
    */
-  private async executeBuiltInTool(agent: Agent, toolName: string, params: any, sessionId?: string): Promise<any> {
+  private async executeBuiltInTool(agent: Agent, toolName: string, params: any, sessionId?: string, requesterId?: string): Promise<any> {
     // Define inter-agent communication tools that all agents can access
     const communicationTools = ['message_agent', 'delegate_task', 'assign_simple_task', 'get_step_content'];
 
@@ -2245,10 +2250,10 @@ Your responses and behavior should be appropriate to this realm's context and ch
         return await this.toolMessageAgent(agent.id, params, sessionId);
 
       case 'delegate_task':
-        return await this.toolDelegateTask(agent.id, params, sessionId);
+        return await this.toolDelegateTask(agent.id, params, sessionId, requesterId);
 
       case 'assign_simple_task':
-        return await this.toolAssignSimpleTask(agent.id, params, sessionId);
+        return await this.toolAssignSimpleTask(agent.id, params, sessionId, requesterId);
       
       case 'get_step_content':
         return await this.toolGetStepContent(params);
@@ -2437,10 +2442,37 @@ Your responses and behavior should be appropriate to this realm's context and ch
   /**
    * Tool: Delegate a task to another agent
    */
+  /**
+   * User-scoped delegation guard. When a delegation chain is driven by a user
+   * (requesterId present), a coordinator/druid may only delegate to a DRUID the
+   * user may assume (admins unconstrained; effective set includes group grants).
+   * No requesterId → an internal/service/legacy path (e.g. MCP coordination
+   * before identity is wired) → not enforced. Non-druid targets are governed by
+   * the realm co-location check, not user assumption.
+   */
+  private async enforceAssumableForRequester(
+    requesterId: string | undefined,
+    targetAgent: Agent,
+    resolvedAgentId: string
+  ): Promise<void> {
+    if (!requesterId) return;
+    if (targetAgent.type !== 'druid') return;
+    const allowed = await identityService.mayAssumeDruid(
+      requesterId as Parameters<typeof identityService.mayAssumeDruid>[0],
+      resolvedAgentId as Parameters<typeof identityService.mayAssumeDruid>[1]
+    );
+    if (!allowed) {
+      throw new Error(
+        `Delegation denied: the requesting user may not assume druid ${resolvedAgentId}`
+      );
+    }
+  }
+
   private async toolDelegateTask(
     fromAgentId: AgentId,
     params: { agent_id: string; task: string },
-    sessionId?: string
+    sessionId?: string,
+    requesterId?: string
   ): Promise<any> {
     const fromAgent = await this.getAgent(fromAgentId);
 
@@ -2452,6 +2484,11 @@ Your responses and behavior should be appropriate to this realm's context and ch
       throw new Error(`Target agent ${resolvedAgentId} is not active`);
     }
 
+    // User-scoped delegation: when this chain is driven by a user, a coordinator
+    // may only delegate to a druid the user may assume (admins unconstrained).
+    // Elementals are governed by the realm check below, not user assumption.
+    await this.enforceAssumableForRequester(requesterId, targetAgent, resolvedAgentId);
+
     // Check if target agent is in the same realm as the delegating agent
     const fromAgentRealm = fromAgent.realmAccess?.currentRealmId || fromAgent.realmAccess?.boundRealmId || 'default';
     const targetAgentRealm = targetAgent.realmAccess?.currentRealmId || targetAgent.realmAccess?.boundRealmId || 'default';
@@ -2460,7 +2497,8 @@ Your responses and behavior should be appropriate to this realm's context and ch
       throw new Error(`Cannot delegate to agent ${resolvedAgentId} in realm ${targetAgentRealm} from realm ${fromAgentRealm}. Agents can only delegate to other agents in their current realm.`);
     }
 
-    // Execute the task delegation
+    // Execute the task delegation — propagate requesterId so the user-scoped
+    // constraint keeps applying transitively down the delegation chain.
     const response = await this.executeAgentPrompt(resolvedAgentId as AgentId, {
       prompt: `Task delegated from agent ${fromAgentId}: ${params.task}. Please execute this task and provide your results.`,
       collaborationContext: {
@@ -2468,7 +2506,7 @@ Your responses and behavior should be appropriate to this realm's context and ch
         agentRole: 'task_executor',
         usePersonaPrompt: true
       }
-    });
+    }, requesterId);
 
     await this.recordToolSubContribution({
       sessionId,
@@ -2493,17 +2531,21 @@ Your responses and behavior should be appropriate to this realm's context and ch
   private async toolAssignSimpleTask(
     fromAgentId: AgentId,
     params: { agent_id: string; task: string },
-    sessionId?: string
+    sessionId?: string,
+    requesterId?: string
   ): Promise<any> {
     const fromAgent = await this.getAgent(fromAgentId);
-    
+
     // Resolve agent name to ID if needed
     const resolvedAgentId = await this.resolveAgentId(params.agent_id);
     const targetAgent = await this.getAgent(resolvedAgentId as AgentId);
-    
+
     if (targetAgent.status !== 'active') {
       throw new Error(`Target agent ${resolvedAgentId} is not active`);
     }
+
+    // User-scoped delegation constraint (see toolDelegateTask).
+    await this.enforceAssumableForRequester(requesterId, targetAgent, resolvedAgentId);
 
     // Check if target agent is in the same realm as the delegating agent
     const fromAgentRealm = fromAgent.realmAccess?.currentRealmId || fromAgent.realmAccess?.boundRealmId || 'default';
@@ -2513,7 +2555,8 @@ Your responses and behavior should be appropriate to this realm's context and ch
       throw new Error(`Cannot assign task to agent ${resolvedAgentId} in realm ${targetAgentRealm} from realm ${fromAgentRealm}. Agents can only assign tasks to other agents in their current realm.`);
     }
 
-    // Execute the simple task assignment with clear completion instruction
+    // Execute the simple task assignment with clear completion instruction.
+    // Propagate requesterId so the user-scoped constraint applies transitively.
     const response = await this.executeAgentPrompt(resolvedAgentId as AgentId, {
       prompt: `SIMPLE TASK ASSIGNMENT from ${fromAgentId}: ${params.task}
 
@@ -2532,7 +2575,7 @@ Please use your available tools to execute this task now and provide your comple
         agentRole: 'task_executor',
         usePersonaPrompt: true
       }
-    });
+    }, requesterId);
 
     await this.recordToolSubContribution({
       sessionId,

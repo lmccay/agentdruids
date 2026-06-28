@@ -1019,7 +1019,7 @@ router.post('/:agentId/execute', requireAssumableAgent((req) => req.params['agen
     const result = await agentService.executeAgentPrompt(agentId as AgentId, {
       prompt,
       temperature
-    });
+    }, req.principal?.userId ?? undefined);
 
     res.json({
       success: true,

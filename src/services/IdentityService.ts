@@ -150,6 +150,17 @@ export class IdentityService {
     return result.rows.length > 0;
   }
 
+  /**
+   * Whether a user may drive a druid — admins are unconstrained, otherwise the
+   * effective assumable set applies. The tool-layer equivalent of the REST
+   * assume-gate (which reads roles from the session); here roles are fetched.
+   */
+  async mayAssumeDruid(userId: UserId, druidId: AgentId): Promise<boolean> {
+    const roles = await this.getRoles(userId);
+    if (roles.includes('admin')) return true;
+    return this.isDruidAssumable(userId, druidId);
+  }
+
   /** Replace a user's group membership from the OIDC groups claim (login sync). */
   async syncUserGroups(userId: UserId, groupKeys: string[]): Promise<void> {
     const unique = Array.from(new Set(groupKeys.filter((g) => typeof g === 'string' && g.length > 0)));
