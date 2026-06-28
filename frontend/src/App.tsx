@@ -12,6 +12,7 @@ import {
   Menu,
   X,
   Library,
+  Shield,
   LogOut,
   LogIn,
   UserCircle
@@ -27,12 +28,14 @@ import ContentBrowser from './pages/ContentBrowser';
 import SystemSettings from './pages/SystemSettings';
 import ModelManagement from './pages/ModelManagement';
 import WorldTreeLibrary from './pages/WorldTreeLibrary';
+import AccessManagement from './pages/AccessManagement';
 
 interface NavItem {
   name: string;
   href: string;
   icon: React.ComponentType<any>;
   description: string;
+  adminOnly?: boolean;
 }
 
 const navigation: NavItem[] = [
@@ -43,11 +46,13 @@ const navigation: NavItem[] = [
   { name: 'Coordination', href: '/coordination', icon: Activity, description: 'Multi-agent coordination sessions' },
   { name: 'Content', href: '/content', icon: FileText, description: 'Browse and search published content' },
   { name: 'Library', href: '/library', icon: Library, description: 'Browse and search the ingested knowledge corpus' },
+  { name: 'Access', href: '/access', icon: Shield, description: 'Grant users and groups access to druids', adminOnly: true },
   { name: 'Settings', href: '/settings', icon: Settings, description: 'System configuration' },
 ];
 
-function Sidebar({ isOpen, setIsOpen }: { isOpen: boolean; setIsOpen: (open: boolean) => void }) {
+function Sidebar({ isOpen, setIsOpen, isAdmin }: { isOpen: boolean; setIsOpen: (open: boolean) => void; isAdmin: boolean }) {
   const location = useLocation();
+  const visibleNav = navigation.filter((item) => !item.adminOnly || isAdmin);
 
   return (
     <>
@@ -85,7 +90,7 @@ function Sidebar({ isOpen, setIsOpen }: { isOpen: boolean; setIsOpen: (open: boo
 
         <nav className="mt-8 px-4">
           <ul className="space-y-2">
-            {navigation.map((item) => {
+            {visibleNav.map((item) => {
               const isActive = location.pathname === item.href;
               return (
                 <li key={item.name}>
@@ -226,7 +231,7 @@ function App() {
   return (
     <Router>
       <div className="flex h-screen bg-gray-50">
-        <Sidebar isOpen={sidebarOpen} setIsOpen={setSidebarOpen} />
+        <Sidebar isOpen={sidebarOpen} setIsOpen={setSidebarOpen} isAdmin={!!authUser?.roles.includes('admin')} />
 
         <div className="flex flex-col flex-1 overflow-hidden">
           <TopBar
@@ -246,6 +251,7 @@ function App() {
                 <Route path="/coordination" element={<ModernCoordinationManagement />} />
                 <Route path="/content" element={<ContentBrowser />} />
                 <Route path="/library" element={<WorldTreeLibrary />} />
+                <Route path="/access" element={<AccessManagement />} />
                 <Route path="/settings" element={<SystemSettings />} />
               </Routes>
             </div>
