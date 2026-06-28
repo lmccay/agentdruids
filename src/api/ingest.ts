@@ -1,6 +1,7 @@
 import express from 'express';
 import { getDoclingService, type DoclingFormat } from '../services/DoclingService';
 import { getWorldTreeQueryService } from '../services/WorldTreeQueryService';
+import { requireAdmin } from '../auth/authorize';
 
 /**
  * Document ingestion API (thin PoC) — fetch + convert a remote source through
@@ -16,7 +17,7 @@ const router = express.Router();
 const VALID_FORMATS: DoclingFormat[] = ['md', 'json', 'html', 'text', 'doctags'];
 
 // Ingest a document from a URL.
-router.post('/url', async (req, res) => {
+router.post('/url', requireAdmin, async (req, res) => {
   try {
     const { url, toFormats, namespace, accessLevel } = req.body ?? {};
     if (typeof url !== 'string' || url.length === 0) {
@@ -57,7 +58,7 @@ router.post('/url', async (req, res) => {
 //
 // SECURITY: bounded to the configured staging root. Scope/permission gating
 // (e.g. who may write 'global') is a follow-up (docs/operator-ingestion-flow.md).
-router.post('/directory', async (req, res) => {
+router.post('/directory', requireAdmin, async (req, res) => {
   try {
     const { path: stagingPath, toFormats, namespace, accessLevel, includeExtensions, triggeredBy } = req.body ?? {};
     if (typeof stagingPath !== 'string' || stagingPath.length === 0) {
@@ -114,12 +115,13 @@ router.get('/runs', async (req, res) => {
 // (Re)chunk a document on demand — backfill for documents ingested before
 // chunking, or to re-chunk after changing chunk settings. New ingests are
 // chunked automatically.
-router.post('/documents/:id/chunk', async (req, res) => {
+router.post('/documents/:id/chunk', requireAdmin, async (req, res) => {
   try {
+    const id = req.params['id'] as string;
     const svc = getDoclingService();
-    const chunks = await svc.chunkDocument(req.params.id);
-    const embedded = await svc.embedDocumentChunks(req.params.id); // 0 if no provider
-    return res.json({ documentId: req.params.id, chunks, embedded });
+    const chunks = await svc.chunkDocument(id);
+    const embedded = await svc.embedDocumentChunks(id); // 0 if no provider
+    return res.json({ documentId: id, chunks, embedded });
   } catch (error) {
     console.error('Chunking error:', error);
     return res.status(502).json({ error: 'Failed to chunk document', details: error instanceof Error ? error.message : String(error) });
@@ -128,10 +130,11 @@ router.post('/documents/:id/chunk', async (req, res) => {
 
 // (Re)embed a document's existing chunks — backfill, or re-embed after an
 // embedding-model change (no re-chunk). No-op if no provider is configured.
-router.post('/documents/:id/embed', async (req, res) => {
+router.post('/documents/:id/embed', requireAdmin, async (req, res) => {
   try {
-    const embedded = await getDoclingService().embedDocumentChunks(req.params.id);
-    return res.json({ documentId: req.params.id, embedded });
+    const id = req.params['id'] as string;
+    const embedded = await getDoclingService().embedDocumentChunks(id);
+    return res.json({ documentId: id, embedded });
   } catch (error) {
     console.error('Embedding error:', error);
     return res.status(502).json({ error: 'Failed to embed document', details: error instanceof Error ? error.message : String(error) });
@@ -139,12 +142,13 @@ router.post('/documents/:id/embed', async (req, res) => {
 });
 
 // Resolve a knowledge gap (addressed once ingested, or dismissed).
-router.post('/knowledge-gaps/:id/resolve', async (req, res) => {
+router.post('/knowledge-gaps/:id/resolve', requireAdmin, async (req, res) => {
   try {
+    const id = req.params['id'] as string;
     const status = req.body?.status === 'dismissed' ? 'dismissed' : 'addressed';
-    const ok = await getWorldTreeQueryService().resolveKnowledgeGap(req.params.id, status);
+    const ok = await getWorldTreeQueryService().resolveKnowledgeGap(id, status);
     if (!ok) return res.status(404).json({ error: 'Knowledge gap not found' });
-    return res.json({ id: req.params.id, status });
+    return res.json({ id, status });
   } catch (error) {
     return res.status(500).json({ error: 'Failed to resolve knowledge gap', details: error instanceof Error ? error.message : String(error) });
   }

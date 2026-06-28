@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { modelRegistryService } from '../services/ModelRegistryService';
+import { requireAdmin } from '../auth/authorize';
 import { ModelConfiguration } from '../models/ModelConfiguration';
 import { LLMProvider } from '../models/Types';
 
@@ -79,7 +80,7 @@ router.get('/:id', async (req: Request, res: Response) => {
  * POST /models
  * Create a new model configuration
  */
-router.post('/', async (req: Request, res: Response) => {
+router.post('/', requireAdmin, async (req: Request, res: Response) => {
   try {
     const {
       id,
@@ -198,7 +199,7 @@ router.post('/', async (req: Request, res: Response) => {
  * PUT /models/:id
  * Update an existing model configuration
  */
-router.put('/:id', async (req: Request, res: Response) => {
+router.put('/:id', requireAdmin, async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     
@@ -275,7 +276,7 @@ router.put('/:id', async (req: Request, res: Response) => {
  * DELETE /models/:id
  * Delete a model configuration
  */
-router.delete('/:id', async (req: Request, res: Response) => {
+router.delete('/:id', requireAdmin, async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
 
@@ -329,7 +330,7 @@ router.delete('/:id', async (req: Request, res: Response) => {
  * PATCH /models/:id/active
  * Toggle model active status
  */
-router.patch('/:id/active', async (req: Request, res: Response) => {
+router.patch('/:id/active', requireAdmin, async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const { active } = req.body;
