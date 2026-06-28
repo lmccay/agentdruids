@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { requireAdmin } from '../auth/authorize';
+import { requireAdmin, requireAssumableAgent } from '../auth/authorize';
 import { agentService } from '../services/SharedServices';
 import { AgentId, AgentType, RealmId } from '../models/Types';
 import { CreateAgentRequest, UpdateAgentRequest } from '../models/Agent';
@@ -1003,7 +1003,7 @@ router.delete('/:agentId', requireAdmin, async (req: Request, res: Response) => 
  * POST /agents/:agentId/execute
  * Execute a prompt with a specific agent
  */
-router.post('/:agentId/execute', async (req: Request, res: Response) => {
+router.post('/:agentId/execute', requireAssumableAgent((req) => req.params['agentId']), async (req: Request, res: Response) => {
   try {
     const { agentId } = req.params;
     const { prompt, temperature = 0.7 } = req.body;
@@ -1077,7 +1077,7 @@ router.post('/refresh', async (_req: Request, res: Response) => {
  * POST /agents/:agentId/travel
  * Travel agent to a target realm
  */
-router.post('/:agentId/travel', async (req: Request, res: Response) => {
+router.post('/:agentId/travel', requireAssumableAgent((req) => req.params['agentId']), async (req: Request, res: Response) => {
   try {
     const { agentId } = req.params;
     const { targetRealmId } = req.body;

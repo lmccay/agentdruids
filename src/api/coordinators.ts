@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 // import { CoordinationService } from '../services/CoordinationService';
 import { AgentId } from '../models/Types';
+import { requireAssumableAgent } from '../auth/authorize';
 import ServiceContainer from '../services/ServiceContainer';
 import { OpenAIClient, createDefaultOpenAIConfig } from '../services/OpenAIClient';
 import { OllamaClient, createDefaultOllamaConfig } from '../services/OllamaClient';
@@ -233,7 +234,7 @@ router.delete('/:coordinatorId', async (req: Request, res: Response) => {
 /**
  * POST /coordinators/{coordinatorId}/coordinate - Start coordination
  */
-router.post('/:coordinatorId/coordinate', async (req: Request, res: Response) => {
+router.post('/:coordinatorId/coordinate', requireAssumableAgent((req) => req.params['coordinatorId']), async (req: Request, res: Response) => {
   try {
     const coordinatorId = req.params['coordinatorId'] as AgentId;
     const {
@@ -296,7 +297,7 @@ router.post('/:coordinatorId/coordinate', async (req: Request, res: Response) =>
 /**
  * POST /coordinators/{coordinatorId}/orchestrate - Start orchestrated coordination
  */
-router.post('/:coordinatorId/orchestrate', async (req: Request, res: Response) => {
+router.post('/:coordinatorId/orchestrate', requireAssumableAgent((req) => req.params['coordinatorId']), async (req: Request, res: Response) => {
   try {
     const coordinatorId = req.params['coordinatorId'] as AgentId;
     const {
@@ -361,7 +362,7 @@ router.post('/:coordinatorId/orchestrate', async (req: Request, res: Response) =
  * This endpoint automatically uses built-in-coordinator if none specified, making it
  * perfect for natural language interfaces that shouldn't require explicit coordinator selection
  */
-router.post('/coordinate', async (req: Request, res: Response) => {
+router.post('/coordinate', requireAssumableAgent((req) => req.body?.coordinatorId), async (req: Request, res: Response) => {
   try {
     const {
       coordinatorId,
