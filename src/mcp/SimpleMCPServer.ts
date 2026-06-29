@@ -1,4 +1,5 @@
 import express, { NextFunction, Request, Response } from 'express';
+import { AsyncLocalStorage } from 'async_hooks';
 import cors from 'cors';
 import { v4 as uuidv4 } from 'uuid';
 import axios from 'axios';
@@ -53,6 +54,10 @@ export class SimpleMCPServer {
   private mainAppUrl: string;
   private coordinationService: CoordinationService | null = null;
   private worldTreeToolHandlers: Record<string, WorldTreeToolHandler> | null = null;
+  // Request-scoped acting-user bearer token, so apiCall can forward the caller's
+  // identity to the app (user-scoped authz) without threading it through every
+  // handler. Concurrency-safe across awaits.
+  private actingToken = new AsyncLocalStorage<string>();
 
   constructor(
     port: number = 3003,
@@ -73,12 +78,17 @@ export class SimpleMCPServer {
       const cleanEndpoint = endpoint.startsWith('/api') ? endpoint : `/api${endpoint}`;
       const url = `${this.mainAppUrl}${cleanEndpoint}`;
       
-      // Authenticate to the main app as a trusted service so its gated
-      // endpoints accept these calls. (Asserting the acting user — for
-      // user-scoped authorization — is sub-slice 3.)
-      const serviceToken = (process.env['INTERNAL_SERVICE_TOKEN'] || '').trim();
+      // Forward the acting user's bearer token so the app resolves the user and
+      // applies user-scoped authorization. Fall back to the trusted service
+      // token for calls made outside a user request context (e.g. startup).
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-      if (serviceToken) headers['Authorization'] = `Bearer ${serviceToken}`;
+      const userToken = this.actingToken.getStore();
+      if (userToken) {
+        headers['Authorization'] = `Bearer ${userToken}`;
+      } else {
+        const serviceToken = (process.env['INTERNAL_SERVICE_TOKEN'] || '').trim();
+        if (serviceToken) headers['Authorization'] = `Bearer ${serviceToken}`;
+      }
 
       const response = await axios({
         method,
@@ -256,6 +266,8 @@ export class SimpleMCPServer {
       // Ingress auth (slice H): every /mcp call requires a valid bearer token.
       const principal = await this.authenticateMcp(req, res);
       if (!principal) return; // 401 + WWW-Authenticate already sent
+      // The validated user token is forwarded to the app for user-scoped authz.
+      const actingToken = (req.headers.authorization || '').slice('Bearer '.length).trim();
 
       console.log('🔍 MCP Request Details:');
       console.log(`   Method: ${req.method}`);
@@ -340,7 +352,7 @@ export class SimpleMCPServer {
       if (isNotification) {
         console.log('🔔 Handling as notification');
         // For notifications: process and return 202 Accepted with no body
-        await this.handleMethod(message, sessionId);
+        await this.handleMethod(message, sessionId, actingToken);
         res.status(202).end(); // 202 Accepted for notifications
         return;
       }
@@ -348,11 +360,11 @@ export class SimpleMCPServer {
       // For requests: Handle SSE vs regular JSON response
       if (isSSERequest) {
         console.log('🌊 Handling as SSE request');
-        return this.handleSSEResponse(req, res, message, sessionId);
+        return this.handleSSEResponse(req, res, message, sessionId, actingToken);
       } else {
         console.log('📄 Handling as JSON request');
         // Route to method handlers
-        const result = await this.handleMethod(message, sessionId);
+        const result = await this.handleMethod(message, sessionId, actingToken);
         this.sendSuccess(res, result, message.id!);
       }
 
@@ -362,7 +374,7 @@ export class SimpleMCPServer {
     }
   }
 
-  private async handleSSEResponse(_req: Request, res: Response, message: JsonRpcRequest, sessionId?: string): Promise<void> {
+  private async handleSSEResponse(_req: Request, res: Response, message: JsonRpcRequest, sessionId?: string, actingToken?: string): Promise<void> {
     try {
       console.log('🌊 Setting up SSE response');
       
@@ -376,8 +388,8 @@ export class SimpleMCPServer {
       });
 
       // Process the request
-      const result = await this.handleMethod(message, sessionId);
-      
+      const result = await this.handleMethod(message, sessionId, actingToken);
+
       // Add debug logging for tool calls
       if (message.method === 'tools/call') {
         console.log('🔧 Tool call result:', JSON.stringify(result, null, 2));
@@ -471,7 +483,18 @@ export class SimpleMCPServer {
     }
   }
 
-  private async handleMethod(message: JsonRpcRequest, _sessionId?: string): Promise<any> {
+  /**
+   * Dispatch a method within the acting user's request context, so any apiCall
+   * the handler makes forwards that user's bearer token to the app.
+   */
+  private async handleMethod(message: JsonRpcRequest, sessionId?: string, actingToken?: string): Promise<any> {
+    if (actingToken) {
+      return this.actingToken.run(actingToken, () => this.handleMethodImpl(message, sessionId));
+    }
+    return this.handleMethodImpl(message, sessionId);
+  }
+
+  private async handleMethodImpl(message: JsonRpcRequest, _sessionId?: string): Promise<any> {
     switch (message.method) {
       case 'initialize':
         return {
