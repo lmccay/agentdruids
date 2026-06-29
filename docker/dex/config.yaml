@@ -31,6 +31,16 @@ staticClients:
       # to the SPA). The :3000 URI is kept for direct API/curl testing.
       - http://localhost:3004/auth/callback
       - http://localhost:3000/auth/callback
+  # Pre-registered client for the Goose desktop MCP client (slice H ingress).
+  # Dex has no Dynamic Client Registration, so MCP clients use a static client.
+  # NOTE: redirectURIs must match Goose's actual OAuth callback — adjust to the
+  # loopback URI/port Goose uses. A public client (no secret) with PKCE is typical.
+  - id: goose
+    name: Goose MCP Client
+    public: true
+    redirectURIs:
+      - http://127.0.0.1:33418/
+      - http://localhost:33418/
 
 # Static dev users (password connector). Both use dev password "druids".
 enablePasswordDB: true
