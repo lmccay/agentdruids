@@ -35,12 +35,12 @@ The Druids MCP server becomes an OAuth 2.1 **resource server** per the MCP Autho
 2. **Bearer-token validation** — verify the JWT against the IdP's `jwks_uri` (signature, `iss`, `exp`, and audience as available), then resolve `sub`/`email` → a Druids user via `IdentityService`. This is the access-token validator the app layer currently lacks (`resolvePrincipal` only accepts the session cookie and an exact-match `INTERNAL_SERVICE_TOKEN`). Build it **once as a shared capability** — the MCP server is the primary resource server, but the same validator lets the REST API accept bearer tokens too.
 3. **Session binding** — attach the resolved principal to the `Mcp-Session-Id` at `initialize`; require a valid token on every call.
 4. **Identity propagation inward** — the MCP server's `apiCall` gains the `INTERNAL_SERVICE_TOKEN` (not currently in its container env) **plus an asserted `userId`**. The app trusts the asserted user *only* when it arrives with the valid service token (so external callers can never spoof it). This extends the principal model: a service-authenticated call may now carry a `userId`, where today a service principal has `userId: null`.
-5. **Coordination threading** — thread that `requesterId` into `CoordinationService`. The coordinate flow executes planned steps *directly* (not via the `delegate_task` tool), so slice G's tool-layer enforcement does not cover it; this is where the user-scoped delegation constraint finally fires on the **primary, MCP-driven** coordination path. CONSTITUTIONAL: thread as a parameter, never as shared service state — session isolation preserved (same discipline as slice G).
+5. **Coordination threading** — thread `requesterId` into `CoordinationService`. The coordinate flow executes planned steps *directly* (not via the `delegate_task` tool), so slice G's tool-layer enforcement does not cover it. **This is independent of MCP auth:** the primary coordination path is the REST console (below), whose `/coordinators/.../coordinate` endpoints already carry `req.principal` and are assume-gated (slice D). So this threading lands user-scoped delegation enforcement on the REST path and **can ship before/without ingress MCP auth**. MCP-authenticated callers (Goose) then flow the same `requesterId` through. CONSTITUTIONAL: thread as a parameter, never as shared service state — session isolation preserved (same discipline as slice G).
 6. **Pre-registered client + metadata shim** — see *Dex findings*.
 
-### Console (the breaking-change piece)
+### The console uses REST, not MCP (no breaking change)
 
-The React console also drives coordination over MCP (`/mcp` via nginx). Turning on required ingress auth breaks it until it sends a token. The console already has a session, so it obtains its token a different way than Goose — either mint a short-lived token from the existing session server-side, or route the console's coordination calls through the app rather than directly at `:3003`. This integration is part of slice H.
+The React console drives coordination **over REST**, not MCP: `ModernCoordinationManagement` uses `coordinationRestApi` → `fetch` to `/api/coordinators/.../coordinate` (session cookie, assume-gated). A frontend MCP/JSON-RPC client (`coordinationApi.ts`) exists but is **orphaned — imported by nothing, no methods referenced** — and `CLAUDE.md`'s "frontend uses MCP for coordination" line is stale relative to the code. So **ingress MCP auth does not touch the console**; MCP ingress is only for true external MCP clients (Goose). (Follow-up: delete the dead `coordinationApi.ts` and correct CLAUDE.md.)
 
 ## Dex findings (probed v2.46.0) and mitigations
 
@@ -79,12 +79,12 @@ Sequenced sub-slices, each independently reviewable:
 1. **Resource-server metadata + bearer validator** — PRM (RFC 9728) + `WWW-Authenticate`; the shared JWT/JWKS validator resolving `sub` → user. No enforcement flip yet.
 2. **MCP session binding + require-auth** — bind principal at `initialize`; reject unauthenticated MCP calls. Pre-registered `goose` Dex client; 8414 shim if needed.
 3. **Identity propagation to the app** — service token + asserted `userId` on `apiCall`; extend `resolvePrincipal` to accept it (trusted only with the service token).
-4. **Coordination enforcement** — thread `requesterId` into `CoordinationService`; user-scoped delegation now covers the coordinate path.
-5. **Console integration** — the React app obtains and sends a token for its MCP calls.
+4. **Coordination enforcement** — thread `requesterId` into `CoordinationService`; user-scoped delegation now covers the coordinate path. *Independent of 1–3* (driven by the REST console's authenticated principal), so it can ship on its own.
+
+The console needs no changes — it is REST-only.
 
 ## Open questions
 
-- **Console token acquisition** — mint a short-lived token from the session (needs the IdP to support an appropriate grant), or proxy the console's MCP calls through the app? The latter avoids a second token path.
 - **Audience binding** — does Dex set a usable `aud` (RFC 8707 Resource Indicators are not advertised)? Determines how strictly the validator can check audience vs. relying on issuer + client.
 - **`:3001` gateway during H** — leave the redundant clone as-is, or give it the same ingress auth so both ingress ports are protected? (It is not the egress path either way.)
 - **Unauthenticated grace** — is there any transition period where MCP accepts both authenticated and anonymous calls, or is require-auth a hard cutover (simpler, but a flag day for every MCP client)?
