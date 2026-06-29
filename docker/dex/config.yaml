@@ -12,8 +12,14 @@
 # the backend override only the back-channel base (see OIDC_INTERNAL_ISSUER).
 issuer: http://localhost:5556/dex
 
+# Persistent storage so signing keys (and refresh tokens) survive restarts —
+# otherwise every Dex restart regenerates keys and invalidates tokens clients
+# already hold ("failed to verify id token signature"). Backed by a named
+# volume in docker-compose.
 storage:
-  type: memory
+  type: sqlite3
+  config:
+    file: /var/dex/dex.db
 
 web:
   http: 0.0.0.0:5556
