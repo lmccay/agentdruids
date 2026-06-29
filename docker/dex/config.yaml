@@ -32,15 +32,18 @@ staticClients:
       - http://localhost:3004/auth/callback
       - http://localhost:3000/auth/callback
   # Pre-registered client for the Goose desktop MCP client (slice H ingress).
-  # Dex has no Dynamic Client Registration, so MCP clients use a static client.
-  # NOTE: redirectURIs must match Goose's actual OAuth callback — adjust to the
-  # loopback URI/port Goose uses. A public client (no secret) with PKCE is typical.
+  # Dex has no Dynamic Client Registration and requires an EXACT redirect URI
+  # (no wildcard ports), so Goose must use a fixed callback port:
+  #   export GOOSE_OAUTH_CALLBACK_PORT=8080
+  # Goose's callback path is /oauth_callback. The URIs below must match that
+  # port exactly — change all three (env var + both URIs) together if you pick
+  # a different port. Public client (no secret) + PKCE.
   - id: goose
     name: Goose MCP Client
     public: true
     redirectURIs:
-      - http://127.0.0.1:33418/
-      - http://localhost:33418/
+      - http://127.0.0.1:8080/oauth_callback
+      - http://localhost:8080/oauth_callback
 
 # Static dev users (password connector). Both use dev password "druids".
 enablePasswordDB: true
