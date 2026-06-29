@@ -299,9 +299,9 @@ worldtree://private/{agentId}/ # Private agent storage in shared system
 ### Frontend Architecture
 React 18 + TypeScript + Vite + Tailwind CSS with:
 
-**Dual API Integration:**
-- REST API for CRUD operations (agents, realms, models)
-- MCP protocol for coordination execution via JSON-RPC 2.0
+**API Integration (REST):**
+- REST API for all operations — CRUD (agents, realms, models) and coordination execution (`/api/coordinators/.../coordinate`)
+- The MCP server (JSON-RPC 2.0) is a surface for *external* MCP clients (e.g. Goose), not the web UI
 
 **Component Pattern:**
 - Page components handle state and API calls
@@ -479,8 +479,8 @@ All agents have access to five foundational tools with explicit opt-in permissio
 - `docker-compose.host-access-example.yml` - Example configuration
 
 ### 9. Frontend-Backend Communication
-- Frontend makes REST calls for CRUD operations
-- Frontend uses MCP JSON-RPC 2.0 for coordination execution
+- Frontend makes REST calls for all operations, including coordination execution
+- The MCP JSON-RPC 2.0 surface is for external MCP clients (e.g. Goose), not the frontend
 - Always map frontend flat structures to backend nested structures
 - CORS configured for localhost ports 3000-3005
 
