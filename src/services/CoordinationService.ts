@@ -10,6 +10,7 @@ import { SessionAgentManagerImpl } from './SessionAgentManager';
 import { SessionContentManagerImpl } from './SessionContentManager';
 import { CoordinatorConcurrencyManagerImpl } from './CoordinatorConcurrencyManager';
 import { getSessionPublicationService } from './SessionPublicationService';
+import { identityService } from './IdentityService';
 import type {
   ContributionRecord,
   SessionRecord,
@@ -53,6 +54,10 @@ export interface CoordinationRequest {
   // originalWorkflow for PlantUML workflows). Forwarded to the session's
   // metadata.
   metadata?: Record<string, any>;
+  // The user driving this coordination (data-plane assume-gate). When set, the
+  // druid participants must be assumable by this user. Absent => internal/
+  // unauthenticated path, not enforced.
+  requesterId?: string;
 }
 
 export interface CoordinationSession {
@@ -250,12 +255,41 @@ export class CoordinationService {
   }
 
   /**
+   * Data-plane assume-gate for coordination: when a user drives the session,
+   * every DRUID participant must be assumable by that user (admins
+   * unconstrained; elementals are governed by realm access, not user
+   * assumption). No requesterId => internal/unauthenticated path, not enforced.
+   * The coordinator itself is assume-gated at the REST entry (slice D).
+   */
+  private async enforceAssumableParticipants(
+    requesterId: string | undefined,
+    participantIds: string[]
+  ): Promise<void> {
+    if (!requesterId || !this.agentService) return;
+    for (const id of participantIds || []) {
+      let type: string | undefined;
+      try {
+        type = (await this.agentService.getAgent(id as AgentId))?.type;
+      } catch {
+        continue; // unknown participant — leave existing validation to handle it
+      }
+      if (type !== 'druid') continue;
+      const allowed = await identityService.mayAssumeDruid(requesterId, id as AgentId);
+      if (!allowed) {
+        throw new Error(`Coordination denied: you may not assume druid ${id}`);
+      }
+    }
+  }
+
+  /**
    * NEW ORCHESTRATED WORKFLOW: Start coordination with LLM-driven task decomposition
    */
   async startOrchestatedCoordination(request: CoordinationRequest): Promise<string> {
     if (!this.agentService) {
       throw new Error('AgentService not configured');
     }
+
+    await this.enforceAssumableParticipants(request.requesterId, request.participantIds);
 
     // Check if coordinator can start a new session
     if (!this.coordinatorConcurrencyManager.canStartSession(request.coordinatorId)) {
@@ -1413,6 +1447,8 @@ CRITICAL: Only assign tasks to DRUIDs. If an Elemental's expertise is needed, as
       throw new Error('AgentService not configured');
     }
 
+    await this.enforceAssumableParticipants(request.requesterId, request.participantIds);
+
     const resolvedParticipantIds: string[] = [];
     for (const participantId of request.participantIds) {
       const resolvedId = await this.resolveAgentId(participantId);
@@ -1632,6 +1668,8 @@ CRITICAL: Only assign tasks to DRUIDs. If an Elemental's expertise is needed, as
     if (!this.agentService) {
       throw new Error('AgentService not configured');
     }
+
+    await this.enforceAssumableParticipants(request.requesterId, request.participantIds);
 
     const resolvedParticipantIds: string[] = [];
     for (const participantId of request.participantIds) {

@@ -262,8 +262,9 @@ router.post('/:coordinatorId/coordinate', requireAssumableAgent((req) => req.par
       publishTo
     } as any; // Cast to avoid type conflict
 
+    coordinationRequest.requesterId = req.principal?.userId; // user-scoped delegation
     const sessionId = await coordinationService.startCoordination(coordinationRequest);
-    
+
     res.status(202).json({
       sessionId,
       status: 'started',
@@ -273,6 +274,12 @@ router.post('/:coordinatorId/coordinate', requireAssumableAgent((req) => req.par
     console.error('Error starting coordination:', error);
     
     if (error instanceof Error) {
+      if (error.message.includes('denied') || error.message.includes('may not assume')) {
+        res.status(403).json({
+          error: error.message
+        });
+        return;
+      }
       if (error.message.includes('not found')) {
         res.status(404).json({
           error: error.message
@@ -325,6 +332,7 @@ router.post('/:coordinatorId/orchestrate', requireAssumableAgent((req) => req.pa
       publishTo
     } as any; // Cast to avoid type conflict
 
+    coordinationRequest.requesterId = req.principal?.userId; // user-scoped delegation
     const sessionId = await coordinationService.startOrchestatedCoordination(coordinationRequest);
     
     res.status(202).json({
@@ -336,6 +344,12 @@ router.post('/:coordinatorId/orchestrate', requireAssumableAgent((req) => req.pa
     console.error('Error starting orchestrated coordination:', error);
     
     if (error instanceof Error) {
+      if (error.message.includes('denied') || error.message.includes('may not assume')) {
+        res.status(403).json({
+          error: error.message
+        });
+        return;
+      }
       if (error.message.includes('not found')) {
         res.status(404).json({
           error: error.message
@@ -422,6 +436,8 @@ router.post('/coordinate', requireAssumableAgent((req) => req.body?.coordinatorI
       }
     } as any;
 
+    coordinationRequest.requesterId = req.principal?.userId; // user-scoped delegation
+
     // If requireApproval is true, create plan only (don't execute)
     let sessionId: string;
     if (requireApproval) {
@@ -456,6 +472,12 @@ router.post('/coordinate', requireAssumableAgent((req) => req.body?.coordinatorI
 
     // Check for specific error types
     if (error instanceof Error) {
+      if (error.message.includes('denied') || error.message.includes('may not assume')) {
+        res.status(403).json({
+          error: error.message
+        });
+        return;
+      }
       if (error.message.includes('not found')) {
         res.status(404).json({
           error: error.message
