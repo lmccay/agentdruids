@@ -260,6 +260,7 @@ services:
       - "5556"
     volumes:
       - ./docker/dex/config.yaml:/etc/dex/config.yaml:ro
+      - druids-dex-data:/var/dex
     networks:
       - druids-network
     restart: unless-stopped
@@ -431,6 +432,8 @@ volumes:
   druids-prometheus-data:
     driver: local
   druids-grafana-data:
+    driver: local
+  druids-dex-data:
     driver: local
 
 networks:
