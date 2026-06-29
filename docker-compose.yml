@@ -254,12 +254,31 @@ services:
     image: dexidp/dex:latest
     container_name: druids-dex
     command: ["dex", "serve", "/etc/dex/config.yaml"]
-    ports:
-      - "5556:5556"
+    # No host port — fronted by druids-dex-proxy on :5556 (serves the RFC 8414
+    # metadata Dex lacks). Internal callers still reach it at druids-dex:5556.
+    expose:
+      - "5556"
     volumes:
       - ./docker/dex/config.yaml:/etc/dex/config.yaml:ro
     networks:
       - druids-network
+    restart: unless-stopped
+
+  # DEV-ONLY metadata shim fronting Dex on :5556 — serves the RFC 8414
+  # authorization-server metadata MCP clients require (Dex only serves OIDC
+  # discovery). See docker/dex-proxy/nginx.conf.
+  druids-dex-proxy:
+    image: nginx:alpine
+    container_name: druids-dex-proxy
+    ports:
+      - "5556:5556"
+    volumes:
+      - ./docker/dex-proxy/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./docker/dex-proxy/oauth-metadata.json:/etc/nginx/oauth-metadata.json:ro
+    networks:
+      - druids-network
+    depends_on:
+      - druids-dex
     restart: unless-stopped
 
   # PostgreSQL for persistent storage
