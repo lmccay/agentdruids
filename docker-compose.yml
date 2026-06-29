@@ -119,6 +119,14 @@ services:
       - SERVER_HOST=${SERVER_HOST:-localhost}
       - LOG_LEVEL=debug
       - MAIN_APP_URL=http://druids-main:3000
+      # Slice H ingress auth: OIDC config so the MCP server can validate bearer
+      # tokens (via userinfo), and the service token so its app calls are trusted.
+      - OIDC_ISSUER=${OIDC_ISSUER:-http://localhost:5556/dex}
+      - OIDC_INTERNAL_ISSUER=${OIDC_INTERNAL_ISSUER:-http://druids-dex:5556/dex}
+      - OIDC_CLIENT_ID=${OIDC_CLIENT_ID:-druids}
+      - OIDC_CLIENT_SECRET=${OIDC_CLIENT_SECRET:-druids-dev-secret}
+      - OIDC_REDIRECT_URI=${OIDC_REDIRECT_URI:-http://localhost:3004/auth/callback}
+      - INTERNAL_SERVICE_TOKEN=${INTERNAL_SERVICE_TOKEN:-druids-dev-internal-token}
     volumes:
       - .:/app
       - /app/node_modules
@@ -341,6 +349,13 @@ services:
       - OLLAMA_TIMEOUT=300000
       - DATABASE_URL=postgresql://druids_user:druids_pass_dev@druids-postgres:5432/druids
       - REDIS_URL=redis://:druids_redis_dev@druids-redis:6379
+      # Slice H ingress auth (same as druids-mcp): OIDC token validation + service token.
+      - OIDC_ISSUER=${OIDC_ISSUER:-http://localhost:5556/dex}
+      - OIDC_INTERNAL_ISSUER=${OIDC_INTERNAL_ISSUER:-http://druids-dex:5556/dex}
+      - OIDC_CLIENT_ID=${OIDC_CLIENT_ID:-druids}
+      - OIDC_CLIENT_SECRET=${OIDC_CLIENT_SECRET:-druids-dev-secret}
+      - OIDC_REDIRECT_URI=${OIDC_REDIRECT_URI:-http://localhost:3004/auth/callback}
+      - INTERNAL_SERVICE_TOKEN=${INTERNAL_SERVICE_TOKEN:-druids-dev-internal-token}
     volumes:
       - .:/app
       - /app/node_modules

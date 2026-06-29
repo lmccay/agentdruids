@@ -4,6 +4,7 @@ import { v4 as uuidv4 } from 'uuid';
 import axios from 'axios';
 import { CoordinationService } from '../services/CoordinationService';
 import ServiceContainer from '../services/ServiceContainer';
+import { validateAccessToken, type TokenClaims } from '../auth/accessTokenValidator';
 import {
   WORLDTREE_TOOL_DEFINITIONS,
   WORLDTREE_TOOL_NAMES,
@@ -41,6 +42,8 @@ interface Session {
   initialized: boolean;
   createdAt: Date;
   lastActivity: Date;
+  /** The authenticated user bound to this session (slice H ingress auth). */
+  principal?: TokenClaims;
 }
 
 export class SimpleMCPServer {
@@ -70,14 +73,19 @@ export class SimpleMCPServer {
       const cleanEndpoint = endpoint.startsWith('/api') ? endpoint : `/api${endpoint}`;
       const url = `${this.mainAppUrl}${cleanEndpoint}`;
       
+      // Authenticate to the main app as a trusted service so its gated
+      // endpoints accept these calls. (Asserting the acting user — for
+      // user-scoped authorization — is sub-slice 3.)
+      const serviceToken = (process.env['INTERNAL_SERVICE_TOKEN'] || '').trim();
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (serviceToken) headers['Authorization'] = `Bearer ${serviceToken}`;
+
       const response = await axios({
         method,
         url,
         data,
         timeout: 30000,
-        headers: {
-          'Content-Type': 'application/json'
-        }
+        headers
       });
       
       return response.data;
@@ -85,6 +93,30 @@ export class SimpleMCPServer {
       console.error(`API call failed: ${method} ${endpoint}`, error.message);
       throw error;
     }
+  }
+
+  /**
+   * Ingress auth (slice H): require a valid OAuth bearer access token on the
+   * /mcp surface. On failure, emit a 401 with a WWW-Authenticate challenge
+   * pointing at the Protected Resource Metadata so the client can discover the
+   * authorization server. Returns the token claims, or null if it already
+   * responded with 401.
+   */
+  private async authenticateMcp(req: Request, res: Response): Promise<TokenClaims | null> {
+    const auth = req.headers.authorization;
+    const token = auth?.startsWith('Bearer ') ? auth.slice('Bearer '.length).trim() : '';
+    const claims = token ? await validateAccessToken(token) : null;
+    if (!claims) {
+      const prm = `${req.protocol}://${req.get('host')}/.well-known/oauth-protected-resource`;
+      res.set('WWW-Authenticate', `Bearer resource_metadata="${prm}"`);
+      res.status(401).json({
+        jsonrpc: '2.0',
+        error: { code: -32001, message: 'Authentication required: present a valid OAuth bearer token' },
+        id: null,
+      });
+      return null;
+    }
+    return claims;
   }
 
   private getCoordinationService(): CoordinationService {
@@ -108,8 +140,8 @@ export class SimpleMCPServer {
       origin: true,
       credentials: true,
       methods: ['GET', 'POST', 'OPTIONS'],
-      allowedHeaders: ['Content-Type', 'Accept', 'MCP-Protocol-Version', 'Mcp-Session-Id', 'Origin'],
-      exposedHeaders: ['Mcp-Session-Id']
+      allowedHeaders: ['Content-Type', 'Accept', 'MCP-Protocol-Version', 'Mcp-Session-Id', 'Origin', 'Authorization'],
+      exposedHeaders: ['Mcp-Session-Id', 'WWW-Authenticate']
     }));
 
     // Custom JSON parser that handles mixed content types like "application/json, text/event-stream"
@@ -136,12 +168,23 @@ export class SimpleMCPServer {
       res.json({ status: 'healthy', timestamp: new Date().toISOString() });
     });
 
-    // Root redirect 
+    // Root redirect
     this.app.get('/', (_req: Request, res: Response) => {
-      res.json({ 
+      res.json({
         message: 'MCP Server',
         protocol: 'Model Context Protocol v2025-06-18',
         endpoint: '/mcp'
+      });
+    });
+
+    // OAuth 2.0 Protected Resource Metadata (RFC 9728) — lets MCP clients
+    // discover which authorization server to obtain a token from. Unauthenticated.
+    this.app.get('/.well-known/oauth-protected-resource', (req: Request, res: Response) => {
+      const issuer = (process.env['OIDC_ISSUER'] || '').trim();
+      res.json({
+        resource: `${req.protocol}://${req.get('host')}/mcp`,
+        authorization_servers: issuer ? [issuer] : [],
+        bearer_methods_supported: ['header'],
       });
     });
 
@@ -156,6 +199,10 @@ export class SimpleMCPServer {
    */
   private async handleMCPGetRequest(req: Request, res: Response): Promise<void> {
     try {
+      // Ingress auth (slice H): GET /mcp (SSE stream) also requires a valid token.
+      const principal = await this.authenticateMcp(req, res);
+      if (!principal) return;
+
       console.log('[MCP] GET request received');
       
       // Check Accept header for SSE support
@@ -206,6 +253,10 @@ export class SimpleMCPServer {
 
   private async handleMCPRequest(req: Request, res: Response): Promise<void> {
     try {
+      // Ingress auth (slice H): every /mcp call requires a valid bearer token.
+      const principal = await this.authenticateMcp(req, res);
+      if (!principal) return; // 401 + WWW-Authenticate already sent
+
       console.log('🔍 MCP Request Details:');
       console.log(`   Method: ${req.method}`);
       console.log(`   Headers:`, JSON.stringify(req.headers, null, 2));
@@ -270,9 +321,9 @@ export class SimpleMCPServer {
       }
 
       if (message.method === 'initialize') {
-        sessionId = this.createSession(message.params?.clientInfo);
+        sessionId = this.createSession(message.params?.clientInfo, principal);
         res.set('Mcp-Session-Id', sessionId);
-        console.log(`✅ Created new session: ${sessionId}`);
+        console.log(`✅ Created new session: ${sessionId} for ${principal.email || principal.sub}`);
       } else if (sessionId) {
         const session = this.sessions.get(sessionId);
         if (!session) {
@@ -280,6 +331,7 @@ export class SimpleMCPServer {
           return this.sendError(res, -32001, 'Invalid session ID', message.id !== undefined ? message.id : null);
         }
         session.lastActivity = new Date();
+        session.principal = principal; // refresh bound identity each call
       }
 
       // Handle notifications vs requests according to streamable HTTP spec
@@ -390,14 +442,15 @@ export class SimpleMCPServer {
     }
   }
 
-  private createSession(clientInfo?: any): string {
+  private createSession(clientInfo?: any, principal?: TokenClaims): string {
     const sessionId = uuidv4();
     const session: Session = {
       id: sessionId,
       clientInfo,
       initialized: true,
       createdAt: new Date(),
-      lastActivity: new Date()
+      lastActivity: new Date(),
+      ...(principal && { principal })
     };
     this.sessions.set(sessionId, session);
     
