@@ -165,6 +165,7 @@ router.get('/documents', async (req, res) => {
       sourceUri: asString(req.query['sourceUri']),
       namespace: asString(req.query['namespace']),
       since: asString(req.query['since']),
+      realm: asString(req.query['realm']),
       limit: asInt(req.query['limit']),
       offset: asInt(req.query['offset']),
     });

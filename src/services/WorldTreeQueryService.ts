@@ -54,6 +54,11 @@ export interface SessionContribution {
   createdAt: Date;
 }
 
+export interface DocumentScope {
+  scopeType: string;       // 'global' | 'realm' | 'agent' | 'session'
+  scopeRef: string | null; // realm/agent/session id; null for global
+}
+
 export interface DocumentSummary {
   id: string;
   sourceUri: string;
@@ -65,6 +70,7 @@ export interface DocumentSummary {
   fetchedAt: Date | null;
   createdAt: Date;
   formats: string[];
+  scopes?: DocumentScope[];
 }
 
 export interface DocumentRendering {
@@ -210,7 +216,7 @@ interface DocumentRow {
   created_at: Date;
 }
 
-function mapDocumentRow(r: DocumentRow & { formats?: string[] | null }): DocumentSummary {
+function mapDocumentRow(r: DocumentRow & { formats?: string[] | null; scopes?: DocumentScope[] | null }): DocumentSummary {
   return {
     id: r.id,
     sourceUri: r.source_uri,
@@ -222,6 +228,7 @@ function mapDocumentRow(r: DocumentRow & { formats?: string[] | null }): Documen
     fetchedAt: r.fetched_at,
     createdAt: r.created_at,
     formats: r.formats ?? [],
+    scopes: r.scopes ?? [],
   };
 }
 
@@ -717,23 +724,32 @@ export class WorldTreeQueryService {
 
   /** Paginated index of ingested documents (metadata + available rendering formats). */
   async listDocuments(
-    filters: { sourceUri?: string | undefined; namespace?: string | undefined; since?: string | undefined; limit?: number | undefined; offset?: number | undefined } = {}
+    filters: { sourceUri?: string | undefined; namespace?: string | undefined; since?: string | undefined; realm?: string | undefined; limit?: number | undefined; offset?: number | undefined } = {}
   ): Promise<{ documents: DocumentSummary[]; limit: number; offset: number }> {
     const limit = clampLimit(filters.limit, DEFAULT_DOCUMENT_LIMIT);
     const offset = clampOffset(filters.offset);
-    const { rows } = await this.db.query<DocumentRow & { formats: string[] | null }>(
+    const { rows } = await this.db.query<DocumentRow & { formats: string[] | null; scopes: DocumentScope[] | null }>(
       `SELECT d.id, d.source_uri, d.title, d.source_format, d.namespace, d.access_level,
               d.checksum, d.fetched_at, d.created_at,
-              COALESCE(array_agg(r.format) FILTER (WHERE r.format IS NOT NULL), '{}') AS formats
+              COALESCE(array_agg(r.format) FILTER (WHERE r.format IS NOT NULL), '{}') AS formats,
+              COALESCE((
+                SELECT jsonb_agg(jsonb_build_object('scopeType', s.scope_type, 'scopeRef', s.scope_ref) ORDER BY s.scope_type)
+                  FROM druids_core.worldtree_item_scopes s
+                 WHERE s.item_type = 'document' AND s.item_id = d.id::text
+              ), '[]'::jsonb) AS scopes
          FROM druids_core.worldtree_documents d
          LEFT JOIN druids_core.document_renderings r ON r.document_id = d.id
         WHERE ($1::text IS NULL OR d.source_uri ILIKE '%' || $1::text || '%')
           AND ($2::varchar IS NULL OR d.namespace = $2::varchar)
           AND ($3::timestamptz IS NULL OR d.created_at >= $3::timestamptz)
+          AND ($6::text IS NULL OR EXISTS (
+                SELECT 1 FROM druids_core.worldtree_item_scopes s2
+                 WHERE s2.item_type = 'document' AND s2.item_id = d.id::text
+                   AND s2.scope_type = 'realm' AND s2.scope_ref = $6::text))
         GROUP BY d.id
         ORDER BY d.created_at DESC
         LIMIT $4 OFFSET $5`,
-      [filters.sourceUri ?? null, filters.namespace ?? null, filters.since ?? null, limit, offset]
+      [filters.sourceUri ?? null, filters.namespace ?? null, filters.since ?? null, limit, offset, filters.realm ?? null]
     );
     return { documents: rows.map(mapDocumentRow), limit, offset };
   }

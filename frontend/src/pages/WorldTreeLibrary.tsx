@@ -13,6 +13,14 @@ type Mode = 'documents' | 'search' | 'gaps' | 'ingest';
 
 const parseRealms = (s: string) => s.split(',').map((r) => r.trim()).filter(Boolean);
 
+const scopeLabel = (s: { scopeType: string; scopeRef: string | null }) =>
+  s.scopeType === 'global' ? 'global' : `${s.scopeType}:${s.scopeRef ?? '?'}`;
+const scopeClass = (t: string) =>
+  t === 'global' ? 'bg-green-50 text-green-700'
+  : t === 'realm' ? 'bg-amber-50 text-amber-700'
+  : t === 'agent' ? 'bg-purple-50 text-purple-700'
+  : 'bg-gray-100 text-gray-600';
+
 export default function WorldTreeLibrary() {
   const [mode, setMode] = useState<Mode>('documents');
   const [isAdmin, setIsAdmin] = useState(false);
@@ -20,6 +28,7 @@ export default function WorldTreeLibrary() {
   // Documents
   const [documents, setDocuments] = useState<WorldtreeDocument[]>([]);
   const [loadingDocs, setLoadingDocs] = useState(false);
+  const [docRealm, setDocRealm] = useState('');
   const [selected, setSelected] = useState<WorldtreeDocument | null>(null);
   const [content, setContent] = useState<string | null>(null);
   const [loadingContent, setLoadingContent] = useState(false);
@@ -49,10 +58,10 @@ export default function WorldTreeLibrary() {
     authApi.getMe().then((u) => setIsAdmin(!!u?.roles.includes('admin')));
   }, []);
 
-  const loadDocuments = useCallback(async () => {
+  const loadDocuments = useCallback(async (realm?: string) => {
     setLoadingDocs(true);
     try {
-      const { data } = await worldtreeApi.listDocuments({ limit: 100 });
+      const { data } = await worldtreeApi.listDocuments({ limit: 100, realm: realm?.trim() || undefined });
       setDocuments(data.documents);
     } catch {
       setDocuments([]);
@@ -217,11 +226,26 @@ export default function WorldTreeLibrary() {
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
             <div className="lg:col-span-1 space-y-3">
               <div className="flex items-center justify-between">
-                <h2 className="text-sm font-semibold text-gray-700">{documents.length} documents</h2>
-                <button onClick={() => void loadDocuments()} className="text-gray-400 hover:text-gray-600">
+                <h2 className="text-sm font-semibold text-gray-700">
+                  {documents.length} documents{docRealm.trim() ? ` in realm ${docRealm.trim()}` : ''}
+                </h2>
+                <button onClick={() => void loadDocuments(docRealm)} className="text-gray-400 hover:text-gray-600">
                   <RefreshCw className={`h-4 w-4 ${loadingDocs ? 'animate-spin' : ''}`} />
                 </button>
               </div>
+              <form onSubmit={(e) => { e.preventDefault(); void loadDocuments(docRealm); }} className="flex gap-2">
+                <input
+                  value={docRealm}
+                  onChange={(e) => setDocRealm(e.target.value)}
+                  placeholder="Filter by realm id…"
+                  className="flex-1 border rounded-md px-2 py-1 text-sm"
+                />
+                <button type="submit" className="px-2 py-1 text-xs bg-blue-600 text-white rounded">Filter</button>
+                {docRealm && (
+                  <button type="button" onClick={() => { setDocRealm(''); void loadDocuments(); }}
+                    className="px-2 py-1 text-xs border rounded text-gray-600">Clear</button>
+                )}
+              </form>
               {documents.map((doc) => (
                 <button
                   key={doc.id}
@@ -233,6 +257,9 @@ export default function WorldTreeLibrary() {
                   <div className="font-medium text-gray-900 truncate">{doc.title || doc.sourceUri}</div>
                   <div className="text-xs text-gray-500 truncate">{doc.sourceUri}</div>
                   <div className="mt-2 flex flex-wrap gap-1">
+                    {(doc.scopes ?? []).map((s, i) => (
+                      <span key={`sc-${i}`} className={`text-xs px-2 py-0.5 rounded ${scopeClass(s.scopeType)}`}>{scopeLabel(s)}</span>
+                    ))}
                     {doc.sourceFormat && (
                       <span className="text-xs px-2 py-0.5 bg-blue-50 text-blue-700 rounded">{doc.sourceFormat}</span>
                     )}
