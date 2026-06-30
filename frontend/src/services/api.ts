@@ -614,6 +614,28 @@ export interface KnowledgeGap {
   lastSeenAt: string;
 }
 
+export interface IngestRun {
+  id: string;
+  sourceDir: string;
+  namespace: string;
+  status: string;
+  totalFiles: number;
+  ingested: number;
+  skipped: number;
+  failed: number;
+  triggeredBy: string | null;
+  error: string | null;
+  startedAt: string;
+  completedAt: string | null;
+}
+
+// Options shared by URL and directory ingest. `scopeRealms` empty/omitted →
+// the document is global-scoped (admin-only).
+export interface IngestOptions {
+  scopeRealms?: string[];
+  namespace?: string;
+}
+
 export const worldtreeApi = {
   async listDocuments(params: { sourceUri?: string; namespace?: string; limit?: number; offset?: number } = {}): Promise<{ data: { documents: WorldtreeDocument[]; limit: number; offset: number } }> {
     const response = await api.get('/worldtree/documents', { params });
@@ -636,6 +658,37 @@ export const worldtreeApi = {
   async listKnowledgeGaps(status?: string): Promise<{ data: { gaps: KnowledgeGap[] } }> {
     const response = await api.get('/worldtree/knowledge-gaps', { params: status ? { status } : {} });
     return { data: response.data };
+  },
+
+  // --- Operator ingest (admin-only; the API enforces requireAdmin) ---
+  async ingestUrl(url: string, opts: IngestOptions = {}): Promise<{ data: { document: WorldtreeDocument } }> {
+    const body: Record<string, unknown> = { url };
+    if (opts.scopeRealms?.length) body.scopeRealms = opts.scopeRealms;
+    if (opts.namespace) body.namespace = opts.namespace;
+    const response = await api.post('/ingest/url', body);
+    return { data: response.data };
+  },
+  async ingestDirectory(path: string, opts: IngestOptions = {}): Promise<{ data: { runId: string; totalFiles: number; sourceDir: string } }> {
+    const body: Record<string, unknown> = { path, triggeredBy: 'console' };
+    if (opts.scopeRealms?.length) body.scopeRealms = opts.scopeRealms;
+    if (opts.namespace) body.namespace = opts.namespace;
+    const response = await api.post('/ingest/directory', body);
+    return { data: response.data };
+  },
+  async getIngestRun(id: string): Promise<{ data: { run: IngestRun } }> {
+    const response = await api.get(`/ingest/runs/${id}`);
+    return { data: response.data };
+  },
+  async chunkDocument(id: string): Promise<{ data: { documentId: string; chunks: number; embedded: number } }> {
+    const response = await api.post(`/ingest/documents/${id}/chunk`);
+    return { data: response.data };
+  },
+  async embedDocument(id: string): Promise<{ data: { documentId: string; embedded: number } }> {
+    const response = await api.post(`/ingest/documents/${id}/embed`);
+    return { data: response.data };
+  },
+  async resolveKnowledgeGap(id: string, status: 'addressed' | 'dismissed'): Promise<void> {
+    await api.post(`/ingest/knowledge-gaps/${id}/resolve`, { status });
   },
 };
 
