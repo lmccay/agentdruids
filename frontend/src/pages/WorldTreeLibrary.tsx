@@ -1,16 +1,21 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Library, Search, FileText, AlertCircle, ExternalLink, RefreshCw, X } from 'lucide-react';
+import { Library, Search, FileText, AlertCircle, ExternalLink, RefreshCw, X, Upload, Check, Trash2 } from 'lucide-react';
 import {
   worldtreeApi,
+  authApi,
   type WorldtreeDocument,
   type ChunkResult,
   type KnowledgeGap,
+  type IngestRun,
 } from '../services/api';
 
-type Mode = 'documents' | 'search' | 'gaps';
+type Mode = 'documents' | 'search' | 'gaps' | 'ingest';
+
+const parseRealms = (s: string) => s.split(',').map((r) => r.trim()).filter(Boolean);
 
 export default function WorldTreeLibrary() {
   const [mode, setMode] = useState<Mode>('documents');
+  const [isAdmin, setIsAdmin] = useState(false);
 
   // Documents
   const [documents, setDocuments] = useState<WorldtreeDocument[]>([]);
@@ -18,6 +23,7 @@ export default function WorldTreeLibrary() {
   const [selected, setSelected] = useState<WorldtreeDocument | null>(null);
   const [content, setContent] = useState<string | null>(null);
   const [loadingContent, setLoadingContent] = useState(false);
+  const [docAction, setDocAction] = useState<string | null>(null);
 
   // Search (semantic corpus)
   const [query, setQuery] = useState('');
@@ -29,6 +35,19 @@ export default function WorldTreeLibrary() {
   // Knowledge gaps
   const [gaps, setGaps] = useState<KnowledgeGap[]>([]);
   const [loadingGaps, setLoadingGaps] = useState(false);
+
+  // Ingest (admin)
+  const [urlInput, setUrlInput] = useState('');
+  const [urlScope, setUrlScope] = useState('');
+  const [dirInput, setDirInput] = useState('');
+  const [dirScope, setDirScope] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [ingestMsg, setIngestMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [run, setRun] = useState<IngestRun | null>(null);
+
+  useEffect(() => {
+    authApi.getMe().then((u) => setIsAdmin(!!u?.roles.includes('admin')));
+  }, []);
 
   const loadDocuments = useCallback(async () => {
     setLoadingDocs(true);
@@ -59,9 +78,22 @@ export default function WorldTreeLibrary() {
     if (mode === 'gaps') void loadGaps();
   }, [mode, loadDocuments, loadGaps]);
 
+  // Poll a directory ingest run until it finishes.
+  useEffect(() => {
+    if (!run || run.status === 'completed' || run.status === 'failed') return;
+    const t = setTimeout(async () => {
+      try {
+        const { data } = await worldtreeApi.getIngestRun(run.id);
+        setRun(data.run);
+      } catch { /* keep last state */ }
+    }, 2000);
+    return () => clearTimeout(t);
+  }, [run]);
+
   const openDocument = async (doc: WorldtreeDocument) => {
     setSelected(doc);
     setContent(null);
+    setDocAction(null);
     setLoadingContent(true);
     try {
       const { data } = await worldtreeApi.readDocument(doc.id);
@@ -79,13 +111,70 @@ export default function WorldTreeLibrary() {
     setSearching(true);
     setSearched(true);
     try {
-      const realmList = realms.split(',').map((r) => r.trim()).filter(Boolean);
-      const { data } = await worldtreeApi.searchCorpus(query.trim(), realmList);
+      const { data } = await worldtreeApi.searchCorpus(query.trim(), parseRealms(realms));
       setResults(data.chunks);
     } catch {
       setResults([]);
     } finally {
       setSearching(false);
+    }
+  };
+
+  const submitUrlIngest = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!urlInput.trim()) return;
+    setBusy(true);
+    setIngestMsg(null);
+    try {
+      const { data } = await worldtreeApi.ingestUrl(urlInput.trim(), { scopeRealms: parseRealms(urlScope) });
+      setIngestMsg({ ok: true, text: `Ingested: ${data.document.title || data.document.sourceUri}` });
+      setUrlInput('');
+      void loadDocuments();
+    } catch (err: any) {
+      setIngestMsg({ ok: false, text: err?.response?.data?.details || err?.response?.data?.error || 'Ingest failed' });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const submitDirIngest = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!dirInput.trim()) return;
+    setBusy(true);
+    setIngestMsg(null);
+    setRun(null);
+    try {
+      const { data } = await worldtreeApi.ingestDirectory(dirInput.trim(), { scopeRealms: parseRealms(dirScope) });
+      const { data: r } = await worldtreeApi.getIngestRun(data.runId);
+      setRun(r.run);
+      setIngestMsg({ ok: true, text: `Started ingest of ${data.totalFiles} file(s) — run ${data.runId.slice(0, 8)}` });
+    } catch (err: any) {
+      setIngestMsg({ ok: false, text: err?.response?.data?.details || err?.response?.data?.error || 'Directory ingest failed' });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const resolveGap = async (id: string, status: 'addressed' | 'dismissed') => {
+    try {
+      await worldtreeApi.resolveKnowledgeGap(id, status);
+      await loadGaps();
+    } catch { /* leave list as-is */ }
+  };
+
+  const docOp = async (op: 'chunk' | 'embed') => {
+    if (!selected) return;
+    setDocAction('working');
+    try {
+      if (op === 'chunk') {
+        const { data } = await worldtreeApi.chunkDocument(selected.id);
+        setDocAction(`Chunked: ${data.chunks} chunk(s), ${data.embedded} embedded`);
+      } else {
+        const { data } = await worldtreeApi.embedDocument(selected.id);
+        setDocAction(`Embedded: ${data.embedded} chunk(s)`);
+      }
+    } catch (err: any) {
+      setDocAction(err?.response?.data?.details || 'Operation failed');
     }
   };
 
@@ -116,6 +205,7 @@ export default function WorldTreeLibrary() {
               {tab('documents', 'Documents', FileText)}
               {tab('search', 'Search', Search)}
               {tab('gaps', 'Knowledge Gaps', AlertCircle)}
+              {isAdmin && tab('ingest', 'Ingest', Upload)}
             </div>
           </div>
         </div>
@@ -178,6 +268,16 @@ export default function WorldTreeLibrary() {
                       <X className="h-5 w-5" />
                     </button>
                   </div>
+                  {isAdmin && (
+                    <div className="flex items-center gap-2 mb-4">
+                      <button onClick={() => void docOp('chunk')} disabled={docAction === 'working'}
+                        className="text-xs px-2 py-1 border rounded text-gray-700 hover:bg-gray-50 disabled:opacity-50">Re-chunk</button>
+                      <button onClick={() => void docOp('embed')} disabled={docAction === 'working'}
+                        className="text-xs px-2 py-1 border rounded text-gray-700 hover:bg-gray-50 disabled:opacity-50">Re-embed</button>
+                      {docAction && docAction !== 'working' && <span className="text-xs text-gray-500">{docAction}</span>}
+                      {docAction === 'working' && <span className="text-xs text-gray-400">working…</span>}
+                    </div>
+                  )}
                   {loadingContent ? (
                     <p className="text-gray-500">Loading content…</p>
                   ) : (
@@ -248,15 +348,79 @@ export default function WorldTreeLibrary() {
               </button>
             </div>
             {gaps.map((g) => (
-              <div key={g.id} className="p-4">
-                <div className="font-medium text-gray-900">{g.query}</div>
-                <div className="text-xs text-gray-500 mt-1">
-                  realms: {g.realms.length ? g.realms.join(', ') : 'global'} · seen {g.hitCount}× · last {new Date(g.lastSeenAt).toLocaleString()}
+              <div key={g.id} className="p-4 flex items-start justify-between gap-4">
+                <div>
+                  <div className="font-medium text-gray-900">{g.query}</div>
+                  <div className="text-xs text-gray-500 mt-1">
+                    realms: {g.realms.length ? g.realms.join(', ') : 'global'} · seen {g.hitCount}× · last {new Date(g.lastSeenAt).toLocaleString()}
+                  </div>
                 </div>
+                {isAdmin && (
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button onClick={() => void resolveGap(g.id, 'addressed')} title="Mark addressed"
+                      className="flex items-center gap-1 text-xs text-green-600 hover:text-green-800"><Check className="h-4 w-4" /> Addressed</button>
+                    <button onClick={() => void resolveGap(g.id, 'dismissed')} title="Dismiss"
+                      className="flex items-center gap-1 text-xs text-gray-400 hover:text-gray-600"><Trash2 className="h-4 w-4" /> Dismiss</button>
+                  </div>
+                )}
               </div>
             ))}
             {!loadingGaps && gaps.length === 0 && (
               <p className="p-4 text-sm text-gray-500">No open gaps — the corpus has answered everything asked of it.</p>
+            )}
+          </div>
+        )}
+
+        {/* INGEST (admin) */}
+        {mode === 'ingest' && isAdmin && (
+          <div className="space-y-6 max-w-3xl">
+            {ingestMsg && (
+              <div className={`p-3 rounded text-sm ${ingestMsg.ok ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'}`}>{ingestMsg.text}</div>
+            )}
+
+            <form onSubmit={submitUrlIngest} className="bg-white rounded-lg shadow p-6 space-y-3">
+              <h2 className="text-sm font-semibold text-gray-700">Ingest from URL</h2>
+              <input value={urlInput} onChange={(e) => setUrlInput(e.target.value)}
+                placeholder="https://… (document or page to ingest)"
+                className="w-full border rounded-md px-3 py-2" />
+              <input value={urlScope} onChange={(e) => setUrlScope(e.target.value)}
+                placeholder="Scope to realms (comma-separated; blank = global)"
+                className="w-full border rounded-md px-3 py-2 text-sm" />
+              <button type="submit" disabled={busy || !urlInput.trim()}
+                className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-md text-sm disabled:opacity-50">
+                <Upload className="h-4 w-4" /> {busy ? 'Ingesting…' : 'Ingest URL'}
+              </button>
+            </form>
+
+            <form onSubmit={submitDirIngest} className="bg-white rounded-lg shadow p-6 space-y-3">
+              <h2 className="text-sm font-semibold text-gray-700">Ingest a staged directory</h2>
+              <p className="text-xs text-gray-500">Path under the configured staging root (operator drops files there first). Runs in the background.</p>
+              <input value={dirInput} onChange={(e) => setDirInput(e.target.value)}
+                placeholder="e.g. my-corpus  (relative to the staging root)"
+                className="w-full border rounded-md px-3 py-2" />
+              <input value={dirScope} onChange={(e) => setDirScope(e.target.value)}
+                placeholder="Scope to realms (comma-separated; blank = global)"
+                className="w-full border rounded-md px-3 py-2 text-sm" />
+              <button type="submit" disabled={busy || !dirInput.trim()}
+                className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-md text-sm disabled:opacity-50">
+                <Upload className="h-4 w-4" /> {busy ? 'Starting…' : 'Start directory ingest'}
+              </button>
+            </form>
+
+            {run && (
+              <div className="bg-white rounded-lg shadow p-6">
+                <div className="flex items-center justify-between mb-2">
+                  <h2 className="text-sm font-semibold text-gray-700">Ingest run <span className="font-mono text-xs">{run.id.slice(0, 8)}</span></h2>
+                  <span className={`text-xs px-2 py-0.5 rounded ${
+                    run.status === 'completed' ? 'bg-green-50 text-green-700' :
+                    run.status === 'failed' ? 'bg-red-50 text-red-700' : 'bg-yellow-50 text-yellow-700'
+                  }`}>{run.status}{run.status !== 'completed' && run.status !== 'failed' ? '…' : ''}</span>
+                </div>
+                <div className="text-sm text-gray-700">
+                  {run.ingested} ingested · {run.skipped} skipped · {run.failed} failed · of {run.totalFiles} file(s)
+                </div>
+                {run.error && <div className="mt-2 text-sm text-red-600">{run.error}</div>}
+              </div>
             )}
           </div>
         )}
