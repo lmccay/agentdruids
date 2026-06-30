@@ -3,10 +3,12 @@ import { Library, Search, FileText, AlertCircle, ExternalLink, RefreshCw, X, Upl
 import {
   worldtreeApi,
   authApi,
+  realmApi,
   type WorldtreeDocument,
   type ChunkResult,
   type KnowledgeGap,
   type IngestRun,
+  type Realm,
 } from '../services/api';
 
 type Mode = 'documents' | 'search' | 'gaps' | 'ingest';
@@ -46,17 +48,36 @@ export default function WorldTreeLibrary() {
   const [loadingGaps, setLoadingGaps] = useState(false);
 
   // Ingest (admin)
+  const [realmsList, setRealmsList] = useState<Realm[]>([]);
   const [urlInput, setUrlInput] = useState('');
-  const [urlScope, setUrlScope] = useState('');
+  const [urlScopeRealms, setUrlScopeRealms] = useState<string[]>([]);
   const [dirInput, setDirInput] = useState('');
-  const [dirScope, setDirScope] = useState('');
+  const [dirScopeRealms, setDirScopeRealms] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [ingestMsg, setIngestMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [run, setRun] = useState<IngestRun | null>(null);
 
   useEffect(() => {
     authApi.getMe().then((u) => setIsAdmin(!!u?.roles.includes('admin')));
+    realmApi.getRealms().then((r) => setRealmsList(r.data)).catch(() => setRealmsList([]));
   }, []);
+
+  // Realm multi-select (none selected = global scope).
+  const realmPicker = (selected: string[], setSel: (v: string[]) => void) => (
+    <div className="flex flex-wrap gap-2">
+      {realmsList.length === 0 && <span className="text-xs text-gray-400">No realms defined — will ingest as global.</span>}
+      {realmsList.map((r) => (
+        <label key={r.id} className="flex items-center gap-1 text-xs border rounded px-2 py-1 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={selected.includes(r.id)}
+            onChange={(e) => setSel(e.target.checked ? [...selected, r.id] : selected.filter((x) => x !== r.id))}
+          />
+          {r.name}
+        </label>
+      ))}
+    </div>
+  );
 
   const loadDocuments = useCallback(async (realm?: string) => {
     setLoadingDocs(true);
@@ -135,7 +156,7 @@ export default function WorldTreeLibrary() {
     setBusy(true);
     setIngestMsg(null);
     try {
-      const { data } = await worldtreeApi.ingestUrl(urlInput.trim(), { scopeRealms: parseRealms(urlScope) });
+      const { data } = await worldtreeApi.ingestUrl(urlInput.trim(), { scopeRealms: urlScopeRealms });
       setIngestMsg({ ok: true, text: `Ingested: ${data.document.title || data.document.sourceUri}` });
       setUrlInput('');
       void loadDocuments();
@@ -153,7 +174,7 @@ export default function WorldTreeLibrary() {
     setIngestMsg(null);
     setRun(null);
     try {
-      const { data } = await worldtreeApi.ingestDirectory(dirInput.trim(), { scopeRealms: parseRealms(dirScope) });
+      const { data } = await worldtreeApi.ingestDirectory(dirInput.trim(), { scopeRealms: dirScopeRealms });
       const { data: r } = await worldtreeApi.getIngestRun(data.runId);
       setRun(r.run);
       setIngestMsg({ ok: true, text: `Started ingest of ${data.totalFiles} file(s) — run ${data.runId.slice(0, 8)}` });
@@ -233,19 +254,16 @@ export default function WorldTreeLibrary() {
                   <RefreshCw className={`h-4 w-4 ${loadingDocs ? 'animate-spin' : ''}`} />
                 </button>
               </div>
-              <form onSubmit={(e) => { e.preventDefault(); void loadDocuments(docRealm); }} className="flex gap-2">
-                <input
-                  value={docRealm}
-                  onChange={(e) => setDocRealm(e.target.value)}
-                  placeholder="Filter by realm id…"
-                  className="flex-1 border rounded-md px-2 py-1 text-sm"
-                />
-                <button type="submit" className="px-2 py-1 text-xs bg-blue-600 text-white rounded">Filter</button>
-                {docRealm && (
-                  <button type="button" onClick={() => { setDocRealm(''); void loadDocuments(); }}
-                    className="px-2 py-1 text-xs border rounded text-gray-600">Clear</button>
-                )}
-              </form>
+              <select
+                value={docRealm}
+                onChange={(e) => { setDocRealm(e.target.value); void loadDocuments(e.target.value); }}
+                className="w-full border rounded-md px-2 py-1 text-sm"
+              >
+                <option value="">All realms (global + every realm)</option>
+                {realmsList.map((r) => (
+                  <option key={r.id} value={r.id}>{r.name}</option>
+                ))}
+              </select>
               {documents.map((doc) => (
                 <button
                   key={doc.id}
@@ -410,9 +428,8 @@ export default function WorldTreeLibrary() {
               <input value={urlInput} onChange={(e) => setUrlInput(e.target.value)}
                 placeholder="https://… (document or page to ingest)"
                 className="w-full border rounded-md px-3 py-2" />
-              <input value={urlScope} onChange={(e) => setUrlScope(e.target.value)}
-                placeholder="Scope to realms (comma-separated; blank = global)"
-                className="w-full border rounded-md px-3 py-2 text-sm" />
+              <label className="block text-xs font-medium text-gray-500">Scope (none selected = global)</label>
+              {realmPicker(urlScopeRealms, setUrlScopeRealms)}
               <button type="submit" disabled={busy || !urlInput.trim()}
                 className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-md text-sm disabled:opacity-50">
                 <Upload className="h-4 w-4" /> {busy ? 'Ingesting…' : 'Ingest URL'}
@@ -425,9 +442,8 @@ export default function WorldTreeLibrary() {
               <input value={dirInput} onChange={(e) => setDirInput(e.target.value)}
                 placeholder="e.g. my-corpus  (relative to the staging root)"
                 className="w-full border rounded-md px-3 py-2" />
-              <input value={dirScope} onChange={(e) => setDirScope(e.target.value)}
-                placeholder="Scope to realms (comma-separated; blank = global)"
-                className="w-full border rounded-md px-3 py-2 text-sm" />
+              <label className="block text-xs font-medium text-gray-500">Scope (none selected = global)</label>
+              {realmPicker(dirScopeRealms, setDirScopeRealms)}
               <button type="submit" disabled={busy || !dirInput.trim()}
                 className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-md text-sm disabled:opacity-50">
                 <Upload className="h-4 w-4" /> {busy ? 'Starting…' : 'Start directory ingest'}

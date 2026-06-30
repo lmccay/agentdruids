@@ -960,7 +960,33 @@ export class WorldTreeQueryService {
   }
 
   /** Set an item's scopes (replace-semantics). global => scope_ref NULL. */
+  /**
+   * Refuse to reference a realm that doesn't exist. An orphan realm scope is
+   * invisible to retrieval (no agent is ever in a nonexistent realm), so we
+   * reject it. `scope_ref` is a polymorphic, FK-less column, hence this
+   * application-level guard. Call it up front (before ingest/persist) to fail
+   * fast and avoid orphan documents.
+   */
+  async assertRealmsExist(realmRefs: string[]): Promise<void> {
+    const refs = Array.from(new Set(realmRefs.filter(Boolean)));
+    if (refs.length === 0) return;
+    const { rows } = await this.db.query<{ id: string }>(
+      `SELECT id::text AS id FROM druids_core.realms WHERE id::text = ANY($1::text[])`,
+      [refs]
+    );
+    const known = new Set(rows.map((r) => r.id));
+    const unknown = refs.filter((r) => !known.has(r));
+    if (unknown.length > 0) {
+      throw new Error(`Cannot scope to unknown realm(s): ${unknown.join(', ')}`);
+    }
+  }
+
   async setItemScopes(itemType: 'document' | 'contribution' | 'chunk', itemId: string, scopes: ScopeAssoc[]): Promise<void> {
+    // Backstop guard (the ingest entry points validate up front to fail fast).
+    await this.assertRealmsExist(
+      scopes.filter((s) => s.scopeType === 'realm' && s.scopeRef).map((s) => s.scopeRef as string)
+    );
+
     await this.db.transaction(async (client) => {
       await client.query(
         `DELETE FROM druids_core.worldtree_item_scopes WHERE item_type = $1 AND item_id = $2`,

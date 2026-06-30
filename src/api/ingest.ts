@@ -41,6 +41,15 @@ router.post('/url', requireAdmin, async (req, res) => {
     }
     if (Array.isArray(req.body?.scopeRealms)) opts.scopeRealms = req.body.scopeRealms.map((r: unknown) => String(r));
 
+    // Validate realm scopes BEFORE fetching/persisting (fail fast, no orphan doc).
+    if (opts.scopeRealms?.length) {
+      try {
+        await getWorldTreeQueryService().assertRealmsExist(opts.scopeRealms);
+      } catch (e) {
+        return res.status(400).json({ error: e instanceof Error ? e.message : 'Invalid realm scope' });
+      }
+    }
+
     const document = await getDoclingService().ingestUrl(url, opts);
     return res.status(201).json({ document });
   } catch (error) {
@@ -78,6 +87,15 @@ router.post('/directory', requireAdmin, async (req, res) => {
     if (Array.isArray(includeExtensions)) opts.includeExtensions = includeExtensions.map((e: unknown) => String(e));
     if (typeof triggeredBy === 'string') opts.triggeredBy = triggeredBy;
     if (Array.isArray(req.body?.scopeRealms)) opts.scopeRealms = req.body.scopeRealms.map((r: unknown) => String(r));
+
+    // Validate realm scopes before kicking off the background run.
+    if (opts.scopeRealms?.length) {
+      try {
+        await getWorldTreeQueryService().assertRealmsExist(opts.scopeRealms);
+      } catch (e) {
+        return res.status(400).json({ error: e instanceof Error ? e.message : 'Invalid realm scope' });
+      }
+    }
 
     const run = await getDoclingService().startDirectoryIngest(stagingPath, opts);
     return res.status(202).json(run); // 202 Accepted — processing in background
