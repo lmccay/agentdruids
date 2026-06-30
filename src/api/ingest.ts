@@ -2,14 +2,16 @@ import express from 'express';
 import { getDoclingService, type DoclingFormat } from '../services/DoclingService';
 import { getWorldTreeQueryService } from '../services/WorldTreeQueryService';
 import { requireAdmin } from '../auth/authorize';
+import { assertSafeIngestUrl } from '../services/ingestUrlGuard';
 
 /**
- * Document ingestion API (thin PoC) — fetch + convert a remote source through
- * the druids-docling service and catalog it in the WorldTree document lineage.
+ * Document ingestion API — fetch + convert a remote source through the
+ * druids-docling service and catalog it in the WorldTree document lineage.
  *
- * SECURITY (PoC): `POST /url` ingests an arbitrary URL with no allowlist. Before
- * non-PoC use, gate `url` through `resourceAccess.allowedLocations`
- * (docs/docling-integration-evaluation.md §7).
+ * SECURITY: write endpoints are admin-only (requireAdmin). `POST /url` URLs are
+ * SSRF-guarded (assertSafeIngestUrl: http(s) only; private/loopback/link-local/
+ * metadata addresses blocked; optional INGEST_URL_ALLOWLIST). Realm scopes are
+ * validated against the realm registry before any fetch/persist.
  */
 
 const router = express.Router();
@@ -22,6 +24,13 @@ router.post('/url', requireAdmin, async (req, res) => {
     const { url, toFormats, namespace, accessLevel } = req.body ?? {};
     if (typeof url !== 'string' || url.length === 0) {
       return res.status(400).json({ error: 'url (string) is required' });
+    }
+
+    // SSRF guard — reject internal/loopback/metadata targets before fetching.
+    try {
+      await assertSafeIngestUrl(url);
+    } catch (e) {
+      return res.status(400).json({ error: e instanceof Error ? e.message : 'URL not allowed' });
     }
 
     let formats: DoclingFormat[] | undefined;

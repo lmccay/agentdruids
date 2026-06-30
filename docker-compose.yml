@@ -32,6 +32,9 @@ services:
       - DOCLING_SERVICE_URL=${DOCLING_SERVICE_URL:-http://druids-docling:5001}
       # Staging root for directory ingestion (operator drops mirrors/archives here)
       - DOCUMENT_STAGING_DIR=${DOCUMENT_STAGING_DIR:-/app/data/staging}
+      # Optional SSRF allowlist for URL ingest (comma-separated hosts; suffix
+      # match). Empty = any public host (private/loopback/metadata always blocked).
+      - INGEST_URL_ALLOWLIST=${INGEST_URL_ALLOWLIST:-}
       # Embeddings: bundled-local by default (TEI container); pluggable per deployment.
       # Set EMBEDDING_PROVIDER=ollama|openai|none to repoint or disable (lexical fallback).
       - EMBEDDING_PROVIDER=${EMBEDDING_PROVIDER:-tei}
