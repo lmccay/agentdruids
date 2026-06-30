@@ -581,6 +581,11 @@ export const contentApi = {
 };
 
 // WorldTree library — ingested documents, semantic corpus search, knowledge gaps
+export interface DocumentScope {
+  scopeType: string;       // 'global' | 'realm' | 'agent' | 'session'
+  scopeRef: string | null;
+}
+
 export interface WorldtreeDocument {
   id: string;
   sourceUri: string;
@@ -592,6 +597,7 @@ export interface WorldtreeDocument {
   fetchedAt: string | null;
   createdAt: string;
   formats: string[];
+  scopes?: DocumentScope[];
 }
 
 export interface ChunkResult {
@@ -637,7 +643,7 @@ export interface IngestOptions {
 }
 
 export const worldtreeApi = {
-  async listDocuments(params: { sourceUri?: string; namespace?: string; limit?: number; offset?: number } = {}): Promise<{ data: { documents: WorldtreeDocument[]; limit: number; offset: number } }> {
+  async listDocuments(params: { sourceUri?: string; namespace?: string; realm?: string; limit?: number; offset?: number } = {}): Promise<{ data: { documents: WorldtreeDocument[]; limit: number; offset: number } }> {
     const response = await api.get('/worldtree/documents', { params });
     return { data: response.data };
   },
