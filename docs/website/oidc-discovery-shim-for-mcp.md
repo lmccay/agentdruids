@@ -70,7 +70,7 @@ We also checked the IdP's configuration surface for any flag that would enable a
 The fix is a small reverse proxy placed in front of the IdP. It does three things and nothing else:
 
 ```
-                         ┌─────────────────────────────────────────┐
+                         ┌──────────────────────────────────────────┐
    MCP client            │  Discovery shim (reverse proxy)          │
    ─────────             │                                          │
    metadata request  ───▶│  /.well-known/oauth-authorization-server │  synthesized
@@ -82,9 +82,9 @@ The fix is a small reverse proxy placed in front of the IdP. It does three thing
                          │              client (fixed client_id +   │
                          │              redirect_uris)              │
                          │                                          │
-   authorize / token / ─▶│  everything else → pass through ────────┼──▶  IdP
+   authorize / token / ─▶│  everything else → pass through ─────────┼──▶  IdP
    keys / login / etc.   │  UNCHANGED (issuer preserved)            │    (unmodified)
-                         └─────────────────────────────────────────┘
+                         └──────────────────────────────────────────┘
 ```
 
 **1. Serve Authorization Server Metadata at every URL form the client derives.**
