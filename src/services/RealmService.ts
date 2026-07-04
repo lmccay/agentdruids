@@ -1,3 +1,4 @@
+import { v4 as uuidv4 } from 'uuid';
 import { RealmId } from "../models/Types";
 import { RepositoryManager } from './RepositoryManager';
 import { MCPConfigLoader } from './mcp/MCPConfigLoader';
@@ -95,7 +96,9 @@ export class RealmService {
   
   async createRealm(request: any): Promise<any> {
     const realm = {
-      id: request.id || `realm-${Date.now()}`,
+      // Fallback id for the no-database path only. When a repository is present,
+      // BaseRepository.create mints its own UUID and we adopt it below.
+      id: request.id || uuidv4(),
       name: request.name,
       description: request.description,
       type: request.type || 'development',
@@ -110,19 +113,24 @@ export class RealmService {
       updatedAt: new Date().toISOString()
     };
 
-    // Store in memory for fast access
-    this.realms.set(realm.id, realm);
-    
-    // Persist to database first (primary persistence)
+    // Persist to database first (primary persistence). BaseRepository.create
+    // generates its own UUID and ignores the id we pass, so we MUST adopt the
+    // persisted id as canonical — otherwise the in-memory cache and the DB
+    // diverge on id and realm-scoped lookups (e.g. ingest scope validation)
+    // fail until a restart reloads the map from the DB.
     if (this.repositoryManager) {
       try {
         const dbRealm = this.transformServiceRealmToDbFormat(realm);
-        await this.repositoryManager.realms.create(dbRealm);
+        const persisted = await this.repositoryManager.realms.create(dbRealm);
+        realm.id = persisted.id;
         console.log(`💾 Stored realm ${realm.id} in database`);
       } catch (error) {
         console.warn('Failed to persist realm to database:', error instanceof Error ? error.message : 'Unknown error');
       }
     }
+
+    // Store in memory under the canonical (DB-assigned) id for fast access
+    this.realms.set(realm.id, realm);
     
     // Persist to Redis cache (secondary persistence)
     try {
