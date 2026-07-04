@@ -13,8 +13,6 @@ import {
 
 type Mode = 'documents' | 'search' | 'gaps' | 'ingest';
 
-const parseRealms = (s: string) => s.split(',').map((r) => r.trim()).filter(Boolean);
-
 const scopeLabel = (s: { scopeType: string; scopeRef: string | null }) =>
   s.scopeType === 'global' ? 'global' : `${s.scopeType}:${s.scopeRef ?? '?'}`;
 const scopeClass = (t: string) =>
@@ -38,7 +36,7 @@ export default function WorldTreeLibrary() {
 
   // Search (semantic corpus)
   const [query, setQuery] = useState('');
-  const [realms, setRealms] = useState('');
+  const [realms, setRealms] = useState<string[]>([]);
   const [results, setResults] = useState<ChunkResult[]>([]);
   const [searching, setSearching] = useState(false);
   const [searched, setSearched] = useState(false);
@@ -141,7 +139,7 @@ export default function WorldTreeLibrary() {
     setSearching(true);
     setSearched(true);
     try {
-      const { data } = await worldtreeApi.searchCorpus(query.trim(), parseRealms(realms));
+      const { data } = await worldtreeApi.searchCorpus(query.trim(), realms.length ? realms : undefined);
       setResults(data.chunks);
     } catch {
       setResults([]);
@@ -356,12 +354,8 @@ export default function WorldTreeLibrary() {
                   {searching ? 'Searching…' : 'Search'}
                 </button>
               </div>
-              <input
-                value={realms}
-                onChange={(e) => setRealms(e.target.value)}
-                placeholder="Optional: scope to realms (comma-separated)"
-                className="w-full border rounded-md px-3 py-2 text-sm"
-              />
+              <label className="block text-xs font-medium text-gray-500">Scope (none selected = all)</label>
+              {realmPicker(realms, setRealms)}
             </form>
             <div className="space-y-3">
               {results.map((c, i) => (
