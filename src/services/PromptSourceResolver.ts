@@ -156,4 +156,35 @@ export class PromptSourceResolver {
     }
     return layer;
   }
+
+  /**
+   * Parse a DB-backed realm layer (Layer 3) from Markdown. Unlike an agent
+   * extension, the realm layer is a *base* layer — it may declare
+   * immutable/protected sections (the realm's operating discipline) that lower
+   * layers cannot override — so those are preserved here.
+   */
+  async parseRealmLayer(markdown: string, realmId: string): Promise<PromptLayer> {
+    const parsed = this.parser.parsePrompt(markdown);
+
+    const layer: PromptLayer = {
+      version: parsed.frontmatter.version || '1.0.0',
+      metadata: parsed.frontmatter.metadata || { name: `Realm Context: ${realmId}` },
+      sections: parsed.sections,
+      source_url: `database://realm/${realmId}/prompt-layer`,
+      loaded_at: new Date()
+    };
+    if (parsed.frontmatter.immutable_sections) {
+      layer.immutable_sections = parsed.frontmatter.immutable_sections;
+    }
+    if (parsed.frontmatter.protected_sections) {
+      layer.protected_sections = parsed.frontmatter.protected_sections;
+    }
+    if (parsed.frontmatter.override_points) {
+      layer.override_points = parsed.frontmatter.override_points;
+    }
+    if (parsed.frontmatter.extension_points) {
+      layer.extension_points = parsed.frontmatter.extension_points;
+    }
+    return layer;
+  }
 }

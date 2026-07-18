@@ -22,9 +22,41 @@ interface RealmFormData {
     maxAgents: number;
     allowExternalAccess: boolean;
     leyLineEndpoint?: string;
+    promptLayer?: string;
   };
   mcpServers?: string[];
 }
+
+// Scaffold for a realm prompt layer (Layer 3). The operating discipline is marked
+// immutable so agent extensions can't override it; scaffold sections are extension
+// points agents fill with their specialization.
+const REALM_PROMPT_LAYER_TEMPLATE = `---
+version: 1.0.0
+metadata:
+  name: "Realm Prompt Layer"
+  description: "Standing context for all agents operating in this realm"
+immutable_sections:
+  - "Operating discipline"
+extension_points:
+  - "Expertise"
+  - "When asked to produce content"
+---
+
+# Operating discipline
+
+You are invoked via delegate_task with a task string that contains everything you
+need. Produce your content directly as your response, then stop. Do not call
+message_agent, delegate_task, or get_step_content. If the task is missing required
+information, reply exactly "Cannot proceed — task is missing [what's missing]." and stop.
+
+# Expertise
+
+(Agents extend this section with their channel/domain expertise.)
+
+# When asked to produce content
+
+(Agents extend this section with their step-by-step approach.)
+`;
 
 function RealmCard({ 
   realm, 
@@ -186,7 +218,8 @@ function RealmModal({
     configuration: {
       maxAgents: realm?.configuration.maxAgents || 10,
       allowExternalAccess: realm?.configuration.allowExternalAccess || false,
-      leyLineEndpoint: realm?.configuration.leyLineEndpoint || ''
+      leyLineEndpoint: realm?.configuration.leyLineEndpoint || '',
+      promptLayer: realm?.configuration.promptLayer || ''
     },
     mcpServers: realm?.mcpServers || []
   });
@@ -201,7 +234,8 @@ function RealmModal({
         configuration: {
           maxAgents: realm.configuration?.maxAgents || 10,
           allowExternalAccess: realm.configuration?.allowExternalAccess || false,
-          leyLineEndpoint: realm.configuration?.leyLineEndpoint || ''
+          leyLineEndpoint: realm.configuration?.leyLineEndpoint || '',
+          promptLayer: realm.configuration?.promptLayer || ''
         },
         mcpServers: realm.mcpServers || []
       });
@@ -214,7 +248,8 @@ function RealmModal({
         configuration: {
           maxAgents: 10,
           allowExternalAccess: false,
-          leyLineEndpoint: ''
+          leyLineEndpoint: '',
+          promptLayer: ''
         },
         mcpServers: []
       });
@@ -360,6 +395,43 @@ function RealmModal({
               />
             </div>
           )}
+
+          <div>
+            <div className="flex items-center justify-between mb-1">
+              <label className="block text-sm font-medium text-gray-700">
+                Realm Prompt Layer
+              </label>
+              {!isReadOnly && !formData.configuration.promptLayer && (
+                <button
+                  type="button"
+                  onClick={() => setFormData({
+                    ...formData,
+                    configuration: { ...formData.configuration, promptLayer: REALM_PROMPT_LAYER_TEMPLATE }
+                  })}
+                  className="text-xs text-primary-600 hover:text-primary-700"
+                >
+                  Insert template
+                </button>
+              )}
+            </div>
+            <textarea
+              value={formData.configuration.promptLayer || ''}
+              onChange={(e) => setFormData({
+                ...formData,
+                configuration: { ...formData.configuration, promptLayer: e.target.value }
+              })}
+              rows={10}
+              placeholder="Markdown with frontmatter. Standing context composed into every agent operating in this realm — e.g. the shared operating discipline (mark it immutable) and scaffold sections agents extend."
+              className="w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
+              disabled={isReadOnly}
+            />
+            <p className="mt-1 text-xs text-gray-500">
+              Composition Layer 3. Sections listed under <code>immutable_sections</code> in the
+              frontmatter cannot be overridden by an agent's extension; sections under{' '}
+              <code>extension_points</code> can be appended to. Agents opt in via their prompt
+              composition settings.
+            </p>
+          </div>
 
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">

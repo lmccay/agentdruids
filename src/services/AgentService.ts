@@ -32,7 +32,10 @@ function collectAgentRealms(ra?: RealmAccess): string[] {
   if (ra?.boundRealmId) realms.add(ra.boundRealmId);
   if (ra?.currentRealmId) realms.add(ra.currentRealmId);
   for (const ar of ra?.accessibleRealms ?? []) {
-    if (ar?.realmId) realms.add(ar.realmId);
+    // accessibleRealms may be stored as plain realm-id strings or as
+    // { realmId, ... } objects; handle both (matches agentCanAccessRealm).
+    const id = typeof ar === 'string' ? ar : (ar as any)?.realmId;
+    if (id) realms.add(id);
   }
   return Array.from(realms);
 }
@@ -840,77 +843,83 @@ export class AgentService {
     // Generate system prompt
     let systemPrompt: string;
 
+    // Collaboration context (present on coordination/delegation calls) is
+    // layered on top of whichever base-prompt strategy we choose, so it survives
+    // prompt composition rather than short-circuiting it.
+    const collab = request.collaborationContext;
+    const collaborationContextStr = collab?.usePersonaPrompt && collab.scenarioName
+      ? this.generateCollaborationContext(collab.scenarioName, collab.scenarioType, collab.agentRole)
+      : '';
+
+    const appendToolInfo = async (prompt: string): Promise<string> => {
+      const toolInformation = await this.generateToolAwarenessPrompt(agent);
+      return toolInformation ? prompt + toolInformation : prompt;
+    };
+
     if (request.systemPrompt) {
       // Use explicit system prompt override (for backward compatibility)
       systemPrompt = request.systemPrompt;
-    } else if (request.collaborationContext?.usePersonaPrompt && request.collaborationContext.scenarioName) {
-      // Generate enhanced persona-aware system prompt for collaborations (legacy)
-      const collaborationContextStr = this.generateCollaborationContext(
-        request.collaborationContext.scenarioName,
-        request.collaborationContext.scenarioType,
-        request.collaborationContext.agentRole
-      );
-      const baseSystemPrompt = this.generatePersonaSystemPrompt(
-        agent,
-        collaborationContextStr,
-        request.collaborationContext.agentRole
-      );
-      systemPrompt = await this.generateRealmAwareSystemPrompt(agent, baseSystemPrompt, request.sessionId);
-      const toolInformation = await this.generateToolAwarenessPrompt(agent);
-      if (toolInformation) {
-        systemPrompt += toolInformation;
-      }
     } else if (this.promptCompositionService && agent.promptConfig) {
-      // Use new prompt composition system (layered approach)
+      // Layered prompt composition. Now runs for collaboration calls too (it used
+      // to be short-circuited by the persona branch whenever usePersonaPrompt was
+      // set) so the realm layer + agent extension apply during coordination.
+      // Agents without promptConfig fall through to the unchanged persona/legacy
+      // paths below, so this only affects agents that opted into composition.
       try {
-        // Get current realm ID from session if available
-        let realmId: string | undefined;
-        if (request.sessionId && agent.realmAccess?.currentRealmId) {
-          realmId = agent.realmAccess.currentRealmId;
-        } else if (agent.realmAccess?.boundRealmId) {
-          realmId = agent.realmAccess.boundRealmId;
-        }
+        // Session-scoped current realm (reflects in-session travel), NOT the
+        // agent's global realm state. 'default' => no realm layer.
+        const currentRealm = this.resolveCurrentRealm(agent, agent.id, request.sessionId);
+        const realmId = currentRealm && currentRealm.toLowerCase() !== 'default' ? currentRealm : undefined;
 
-        // Get available tools
-        const availableTools = agent.mcpTools || [];
+        // DB-backed realm layer (Layer 3): pull the realm's authored prompt layer
+        // so composition uses it instead of a file. (RealmService owns realm data;
+        // PromptCompositionService stays DB-agnostic and just parses the markdown.)
+        let realmLayerMarkdown: string | undefined;
+        if (realmId) {
+          try {
+            const realm = await this.realmService.getRealm(realmId);
+            realmLayerMarkdown = realm?.configuration?.promptLayer || undefined;
+          } catch (e) {
+            console.warn(`Failed to load realm prompt layer for ${realmId}:`, e instanceof Error ? e.message : e);
+          }
+        }
 
         const composedPrompt = await this.promptCompositionService.composePrompt(agent, {
           user_id: 'system', // TODO: Pass actual user ID when available
           timestamp: new Date().toISOString(),
-          available_tools: availableTools,
+          available_tools: agent.mcpTools || [],
           ...(request.sessionId && { session_id: request.sessionId }),
-          ...(realmId && { realm_id: realmId })
+          ...(realmId && { realm_id: realmId }),
+          ...(realmLayerMarkdown && { realm_layer_markdown: realmLayerMarkdown })
         });
 
         systemPrompt = composedPrompt.final_prompt;
-
-        // Add tool awareness information after prompt composition
-        const toolInformation = await this.generateToolAwarenessPrompt(agent);
-        if (toolInformation) {
-          systemPrompt += toolInformation;
-        }
+        // Layer the coordination/collaboration context on top of the composed base.
+        if (collaborationContextStr) systemPrompt += collaborationContextStr;
+        systemPrompt = await appendToolInfo(systemPrompt);
 
         if (composedPrompt.security_violations.length > 0) {
           console.warn(`⚠️  Agent ${agentId} has ${composedPrompt.security_violations.length} security violations in prompt composition`);
         }
       } catch (error) {
         console.error('Failed to compose prompt, falling back to legacy behavior:', error);
-        // Fall back to legacy behavior
-        const baseSystemPrompt = agent.llmConfig.systemPrompt || `You are ${agent.name}. ${agent.description}`;
+        // Fall back to the same base the non-composition paths would have used.
+        const baseSystemPrompt = collaborationContextStr
+          ? this.generatePersonaSystemPrompt(agent, collaborationContextStr, collab?.agentRole)
+          : (agent.llmConfig.systemPrompt || `You are ${agent.name}. ${agent.description}`);
         systemPrompt = await this.generateRealmAwareSystemPrompt(agent, baseSystemPrompt, request.sessionId);
-        const toolInformation = await this.generateToolAwarenessPrompt(agent);
-        if (toolInformation) {
-          systemPrompt += toolInformation;
-        }
+        systemPrompt = await appendToolInfo(systemPrompt);
       }
+    } else if (collaborationContextStr) {
+      // Persona-aware prompt for collaborations (no composition configured).
+      const baseSystemPrompt = this.generatePersonaSystemPrompt(agent, collaborationContextStr, collab?.agentRole);
+      systemPrompt = await this.generateRealmAwareSystemPrompt(agent, baseSystemPrompt, request.sessionId);
+      systemPrompt = await appendToolInfo(systemPrompt);
     } else {
       // Legacy behavior: use agent's configured system prompt or fallback
       const baseSystemPrompt = agent.llmConfig.systemPrompt || `You are ${agent.name}. ${agent.description}`;
       systemPrompt = await this.generateRealmAwareSystemPrompt(agent, baseSystemPrompt, request.sessionId);
-      const toolInformation = await this.generateToolAwarenessPrompt(agent);
-      if (toolInformation) {
-        systemPrompt += toolInformation;
-      }
+      systemPrompt = await appendToolInfo(systemPrompt);
     }
 
     // Check if agentic loop is enabled for this agent
@@ -1467,8 +1476,8 @@ Available tools:
     // external gateway tools.)
     tools.push({
       name: 'search_worldtree',
-      description: 'Search the WorldTree knowledge corpus (ingested documents) for passages relevant to a query. Returns the most relevant text chunks with their source and section headings. Use this to ground answers in the ingested corpus.',
-      parameters: { query: 'natural-language search query', limit: 'optional max passages to return (default 5)' }
+      description: 'Search the WorldTree knowledge corpus (ingested documents) for passages relevant to a query. Scope is the shared global corpus plus the realm you are currently in (travel there first with travel_to_realm). To also search other realms you have access to, pass their ids in "realms". Returns the most relevant text chunks with their source and section headings. Use this to ground answers in the ingested corpus.',
+      parameters: { query: 'natural-language search query', limit: 'optional max passages to return (default 5)', realms: 'optional array of additional realm ids to include in the search (must be realms you can access)' }
     });
 
     // MCP tools via gateway (based on agent's mcpTools configuration)
@@ -2247,7 +2256,7 @@ Your responses and behavior should be appropriate to this realm's context and ch
     // Route to appropriate tool implementation
     switch (toolName) {
       case 'message_agent':
-        return await this.toolMessageAgent(agent.id, params, sessionId);
+        return await this.toolMessageAgent(agent.id, params, sessionId, requesterId);
 
       case 'delegate_task':
         return await this.toolDelegateTask(agent.id, params, sessionId, requesterId);
@@ -2398,44 +2407,133 @@ Your responses and behavior should be appropriate to this realm's context and ch
   }
 
   /**
-   * Tool: Send a message to another agent
+   * Unified, governed inter-agent message transport.
+   *
+   * `message_agent`, `delegate_task`, and `assign_simple_task` are all the same
+   * operation — send content to another agent, run it once, get one response —
+   * differing only in (a) the prompt framing and (b) previously-inconsistent
+   * governance. They now route through this single path so realm-presence and
+   * user-scoped identity checks are enforced identically for every intent
+   * (closing the old `message_agent` bypass). The `intent` selects the prompt
+   * template and the recorded action type.
+   *
+   * SEAM — future coordinator-to-coordinator delegation: today the target runs
+   * *without* a session context (no `sessionId` threaded into the sub-call), so
+   * a delegated agent's own travel/tools are not session-scoped. Hierarchical
+   * delegation to another coordinator should pass a child session context here
+   * (and add task-lifecycle tracking) rather than introduce a parallel path.
    */
-  private async toolMessageAgent(
+  private async sendToAgent(
     fromAgentId: AgentId,
-    params: { agent_id: string; message: string },
-    sessionId?: string
-  ): Promise<any> {
-    // Resolve agent name to ID if needed
-    const resolvedAgentId = await this.resolveAgentId(params.agent_id);
+    targetIdRaw: string,
+    content: string,
+    intent: 'message' | 'delegate' | 'assign',
+    sessionId?: string,
+    requesterId?: string
+  ): Promise<{ target_agent: string; response: string; execution_time: number }> {
+    const resolvedAgentId = await this.resolveAgentId(targetIdRaw);
     const targetAgent = await this.getAgent(resolvedAgentId as AgentId);
 
     if (targetAgent.status !== 'active') {
       throw new Error(`Target agent ${resolvedAgentId} is not active`);
     }
 
-    // Execute the message as a prompt to the target agent
+    // Governance is uniform across all intents:
+    // 1. User-scoped identity guard (transitive via requesterId).
+    await this.enforceAssumableForRequester(requesterId, targetAgent, resolvedAgentId);
+    // 2. Realm-presence co-location (session-scoped travel aware).
+    const fromAgent = await this.getAgent(fromAgentId);
+    const fromAgentRealm = this.resolveCurrentRealm(fromAgent, fromAgentId, sessionId);
+    const targetAgentRealm = this.resolveCurrentRealm(targetAgent, resolvedAgentId as AgentId, sessionId);
+    if (fromAgentRealm !== targetAgentRealm) {
+      const verb = intent === 'message' ? 'message' : intent === 'delegate' ? 'delegate to' : 'assign a task to';
+      throw new Error(`Cannot ${verb} agent ${resolvedAgentId} in realm ${targetAgentRealm} from realm ${fromAgentRealm}. Agents can only interact with other agents in their current realm.`);
+    }
+
+    const { prompt, scenarioName, agentRole, actionType } = this.buildInterAgentMessage(intent, fromAgentId, content);
+
     const response = await this.executeAgentPrompt(resolvedAgentId as AgentId, {
-      prompt: `Message from agent ${fromAgentId}: ${params.message}`,
+      prompt,
       collaborationContext: {
-        scenarioName: 'Inter-agent Communication',
+        scenarioName,
+        ...(agentRole && { agentRole }),
         usePersonaPrompt: true
       }
-    });
+    }, requesterId);
 
     await this.recordToolSubContribution({
       sessionId,
       targetAgent,
-      actionType: 'message_agent',
-      description: params.message,
+      actionType,
+      description: content,
       content: response.response,
       durationMs: response.executionTime,
     });
 
     return {
       target_agent: resolvedAgentId,
-      message_sent: params.message,
       response: response.response,
-      execution_time: response.executionTime
+      execution_time: response.executionTime,
+    };
+  }
+
+  /** Prompt template + persona framing + contribution action type per intent. */
+  private buildInterAgentMessage(
+    intent: 'message' | 'delegate' | 'assign',
+    fromAgentId: AgentId,
+    content: string
+  ): { prompt: string; scenarioName: string; agentRole?: string; actionType: string } {
+    switch (intent) {
+      case 'delegate':
+        return {
+          prompt: `Task delegated from agent ${fromAgentId}: ${content}. Please execute this task and provide your results.`,
+          scenarioName: 'Task Delegation',
+          agentRole: 'task_executor',
+          actionType: 'delegate_task',
+        };
+      case 'assign':
+        return {
+          prompt: `SIMPLE TASK ASSIGNMENT from ${fromAgentId}: ${content}
+
+IMPORTANT: This is a simple task assignment that should be completed in a single response. Please:
+1. Use your own available tools and capabilities to complete this task
+2. Complete the requested task fully
+3. Provide your final result/deliverable
+4. Do not ask questions or request further input
+5. Consider this task complete when you finish your response
+
+Task: ${content}
+
+Please use your available tools to execute this task now and provide your complete result.`,
+          scenarioName: 'Simple Task Assignment',
+          agentRole: 'task_executor',
+          actionType: 'assign_simple_task',
+        };
+      case 'message':
+      default:
+        return {
+          prompt: `Message from agent ${fromAgentId}: ${content}`,
+          scenarioName: 'Inter-agent Communication',
+          actionType: 'message_agent',
+        };
+    }
+  }
+
+  /**
+   * Tool: Send a message to another agent
+   */
+  private async toolMessageAgent(
+    fromAgentId: AgentId,
+    params: { agent_id: string; message: string },
+    sessionId?: string,
+    requesterId?: string
+  ): Promise<any> {
+    const result = await this.sendToAgent(fromAgentId, params.agent_id, params.message, 'message', sessionId, requesterId);
+    return {
+      target_agent: result.target_agent,
+      message_sent: params.message,
+      response: result.response,
+      execution_time: result.execution_time,
     };
   }
 
@@ -2468,60 +2566,37 @@ Your responses and behavior should be appropriate to this realm's context and ch
     }
   }
 
+  /**
+   * Resolve an agent's *effective* current realm for agent-to-agent realm
+   * checks. During a coordination session, travel_to_realm records the move
+   * only in the session-scoped SessionAgentManager (not the agent's global
+   * realmAccess), so the check must consult that session state first and fall
+   * back to the agent's global realm only when outside a session (or when the
+   * agent never traveled in-session).
+   */
+  private resolveCurrentRealm(agent: Agent, agentId: AgentId, sessionId?: string): string {
+    if (sessionId && this.coordinationService) {
+      const sessionAgentManager = this.coordinationService.getSessionAgentManager(sessionId);
+      const sessionRealm = sessionAgentManager?.getAgentSessionState(agentId)?.currentRealm;
+      if (sessionRealm && sessionRealm.toLowerCase() !== 'default') {
+        return sessionRealm;
+      }
+    }
+    return agent.realmAccess?.currentRealmId || agent.realmAccess?.boundRealmId || 'default';
+  }
+
   private async toolDelegateTask(
     fromAgentId: AgentId,
     params: { agent_id: string; task: string },
     sessionId?: string,
     requesterId?: string
   ): Promise<any> {
-    const fromAgent = await this.getAgent(fromAgentId);
-
-    // Resolve agent name to ID if needed
-    const resolvedAgentId = await this.resolveAgentId(params.agent_id);
-    const targetAgent = await this.getAgent(resolvedAgentId as AgentId);
-
-    if (targetAgent.status !== 'active') {
-      throw new Error(`Target agent ${resolvedAgentId} is not active`);
-    }
-
-    // User-scoped delegation: when this chain is driven by a user, a coordinator
-    // may only delegate to a druid the user may assume (admins unconstrained).
-    // Elementals are governed by the realm check below, not user assumption.
-    await this.enforceAssumableForRequester(requesterId, targetAgent, resolvedAgentId);
-
-    // Check if target agent is in the same realm as the delegating agent
-    const fromAgentRealm = fromAgent.realmAccess?.currentRealmId || fromAgent.realmAccess?.boundRealmId || 'default';
-    const targetAgentRealm = targetAgent.realmAccess?.currentRealmId || targetAgent.realmAccess?.boundRealmId || 'default';
-
-    if (fromAgentRealm !== targetAgentRealm) {
-      throw new Error(`Cannot delegate to agent ${resolvedAgentId} in realm ${targetAgentRealm} from realm ${fromAgentRealm}. Agents can only delegate to other agents in their current realm.`);
-    }
-
-    // Execute the task delegation — propagate requesterId so the user-scoped
-    // constraint keeps applying transitively down the delegation chain.
-    const response = await this.executeAgentPrompt(resolvedAgentId as AgentId, {
-      prompt: `Task delegated from agent ${fromAgentId}: ${params.task}. Please execute this task and provide your results.`,
-      collaborationContext: {
-        scenarioName: 'Task Delegation',
-        agentRole: 'task_executor',
-        usePersonaPrompt: true
-      }
-    }, requesterId);
-
-    await this.recordToolSubContribution({
-      sessionId,
-      targetAgent,
-      actionType: 'delegate_task',
-      description: params.task,
-      content: response.response,
-      durationMs: response.executionTime,
-    });
-
+    const result = await this.sendToAgent(fromAgentId, params.agent_id, params.task, 'delegate', sessionId, requesterId);
     return {
-      target_agent: resolvedAgentId,
+      target_agent: result.target_agent,
       task_delegated: params.task,
-      result: response.response,
-      execution_time: response.executionTime
+      result: result.response,
+      execution_time: result.execution_time,
     };
   }
 
@@ -2534,64 +2609,13 @@ Your responses and behavior should be appropriate to this realm's context and ch
     sessionId?: string,
     requesterId?: string
   ): Promise<any> {
-    const fromAgent = await this.getAgent(fromAgentId);
-
-    // Resolve agent name to ID if needed
-    const resolvedAgentId = await this.resolveAgentId(params.agent_id);
-    const targetAgent = await this.getAgent(resolvedAgentId as AgentId);
-
-    if (targetAgent.status !== 'active') {
-      throw new Error(`Target agent ${resolvedAgentId} is not active`);
-    }
-
-    // User-scoped delegation constraint (see toolDelegateTask).
-    await this.enforceAssumableForRequester(requesterId, targetAgent, resolvedAgentId);
-
-    // Check if target agent is in the same realm as the delegating agent
-    const fromAgentRealm = fromAgent.realmAccess?.currentRealmId || fromAgent.realmAccess?.boundRealmId || 'default';
-    const targetAgentRealm = targetAgent.realmAccess?.currentRealmId || targetAgent.realmAccess?.boundRealmId || 'default';
-
-    if (fromAgentRealm !== targetAgentRealm) {
-      throw new Error(`Cannot assign task to agent ${resolvedAgentId} in realm ${targetAgentRealm} from realm ${fromAgentRealm}. Agents can only assign tasks to other agents in their current realm.`);
-    }
-
-    // Execute the simple task assignment with clear completion instruction.
-    // Propagate requesterId so the user-scoped constraint applies transitively.
-    const response = await this.executeAgentPrompt(resolvedAgentId as AgentId, {
-      prompt: `SIMPLE TASK ASSIGNMENT from ${fromAgentId}: ${params.task}
-
-IMPORTANT: This is a simple task assignment that should be completed in a single response. Please:
-1. Use your own available tools and capabilities to complete this task
-2. Complete the requested task fully
-3. Provide your final result/deliverable
-4. Do not ask questions or request further input
-5. Consider this task complete when you finish your response
-
-Task: ${params.task}
-
-Please use your available tools to execute this task now and provide your complete result.`,
-      collaborationContext: {
-        scenarioName: 'Simple Task Assignment',
-        agentRole: 'task_executor',
-        usePersonaPrompt: true
-      }
-    }, requesterId);
-
-    await this.recordToolSubContribution({
-      sessionId,
-      targetAgent,
-      actionType: 'assign_simple_task',
-      description: params.task,
-      content: response.response,
-      durationMs: response.executionTime,
-    });
-
+    const result = await this.sendToAgent(fromAgentId, params.agent_id, params.task, 'assign', sessionId, requesterId);
     return {
-      target_agent: resolvedAgentId,
+      target_agent: result.target_agent,
       task_assigned: params.task,
-      result: response.response,
-      execution_time: response.executionTime,
-      completion_type: 'simple_assignment'
+      result: result.response,
+      execution_time: result.execution_time,
+      completion_type: 'simple_assignment',
     };
   }
 
@@ -3391,14 +3415,43 @@ Your entire response will be written to a file. Start with the formatted content
    * agent's reasoning (in-session RAG). Semantic/lexical ranking, scoped to the
    * agent's in-scope set: global ∪ the agent's realms (rung #5a).
    */
-  private async toolSearchWorldtree(agent: Agent, params: { query?: string; limit?: number }, sessionId?: string): Promise<any> {
+  private async toolSearchWorldtree(agent: Agent, params: { query?: string; limit?: number; realms?: string[] }, sessionId?: string): Promise<any> {
     const query = typeof params.query === 'string' ? params.query.trim() : '';
     if (!query) {
       return { success: false, error: 'query is required' };
     }
     const limit = typeof params.limit === 'number' && params.limit > 0 ? Math.min(params.limit, 20) : 5;
-    const realms = collectAgentRealms(agent.realmAccess);
+
+    // Presence-scoped retrieval: the shared global corpus is always implicit;
+    // the realm the agent is CURRENTLY in (via session-scoped travel) is
+    // implicit; any *other* realm must be requested explicitly and must be one
+    // the agent may access. This keeps a research step grounded in the intended
+    // realm instead of leaking every accessible realm's corpus into the signal.
+    const accessible = new Set(collectAgentRealms(agent.realmAccess));
+    const scopeRealms = new Set<string>();
+    const current = this.resolveCurrentRealm(agent, agent.id, sessionId);
+    if (current && current.toLowerCase() !== 'default') scopeRealms.add(current);
+    if (Array.isArray(params.realms)) {
+      for (const r of params.realms) {
+        const id = String(r);
+        if (accessible.has(id)) scopeRealms.add(id);
+        else console.warn(`🔒 search_worldtree: agent ${agent.id} requested realm ${id} it cannot access — ignoring`);
+      }
+    }
+    // Presence fallback: an agent with no resolved current realm (e.g. a
+    // coordinator druid that hasn't traveled) and no explicit realms would
+    // otherwise search global-only — silently missing every realm-scoped
+    // document it can legitimately access. Default such a search to the agent's
+    // full accessible set (global ∪ accessible realms). Bound elementals always
+    // resolve a current realm, so this only affects unanchored coordinators.
+    if (scopeRealms.size === 0 && accessible.size > 0) {
+      for (const id of accessible) scopeRealms.add(id);
+      console.log(`🌐 search_worldtree: agent ${agent.id} not present in a realm — defaulting scope to accessible realms [${Array.from(accessible).join(', ')}]`);
+    }
+    const realms = Array.from(scopeRealms);
     const qs = getWorldTreeQueryService();
+    // Always pass a scope object (even when realms is empty → global-only);
+    // omitting scope would search the entire corpus unbounded.
     const results = await qs.searchChunks(query, limit, { realms });
     // Coverage demand signal (rung #5b): in-scope corpus had nothing → record a gap.
     if (results.length === 0) {

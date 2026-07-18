@@ -39,6 +39,12 @@ export interface RealmConfiguration {
   allowedAgentTypes: AgentType[];
   knowledgeNamespaces: string[];
   securityLevel: SecurityLevel;
+
+  // Realm prompt layer (Layer 3 of prompt composition): Markdown with frontmatter
+  // (immutable_sections for the realm's operating discipline; extension_points for
+  // agent specialization). Injected into agents operating in this realm. Stored in
+  // the realm's configuration jsonb; DB-backed and UI-managed.
+  promptLayer?: string;
   
   // Access control and security
   accessControl: {
