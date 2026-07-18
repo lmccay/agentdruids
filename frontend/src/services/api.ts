@@ -168,6 +168,7 @@ export interface CreateRealmRequest {
     maxAgents: number;
     allowExternalAccess: boolean;
     leyLineEndpoint?: string;
+    promptLayer?: string;
   };
 }
 
@@ -181,6 +182,7 @@ export interface Realm {
     maxAgents: number;
     allowExternalAccess: boolean;
     leyLineEndpoint?: string;
+    promptLayer?: string;
   };
   agents?: Agent[];
   agentIds?: string[];

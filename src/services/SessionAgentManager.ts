@@ -27,11 +27,28 @@ export class SessionAgentManagerImpl implements SessionAgentManager {
   }
 
   createAgentSessionState(agentId: string, baseAgent: any): AgentSessionState {
+    const ra = baseAgent.realmAccess;
+
+    // Initial presence: an elemental starts present in its bound realm; a druid
+    // (no bound realm) starts with no realm — global-only until it travels.
+    // 'default' is the sentinel for "no realm / global-only" (matches
+    // AgentService.resolveCurrentRealm), NOT a realm id.
+    const initialRealm: string = ra?.boundRealmId || ra?.currentRealmId || 'default';
+
+    // Realms this agent may reach in-session: bound realm ∪ accessibleRealms.
+    // accessibleRealms entries may be plain id strings or { realmId } objects.
+    const accessible = new Set<string>();
+    if (ra?.boundRealmId) accessible.add(ra.boundRealmId);
+    for (const entry of ra?.accessibleRealms ?? []) {
+      const id = typeof entry === 'string' ? entry : entry?.realmId;
+      if (id) accessible.add(id);
+    }
+
     const sessionState: AgentSessionState = {
       agentId,
       sessionId: this.sessionId,
-      currentRealm: baseAgent.realmAccess?.currentRealmId || 'Default',
-      sessionRealmAccess: baseAgent.realmAccess?.realms || ['Default'],
+      currentRealm: initialRealm,
+      sessionRealmAccess: Array.from(accessible),
       sessionTasks: [],
       isActive: true,
       activeTasks: 0,
@@ -42,7 +59,7 @@ export class SessionAgentManagerImpl implements SessionAgentManager {
         tasksCompleted: 0,
         averageResponseTime: 0,
         errorCount: 0,
-        realmsVisited: [baseAgent.realmAccess?.currentRealmId || 'Default']
+        realmsVisited: initialRealm !== 'default' ? [initialRealm] : []
       }
     };
 

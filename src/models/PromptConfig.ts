@@ -67,6 +67,10 @@ export interface RuntimePromptContext {
   session_id?: string;
   user_id?: string;
   realm_id?: string;
+  // DB-backed realm layer (Layer 3) Markdown, resolved by the caller from the
+  // realm's configuration.promptLayer. When present, it is parsed directly
+  // instead of loading a realm prompt file.
+  realm_layer_markdown?: string;
   timestamp: string;
   available_tools: string[];
   agent_metadata?: Record<string, any>;

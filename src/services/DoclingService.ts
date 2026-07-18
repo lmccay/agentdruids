@@ -188,10 +188,99 @@ export class DoclingService {
     const toFormats = options.toFormats?.length ? options.toFormats : DEFAULT_FORMATS;
     const namespace = options.namespace ?? 'worldtree://public/documents';
     const accessLevel = options.accessLevel ?? 'public';
-    const doc = await this.convertSource({ kind: 'http', url }, toFormats);
+
+    let doc: Record<string, any>;
+    try {
+      doc = await this.convertSource({ kind: 'http', url }, toFormats);
+    } catch (err) {
+      // docling-serve reports a conversion failure but rarely explains *why* a
+      // remote fetch failed. Probe the URL to surface an actionable cause
+      // (e.g. an HTTP 403 from a bot-protection service). Safe: the URL already
+      // passed the SSRF guard at the API boundary before reaching this method.
+      const diagnosis = await this.diagnoseUrlFetchFailure(url);
+      const base = err instanceof Error ? err.message : String(err);
+      throw new Error(diagnosis ? `${base} — ${diagnosis}` : base);
+    }
+
+    // docling-serve can report success yet return no extractable content (e.g.
+    // it fetched a bot-protection challenge/interstitial page). Treat empty
+    // output as a failure and explain it rather than cataloging an empty doc.
+    const hasContent = toFormats.some((f) => {
+      const value = doc[FORMAT_FIELD[f]];
+      return typeof value === 'string' ? value.trim().length > 0 : value != null;
+    });
+    if (!hasContent) {
+      const diagnosis = await this.diagnoseUrlFetchFailure(url);
+      throw new Error(
+        `URL ingest produced no content for ${url}${diagnosis ? ` — ${diagnosis}` : ' — the source returned no extractable document.'}`
+      );
+    }
+
     const ingested = await this.persistDocument({ sourceUri: url, doc, toFormats, namespace, accessLevel, runId: null, scopeRealms: options.scopeRealms });
     await this.maybeChunk(ingested.id);
     return ingested;
+  }
+
+  /**
+   * Best-effort probe of a URL that failed to ingest, to produce an actionable
+   * message for the operator. Returns null when inconclusive. Only inspects the
+   * response status + headers (never the body), does not follow redirects, and
+   * runs only after the caller's SSRF guard has already validated the URL.
+   */
+  private async diagnoseUrlFetchFailure(url: string): Promise<string | null> {
+    let status: number;
+    let headers: Record<string, any>;
+    try {
+      const resp = await axios.get(url, {
+        timeout: 15000,
+        maxRedirects: 0,
+        validateStatus: () => true,
+        // Present a normal browser UA. Bot-protection services will still block
+        // (they fingerprint far beyond the UA) — which is exactly the signal we
+        // want to detect and report.
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36',
+          Accept: 'text/html,application/xhtml+xml,application/pdf,*/*',
+        },
+      });
+      status = resp.status;
+      headers = resp.headers || {};
+    } catch {
+      return null; // probe failed (network/timeout/redirect) — no extra info
+    }
+
+    const vendor = this.detectBotProtection(headers);
+    const suffix = 'save the page from your browser and use file/directory ingest (drop it in the staging directory) instead.';
+
+    if (status >= 400) {
+      if (vendor) return `the source returned HTTP ${status} (bot protection: ${vendor}). This site blocks automated fetching — ${suffix}`;
+      if (status === 401 || status === 403) return `the source returned HTTP ${status} (access denied). The page may require authentication or block automated fetching — ${suffix}`;
+      if (status === 404) return `the source returned HTTP 404 (not found) — check the URL.`;
+      if (status === 429) return `the source returned HTTP 429 (rate limited) — retry later, or ${suffix}`;
+      return `the source returned HTTP ${status}.`;
+    }
+
+    // 2xx/3xx but docling still extracted nothing. Only claim bot protection on
+    // an explicit challenge marker (a plain CDN server header is not enough).
+    const challenge = String(headers['cf-mitigated'] || headers['x-datadome'] || headers['x-dd-b'] || '').length > 0;
+    if (challenge && vendor) {
+      return `the source is behind bot protection (${vendor}) and returned a challenge page rather than the document — ${suffix}`;
+    }
+    const contentType = String(headers['content-type'] || '').toLowerCase();
+    if (contentType && !/(html|pdf|xml|text|json|msword|officedocument|epub)/.test(contentType)) {
+      return `the source returned an unsupported content type (${contentType}).`;
+    }
+    return null;
+  }
+
+  /** Identify a bot-protection / WAF vendor from response headers, if present. */
+  private detectBotProtection(headers: Record<string, any>): string | null {
+    const h = (k: string) => String(headers[k] ?? '').toLowerCase();
+    if (h('server').includes('datadome') || h('x-datadome') || h('x-dd-b')) return 'DataDome';
+    if (h('cf-mitigated') || h('server').includes('cloudflare')) return 'Cloudflare';
+    if (h('x-px') || h('server').includes('perimeterx')) return 'PerimeterX';
+    if (h('x-akamai-transformed') || h('server').includes('akamai')) return 'Akamai';
+    return null;
   }
 
   /** Convert + catalog a local file (read → base64 → docling-serve file source). */

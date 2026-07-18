@@ -5,7 +5,7 @@ class CoordinationRestAPI {
   private baseURL = apiConfig.apiBaseURL;
 
   async getCoordinators() {
-    const response = await fetch(`${this.baseURL}/coordinators`);
+    const response = await fetch(`${this.baseURL}/coordinators`, { credentials: 'include' });
     if (!response.ok) {
       throw new Error(`Failed to get coordinators: ${response.statusText}`);
     }
@@ -13,7 +13,7 @@ class CoordinationRestAPI {
   }
 
   async getSystemStats() {
-    const response = await fetch(`${this.baseURL}/system/stats`);
+    const response = await fetch(`${this.baseURL}/system/stats`, { credentials: 'include' });
     if (!response.ok) {
       throw new Error(`Failed to get system stats: ${response.statusText}`);
     }
@@ -30,6 +30,7 @@ class CoordinationRestAPI {
   }) {
     const response = await fetch(`${this.baseURL}/coordinators/${coordinatorId}/coordinate`, {
       method: 'POST',
+      credentials: 'include',
       headers: {
         'Content-Type': 'application/json'
       },
@@ -58,6 +59,7 @@ class CoordinationRestAPI {
   }) {
     const response = await fetch(`${this.baseURL}/coordinators/coordinate`, {
       method: 'POST',
+      credentials: 'include',
       headers: {
         'Content-Type': 'application/json'
       },
@@ -75,6 +77,7 @@ class CoordinationRestAPI {
   async approvePlan(sessionId: string) {
     const response = await fetch(`${this.baseURL}/coordinators/sessions/${sessionId}/approve`, {
       method: 'POST',
+      credentials: 'include',
       headers: {
         'Content-Type': 'application/json'
       }
@@ -89,7 +92,7 @@ class CoordinationRestAPI {
   }
 
   async getCoordinationSession(sessionId: string) {
-    const response = await fetch(`${this.baseURL}/coordinators/sessions/${sessionId}`);
+    const response = await fetch(`${this.baseURL}/coordinators/sessions/${sessionId}`, { credentials: 'include' });
     if (!response.ok) {
       if (response.status === 404) {
         return null; // Session not found
@@ -102,7 +105,7 @@ class CoordinationRestAPI {
   // For compatibility, map the old MCP interface to REST calls
   async getActiveSessions() {
     try {
-      const response = await fetch(`${this.baseURL}/coordinators/sessions`);
+      const response = await fetch(`${this.baseURL}/coordinators/sessions`, { credentials: 'include' });
       if (!response.ok) {
         throw new Error(`Failed to get sessions: ${response.statusText}`);
       }
@@ -187,6 +190,7 @@ class CoordinationRestAPI {
   async rerunExecution(sessionId: string) {
     const response = await fetch(`${this.baseURL}/coordinators/sessions/${sessionId}/rerun`, {
       method: 'POST',
+      credentials: 'include',
       headers: {
         'Content-Type': 'application/json'
       }
@@ -202,7 +206,8 @@ class CoordinationRestAPI {
 
   async deleteExecution(sessionId: string) {
     const response = await fetch(`${this.baseURL}/coordinators/sessions/${sessionId}`, {
-      method: 'DELETE'
+      method: 'DELETE',
+      credentials: 'include'
     });
 
     if (!response.ok) {
@@ -221,6 +226,7 @@ class CoordinationRestAPI {
   async purgeExecutionResults(sessionId: string) {
     const response = await fetch(`${this.baseURL}/coordinators/sessions/${sessionId}/results`, {
       method: 'DELETE',
+      credentials: 'include',
       headers: {
         'Content-Type': 'application/json'
       }
@@ -237,6 +243,7 @@ class CoordinationRestAPI {
   async convertToDiagram(prompt: string, availableAgents: string[]) {
     const response = await fetch(`${this.baseURL}/coordinators/convert-to-diagram`, {
       method: 'POST',
+      credentials: 'include',
       headers: {
         'Content-Type': 'application/json'
       },

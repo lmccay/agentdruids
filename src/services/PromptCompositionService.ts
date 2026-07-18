@@ -87,15 +87,19 @@ export class PromptCompositionService {
                             !agent.promptConfig?.disableRealmPrompt;
 
     if (shouldLoadRealm) {
-      const realmSource = this.buildRealmPromptSource(runtimeContext.realm_id!);
       try {
         console.log(`📥 Loading Layer 3: Realm Context (${runtimeContext.realm_id})...`);
-        const realmLayer = await this.sourceResolver.resolveSource(realmSource);
+        // Prefer the DB-backed realm layer (markdown passed in by the caller from
+        // realm.configuration.promptLayer); fall back to a file-based realm prompt
+        // for backward compatibility.
+        const realmLayer = runtimeContext.realm_layer_markdown
+          ? await this.sourceResolver.parseRealmLayer(runtimeContext.realm_layer_markdown, runtimeContext.realm_id!)
+          : await this.sourceResolver.resolveSource(this.buildRealmPromptSource(runtimeContext.realm_id!));
         layers.push(realmLayer);
         console.log(`✅ Loaded realm context v${realmLayer.version}`);
       } catch (error: any) {
         // Realm prompts are optional
-        console.warn(`⚠️  Realm prompt not found for ${runtimeContext.realm_id}: ${error.message}`);
+        console.warn(`⚠️  Realm prompt not available for ${runtimeContext.realm_id}: ${error.message}`);
       }
     }
 
@@ -199,8 +203,21 @@ export class PromptCompositionService {
    * Build cache key
    */
   private buildCacheKey(agent: Agent, context: RuntimePromptContext): string {
-    // Include agent.updatedAt to auto-invalidate when agent is edited
-    return `prompt:${agent.id}:${agent.type}:${context.realm_id || 'none'}:${agent.updatedAt}`;
+    // Include agent.updatedAt to auto-invalidate when the agent is edited, and a
+    // fingerprint of the realm layer markdown so editing a realm's prompt layer
+    // invalidates cached compositions too.
+    const realmFingerprint = this.fingerprint(context.realm_layer_markdown);
+    return `prompt:${agent.id}:${agent.type}:${context.realm_id || 'none'}:${agent.updatedAt}:${realmFingerprint}`;
+  }
+
+  /** Cheap, stable fingerprint of a string (djb2) for cache keys. */
+  private fingerprint(text?: string): string {
+    if (!text) return '0';
+    let hash = 5381;
+    for (let i = 0; i < text.length; i++) {
+      hash = ((hash << 5) + hash + text.charCodeAt(i)) | 0;
+    }
+    return (hash >>> 0).toString(36);
   }
 
   /**
