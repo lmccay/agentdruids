@@ -16,6 +16,7 @@ import { PolicyEngine } from './PolicyEngine';
 import { RepositoryManager } from './RepositoryManager';
 import { getWorldTreeQueryService } from './WorldTreeQueryService';
 import { RealmService } from './RealmService';
+import { resolveSearchScope } from './searchScope';
 import { generateUUID, AgentIdMapper } from '../utils/uuidUtils';
 import { MCPConfigLoader } from './mcp/MCPConfigLoader';
 import { HttpMCPClient } from './mcp/HttpMCPClient';
@@ -3422,33 +3423,32 @@ Your entire response will be written to a file. Start with the formatted content
     }
     const limit = typeof params.limit === 'number' && params.limit > 0 ? Math.min(params.limit, 20) : 5;
 
-    // Presence-scoped retrieval: the shared global corpus is always implicit;
-    // the realm the agent is CURRENTLY in (via session-scoped travel) is
-    // implicit; any *other* realm must be requested explicitly and must be one
-    // the agent may access. This keeps a research step grounded in the intended
-    // realm instead of leaking every accessible realm's corpus into the signal.
-    const accessible = new Set(collectAgentRealms(agent.realmAccess));
-    const scopeRealms = new Set<string>();
-    const current = this.resolveCurrentRealm(agent, agent.id, sessionId);
-    if (current && current.toLowerCase() !== 'default') scopeRealms.add(current);
-    if (Array.isArray(params.realms)) {
-      for (const r of params.realms) {
-        const id = String(r);
-        if (accessible.has(id)) scopeRealms.add(id);
-        else console.warn(`🔒 search_worldtree: agent ${agent.id} requested realm ${id} it cannot access — ignoring`);
+    // Scoped retrieval: the shared global corpus is always implicit; additional
+    // realms are resolved (and grant-clamped) by resolveSearchScope from the
+    // session's research scope, the agent's current presence, and any explicitly
+    // requested realms. Session-scoped research realms are what keep an
+    // unanchored coordinator pinned to the intended campaign's corpus instead of
+    // every realm it can reach. See searchScope.ts.
+    const accessible = collectAgentRealms(agent.realmAccess);
+    const accessibleSet = new Set(accessible);
+    const sessionResearchRealms: string[] =
+      sessionId && typeof this.coordinationService?.getSessionResearchRealms === 'function'
+        ? (this.coordinationService.getSessionResearchRealms(sessionId) ?? [])
+        : [];
+    const explicitRealms = Array.isArray(params.realms) ? params.realms.map((r) => String(r)) : undefined;
+    if (explicitRealms) {
+      for (const id of explicitRealms) {
+        if (!accessibleSet.has(id)) {
+          console.warn(`🔒 search_worldtree: agent ${agent.id} requested realm ${id} it cannot access — ignoring`);
+        }
       }
     }
-    // Presence fallback: an agent with no resolved current realm (e.g. a
-    // coordinator druid that hasn't traveled) and no explicit realms would
-    // otherwise search global-only — silently missing every realm-scoped
-    // document it can legitimately access. Default such a search to the agent's
-    // full accessible set (global ∪ accessible realms). Bound elementals always
-    // resolve a current realm, so this only affects unanchored coordinators.
-    if (scopeRealms.size === 0 && accessible.size > 0) {
-      for (const id of accessible) scopeRealms.add(id);
-      console.log(`🌐 search_worldtree: agent ${agent.id} not present in a realm — defaulting scope to accessible realms [${Array.from(accessible).join(', ')}]`);
-    }
-    const realms = Array.from(scopeRealms);
+    const realms = resolveSearchScope({
+      accessibleRealms: accessible,
+      sessionResearchRealms,
+      currentRealm: this.resolveCurrentRealm(agent, agent.id, sessionId),
+      explicitRealms,
+    });
     const qs = getWorldTreeQueryService();
     // Always pass a scope object (even when realms is empty → global-only);
     // omitting scope would search the entire corpus unbounded.

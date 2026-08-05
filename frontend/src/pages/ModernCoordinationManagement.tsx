@@ -20,7 +20,7 @@ import {
   Eraser,
   Edit
 } from 'lucide-react';
-import { agentApi, Agent } from '../services/api';
+import { agentApi, Agent, realmApi, Realm } from '../services/api';
 import coordinationRestApi from '../services/coordinationRestApi';
 import { ContentViewer } from '../components/ContentViewer';
 import { DiagramEditor } from '../components/DiagramEditor';
@@ -69,6 +69,7 @@ interface CoordinationRequest {
   timeoutMinutes?: number;
   coordinationStyle?: string;
   publishTo?: string;
+  researchRealms?: string[]; // Realms the coordinator may draw corpus from this session
   workflow?: { plantuml: string }; // Optional: PlantUML workflow diagram
 }
 
@@ -352,6 +353,7 @@ export default function ModernCoordinationManagement() {
                     publishTo: request.publishTo
                       ? [request.publishTo.trim()].filter(s => s.length > 0)
                       : undefined,
+                    researchRealms: request.researchRealms,  // Session research scope (omitted => backend derives)
                     // requireApproval: true,  // TODO: Re-enable when plan approval UI is integrated
                     workflow: request.workflow,  // Include PlantUML workflow if present
                     metadata: {
@@ -369,6 +371,7 @@ export default function ModernCoordinationManagement() {
                     publishTo: request.publishTo
                       ? [request.publishTo.trim()].filter(s => s.length > 0)
                       : undefined,
+                    researchRealms: request.researchRealms,  // Session research scope (omitted => backend derives)
                     workflow: request.workflow  // Include PlantUML workflow if present
                   });
                 }
@@ -681,7 +684,39 @@ function NewSessionForm({
   const [originalScenarioText, setOriginalScenarioText] = useState(''); // Preserve original text when converting to diagram
   const [convertingToDiagram, setConvertingToDiagram] = useState(false);
 
+  // Research scope: realms the coordinator may draw corpus from this session.
+  // Defaults to the bound realms of the selected elementals; the operator can
+  // override. `touched` distinguishes "accept the derived default" (omit from
+  // the request → backend derives the same set) from an explicit override.
+  const [realms, setRealms] = useState<Realm[]>([]);
+  const [researchRealmsTouched, setResearchRealmsTouched] = useState(false);
+
+  useEffect(() => {
+    realmApi.getRealms()
+      .then((res) => setRealms(res.data || []))
+      .catch((err) => console.error('Failed to load realms for research scope:', err));
+  }, []);
+
   const activeAgents = agents.filter(agent => agent.status === 'active');
+
+  // Bound realms of the currently-selected elemental participants — the default
+  // research scope. Deduplicated; coordinators/druids contribute none.
+  const derivedResearchRealms = Array.from(new Set(
+    formData.participantIds
+      .map((id) => agents.find((a) => a.id === id)?.realmAccess?.boundRealmId)
+      .filter((r): r is string => Boolean(r))
+  ));
+  const effectiveResearchRealms = researchRealmsTouched
+    ? (formData.researchRealms ?? [])
+    : derivedResearchRealms;
+
+  const toggleResearchRealm = (realmId: string) => {
+    const next = effectiveResearchRealms.includes(realmId)
+      ? effectiveResearchRealms.filter((r) => r !== realmId)
+      : [...effectiveResearchRealms, realmId];
+    setResearchRealmsTouched(true);
+    setFormData((prev) => ({ ...prev, researchRealms: next }));
+  };
 
   const convertToDiagram = async (textPrompt: string, participantIds: string[]) => {
     setConvertingToDiagram(true);
@@ -725,6 +760,15 @@ function NewSessionForm({
       ...formData,
       participantIds: finalParticipantIds
     };
+
+    // Send an explicit research scope only when the operator overrode the
+    // default; otherwise omit it so the backend derives the same set from the
+    // selected participants (single source of truth, no drift).
+    if (researchRealmsTouched) {
+      request.researchRealms = effectiveResearchRealms;
+    } else {
+      delete request.researchRealms;
+    }
 
     if (workflowMode === 'diagram') {
       request.workflow = { plantuml };
@@ -875,6 +919,45 @@ function NewSessionForm({
                   </span>
                 </label>
               ))}
+            </div>
+          </div>
+
+          {/* Research scope: realms the coordinator may draw corpus from */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Research scope ({effectiveResearchRealms.length} realm{effectiveResearchRealms.length === 1 ? '' : 's'})
+            </label>
+            <p className="text-xs text-gray-500 mb-2">
+              Realms the coordinator may draw corpus from this session (the shared global corpus is always included).
+              {researchRealmsTouched
+                ? ' Overridden.'
+                : ' Defaulting to the realms of the selected specialists.'}
+              {researchRealmsTouched && (
+                <button
+                  type="button"
+                  className="ml-1 text-primary-600 hover:underline"
+                  onClick={() => { setResearchRealmsTouched(false); setFormData(prev => ({ ...prev, researchRealms: undefined })); }}
+                >
+                  Reset to default
+                </button>
+              )}
+            </p>
+            <div className="max-h-40 overflow-y-auto border border-gray-300 rounded-lg p-3 space-y-2">
+              {realms.length === 0 ? (
+                <p className="text-xs text-gray-400">No realms available.</p>
+              ) : (
+                realms.map((realm) => (
+                  <label key={realm.id} className="flex items-center space-x-3">
+                    <input
+                      type="checkbox"
+                      className="h-4 w-4 text-primary-600 border-gray-300 rounded focus:ring-primary-500"
+                      checked={effectiveResearchRealms.includes(realm.id)}
+                      onChange={() => toggleResearchRealm(realm.id)}
+                    />
+                    <span className="text-sm text-gray-900">{realm.name}</span>
+                  </label>
+                ))
+              )}
             </div>
           </div>
 

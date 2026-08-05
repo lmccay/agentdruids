@@ -26,6 +26,7 @@ class CoordinationRestAPI {
     timeoutMinutes?: number;
     coordinationStyle?: string;
     publishTo?: string[];
+    researchRealms?: string[]; // Session research scope (realm ids); omit to derive from participants
     workflow?: { plantuml: string }; // Optional: PlantUML workflow diagram
   }) {
     const response = await fetch(`${this.baseURL}/coordinators/${coordinatorId}/coordinate`, {
@@ -53,6 +54,7 @@ class CoordinationRestAPI {
     timeoutMinutes?: number;
     coordinationStyle?: string;
     publishTo?: string[];
+    researchRealms?: string[]; // Session research scope (realm ids); omit to derive from participants
     metadata?: any;
     requireApproval?: boolean; // New: request plan approval before execution
     workflow?: { plantuml: string }; // Optional: PlantUML workflow diagram

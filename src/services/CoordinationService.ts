@@ -58,6 +58,12 @@ export interface CoordinationRequest {
   // druid participants must be assumable by this user. Absent => internal/
   // unauthenticated path, not enforced.
   requesterId?: string;
+  // Late-bound research scope for THIS session: the realms the coordinator may
+  // draw corpus from (global is always implicit). Session-scoped, not agent-
+  // scoped, so concurrent sessions of the same coordinator can target different
+  // campaigns without mutating shared agent state. Omitted => derived from the
+  // bound realms of the selected elemental participants.
+  researchRealms?: string[];
 }
 
 export interface CoordinationSession {
@@ -84,6 +90,11 @@ export interface CoordinationSession {
 
   // Realm context for the session (used in publication records)
   realmId?: string;
+
+  // Late-bound research scope: realms the coordinator may draw corpus from this
+  // session (global always implicit). Read by AgentService.toolSearchWorldtree
+  // and by the coordinator prompt's realm list. See CoordinationRequest.researchRealms.
+  researchRealms?: string[];
 
   // Session-scoped agent management for concurrency safety
   sessionAgentManager: SessionAgentManagerImpl;
@@ -255,6 +266,46 @@ export class CoordinationService {
   }
 
   /**
+   * The session's late-bound research realms (the campaign scope). Read by
+   * AgentService.toolSearchWorldtree to scope corpus retrieval to global ∪ these
+   * realms. Empty array => no session scope declared (caller falls back to the
+   * agent's own presence / explicit realms). Never returns undefined.
+   */
+  getSessionResearchRealms(sessionId: string): string[] {
+    return this.sessions.get(sessionId)?.researchRealms ?? [];
+  }
+
+  /**
+   * Resolve the research realms for a session. Explicit request value wins;
+   * otherwise derive from the bound realms of the selected participants
+   * (elementals are bound to a realm — coordinators/druids contribute none, so
+   * the default is exactly "the realms of the specialists you picked"). Returns
+   * a de-duplicated list; may be empty (e.g. a druid-only participant set with
+   * no explicit scope), in which case the coordinator falls back to global-only.
+   */
+  private async resolveResearchRealms(
+    explicit: string[] | undefined,
+    participantIds: string[]
+  ): Promise<string[]> {
+    if (Array.isArray(explicit) && explicit.length > 0) {
+      return Array.from(new Set(explicit.map((r) => String(r)).filter(Boolean)));
+    }
+    const derived = new Set<string>();
+    if (this.agentService) {
+      for (const id of participantIds) {
+        try {
+          const agent = await this.agentService.getAgent(id as AgentId);
+          const bound = agent?.realmAccess?.boundRealmId;
+          if (bound) derived.add(bound);
+        } catch {
+          // Skip unresolved participants; validation elsewhere surfaces them.
+        }
+      }
+    }
+    return Array.from(derived);
+  }
+
+  /**
    * Data-plane assume-gate for coordination: when a user drives the session,
    * every DRUID participant must be assumable by that user (admins
    * unconstrained; elementals are governed by realm access, not user
@@ -315,7 +366,9 @@ export class CoordinationService {
       baseDirectory: `./data/published_content/sessions`,
       useSessionDirectories: true
     });
-    
+
+    const researchRealms = await this.resolveResearchRealms(request.researchRealms, request.participantIds);
+
     const session: CoordinationSession = {
       id: sessionId,
       coordinatorId: request.coordinatorId,
@@ -328,6 +381,7 @@ export class CoordinationService {
       participantTasks: [],
       sessionAgentManager,
       sessionContentManager,
+      ...(researchRealms.length > 0 && { researchRealms }),
       ...(request.publishTo !== undefined && { publishTo: request.publishTo }),
       ...(request.publishAs !== undefined && { publishAs: request.publishAs })
     };
@@ -635,11 +689,19 @@ export class CoordinationService {
       })
     );
 
-    // Get all available realms
+    // Realms the coordinator may work in this session. When the session declares
+    // a research scope, list ONLY those realms — otherwise the coordinator is
+    // told about every other campaign's realms, which both leaks cross-customer
+    // context and invites it to travel/research outside the intended scope. No
+    // scope declared => fall back to all realms (legacy behavior).
     let realmsList = '';
     if (this.realmService) {
       try {
-        const realms = await this.realmService.listRealms();
+        const allRealms = await this.realmService.listRealms();
+        const scope = session.researchRealms;
+        const realms = scope && scope.length > 0
+          ? allRealms.filter((realm) => scope.includes(realm.id))
+          : allRealms;
         realmsList = realms.map(realm =>
           `- ${realm.name} (ID: ${realm.id})`
         ).join('\n');
@@ -1467,6 +1529,8 @@ CRITICAL: Only assign tasks to DRUIDs. If an Elemental's expertise is needed, as
       useSessionDirectories: true
     });
 
+    const researchRealms = await this.resolveResearchRealms(request.researchRealms, resolvedParticipantIds);
+
     const session: CoordinationSession = {
       id: sessionId,
       coordinatorId: request.coordinatorId,
@@ -1479,6 +1543,7 @@ CRITICAL: Only assign tasks to DRUIDs. If an Elemental's expertise is needed, as
       participantTasks: [],
       sessionAgentManager,
       sessionContentManager,
+      ...(researchRealms.length > 0 && { researchRealms }),
       ...(request.metadata !== undefined && { metadata: request.metadata }),
       ...(request.publishTo !== undefined && { publishTo: request.publishTo }),
       ...(request.publishAs !== undefined && { publishAs: request.publishAs })
@@ -1701,6 +1766,8 @@ CRITICAL: Only assign tasks to DRUIDs. If an Elemental's expertise is needed, as
       useSessionDirectories: true
     });
 
+    const researchRealms = await this.resolveResearchRealms(resolvedRequest.researchRealms, resolvedRequest.participantIds);
+
     const session: CoordinationSession = {
       id: sessionId,
       coordinatorId: resolvedRequest.coordinatorId,
@@ -1713,6 +1780,7 @@ CRITICAL: Only assign tasks to DRUIDs. If an Elemental's expertise is needed, as
       participantTasks: [],
       sessionAgentManager,
       sessionContentManager,
+      ...(researchRealms.length > 0 && { researchRealms }),
       ...(resolvedRequest.metadata !== undefined && { metadata: resolvedRequest.metadata }),
       ...(resolvedRequest.publishTo !== undefined && { publishTo: resolvedRequest.publishTo }),
       ...(resolvedRequest.publishAs !== undefined && { publishAs: resolvedRequest.publishAs })
@@ -1818,6 +1886,7 @@ CRITICAL: Only assign tasks to DRUIDs. If an Elemental's expertise is needed, as
         baseDirectory: `./data/published_content/sessions`,
         useSessionDirectories: true
       }),
+      ...(originalSession.researchRealms !== undefined && { researchRealms: [...originalSession.researchRealms] }),
       ...(originalSession.publishTo !== undefined && { publishTo: [...originalSession.publishTo] })
     };
 

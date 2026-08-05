@@ -242,7 +242,8 @@ router.post('/:coordinatorId/coordinate', requireAssumableAgent((req) => req.par
       participantIds,
       timeoutMinutes,
       coordinationStyle,
-      publishTo
+      publishTo,
+      researchRealms
     } = req.body;
 
     // Basic validation
@@ -259,7 +260,8 @@ router.post('/:coordinatorId/coordinate', requireAssumableAgent((req) => req.par
       participantIds,
       timeoutMinutes: timeoutMinutes || 30,
       coordinationStyle,
-      publishTo
+      publishTo,
+      ...(Array.isArray(researchRealms) && { researchRealms })
     } as any; // Cast to avoid type conflict
 
     coordinationRequest.requesterId = req.principal?.userId; // user-scoped delegation
@@ -312,7 +314,8 @@ router.post('/:coordinatorId/orchestrate', requireAssumableAgent((req) => req.pa
       participantIds,
       timeoutMinutes,
       coordinationStyle,
-      publishTo
+      publishTo,
+      researchRealms
     } = req.body;
 
     // Basic validation
@@ -329,7 +332,8 @@ router.post('/:coordinatorId/orchestrate', requireAssumableAgent((req) => req.pa
       participantIds,
       timeoutMinutes: timeoutMinutes || 30,
       coordinationStyle,
-      publishTo
+      publishTo,
+      ...(Array.isArray(researchRealms) && { researchRealms })
     } as any; // Cast to avoid type conflict
 
     coordinationRequest.requesterId = req.principal?.userId; // user-scoped delegation
@@ -387,6 +391,7 @@ router.post('/coordinate', requireAssumableAgent((req) => req.body?.coordinatorI
       coordinationStyle,
       publishTo,
       metadata,
+      researchRealms,
       requireApproval = false  // New flag for plan approval workflow
     } = req.body;
 
@@ -429,6 +434,7 @@ router.post('/coordinate', requireAssumableAgent((req) => req.body?.coordinatorI
       timeoutMinutes: timeoutMinutes || 30,
       coordinationStyle,
       publishTo,
+      ...(Array.isArray(researchRealms) && { researchRealms }),
       metadata: {
         ...metadata,
         workflowMode: workflow ? 'diagram' : 'text',
