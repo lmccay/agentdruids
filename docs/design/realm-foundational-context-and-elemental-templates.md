@@ -1,7 +1,7 @@
 # Realm Foundational Context & Elemental Prompt Templates — Design
 
 **Status:** Draft / proposal
-**Related:** [in-session-retrieval-rag.md](../in-session-retrieval-rag.md), [phase-a-worldtree-discovery.md](../phase-a-worldtree-discovery.md), [realm-grounded-assessment.md](../realm-grounded-assessment.md), [operator-ingestion-flow.md](../operator-ingestion-flow.md)
+**Related:** [realm-knowledge-taxonomy-modeling-ux.md](realm-knowledge-taxonomy-modeling-ux.md), [in-session-retrieval-rag.md](../in-session-retrieval-rag.md), [phase-a-worldtree-discovery.md](../phase-a-worldtree-discovery.md), [realm-grounded-assessment.md](../realm-grounded-assessment.md), [operator-ingestion-flow.md](../operator-ingestion-flow.md)
 
 ## 1. Motivation
 
