@@ -6,9 +6,9 @@
 
 ## Motivating scenario
 
-A `campaign-launch` realm holds platform-expert elementals (Twitter/X, LinkedIn, Reddit, Hacker News, positioner) that turn a briefing into launch messaging. A customer needs that messaging grounded in **environmental / lead-testing** domain knowledge.
+A `campaign-launch` realm holds platform-expert elementals (Twitter/X, LinkedIn, Reddit, Hacker News, positioner) that turn a briefing into launch messaging. That messaging must be grounded in a **regulated domain's** knowledge — say the filing requirements and permitted representations of a specialty insurance line.
 
-The wrong move is to pour that knowledge into the campaign realm. The right model: a separate **`environmental-testing-services`** realm (domain-expert/research elementals + the lead-testing corpus), usable **standalone** for research *and* **composable** into a campaign. Different customers/domains → different siloed realms, composed per session.
+The wrong move is to pour that knowledge into the campaign realm. The right model: a separate **`industry-regulation`** realm (domain-expert/research elementals + the regulatory corpus), usable **standalone** for research *and* **composable** into a campaign. Different domains → different siloed realms, composed per session.
 
 ## The composition model
 
@@ -22,8 +22,8 @@ Two-phase flow for the scenario:
 
 ```mermaid
 flowchart LR
-    subgraph env["environmental-testing-services realm"]
-        envK[(lead-testing corpus<br/>scope: realm)]
+    subgraph env["industry-regulation realm"]
+        envK[(regulatory corpus<br/>scope: realm)]
         envE[research elemental]
     end
     subgraph camp["campaign-launch realm"]
@@ -54,7 +54,7 @@ Today `search_worldtree` takes only `{query, limit}` and **always unions every r
 
 - `accessibleRealms` is the **ceiling** (travel/delegation/research capability), never the automatic query scope.
 - `search_worldtree` gains an optional **`realms`** parameter. Effective scope = `global ∪ session:{current} ∪ (requested realms ∩ ceiling)` for druids; for elementals it is fixed at `global ∪ boundRealm ∪ session:{current}` and any `realms` argument beyond that is ignored/denied.
-- **Direction comes from the session/system prompt** ("research the `environmental-testing-services` realm for lead-testing standards"), not from the agent's static access. → **one versatile coordinator, scoped per session by directive.**
+- **Direction comes from the session/system prompt** ("research the `industry-regulation` realm for permitted representations"), not from the agent's static access. → **one versatile coordinator, scoped per session by directive.**
 
 This is the change that makes the model composable instead of requiring a bespoke coordinator per domain combination.
 
@@ -72,7 +72,7 @@ There are two distinct "session namespaces"; only one is relevant here:
 
 The throughline: **cross-realm knowledge reaches an elemental only through the curated session references — never by granting it source-realm access.**
 
-- **Elementals are constrained by type + binding** to `global ∪ boundRealm ∪ session`. A campaign elemental *cannot* search the `environmental-testing-services` realm even if misdirected — it has no path to it.
+- **Elementals are constrained by type + binding** to `global ∪ boundRealm ∪ session`. A campaign elemental *cannot* search the `industry-regulation` realm even if misdirected — it has no path to it.
 - **Session scope is per-session** (`scope_ref = sessionId`) → no cross-session leak; **ephemeral** → the session-scoped research must be **cleaned up when the session ends** (never persist as orphan/realm/global).
 - **The shared set is deliberately curated** — only what the gather phase wrote — not a firehose of the domain realm.
 - **Write-access rule:** only an agent that actually has access to the **source realm** may seed research derived from it into the session namespace, and each reference carries **provenance/citations** (the deterministic-references work). Elementals do not seed cross-realm research.

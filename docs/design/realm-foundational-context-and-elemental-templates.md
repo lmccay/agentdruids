@@ -9,8 +9,9 @@ Two problems observed while running realm-scoped coordination:
 
 1. **Domain/craft knowledge is not reachable by semantic search.** Retrieval
    (`search_worldtree`) ranks corpus chunks by embedding similarity to the
-   *query*. During a campaign about "lead dust and pets," the queries are about
-   that topic, so a document describing *how to do the realm's activity* (e.g.
+   *query*. During a campaign about a specific product or service, the queries
+   are about that topic, so a document describing *how to do the realm's
+   activity* (e.g.
    channel/positioning craft for the launch-visibility realm) is never
    retrieved — its embedding is far from the topical query. Embedding
    similarity governs **findability only**; it has no effect on whether the LLM
