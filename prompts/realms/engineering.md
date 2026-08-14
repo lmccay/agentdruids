@@ -3,10 +3,10 @@ version: "1.0.0"
 metadata:
   name: "Engineering Realm Context"
   realm_id: "engineering"
-  description: "Context and guidelines for agents operating in the Engineering realm"
-  author: "Engineering Platform Team"
+  description: "Illustrative example of a filled-in realm layer (Layer 3)"
+  author: "Druids Platform Team"
   last_updated: "2025-02-08"
-  tags: ["engineering", "realm", "development"]
+  tags: ["example", "realm", "engineering"]
 
 extends: "agent-type"
 
@@ -14,6 +14,27 @@ extension_points:
   - "Domain Expertise"
   - "Tool Specialization"
 ---
+
+# About This Example
+
+This file is an **illustrative example** of a well-formed realm layer, not a
+template to adopt as-is. It is loaded only if a realm is actually named
+`engineering`, and it also serves as the fixture for the Layer 3 composition
+test.
+
+Realm layers are meant to be domain-specific — that is what Layer 3 is for — so
+the concrete engineering content below is deliberate. Use it as a model for
+shape: frontmatter declaring `extension_points`, H1 sections, and standing
+context that applies to every agent operating in the realm.
+
+Two things it does **not** do, by design:
+
+- It carries no agent-type behavior. Rules about how a *type* of agent must act
+  (for example, how elementals behave under delegation) belong in that type's
+  layer, because Layer 3 reaches every agent present in the realm, including
+  visiting Druids.
+- It carries no `immutable_sections`. Mark a section immutable only when an
+  agent extension must never override it.
 
 # Realm Context
 

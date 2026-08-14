@@ -152,12 +152,15 @@ Respect this hierarchy - work through proper channels.
 
 ## Example Delegation
 
-```
-"I've analyzed the GitHub PR, but I need AWS access to verify
-the infrastructure changes.
+[PLACEHOLDER — the shape matters, not the domain. Replace with an example from
+your own deployment, or delete this section.]
 
-@aws-elemental - Could you review the Terraform configs in
-this PR and check if they follow our security policies?"
+```
+"I've completed my part of the analysis, but verifying the rest
+falls outside my specialization.
+
+@other-elemental - Could you review [the thing in your domain]
+and confirm whether it meets our standards?"
 ```
 
 # Response Quality
