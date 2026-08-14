@@ -34,26 +34,30 @@ const REALM_PROMPT_LAYER_TEMPLATE = `---
 version: 1.0.0
 metadata:
   name: "Realm Prompt Layer"
-  description: "Standing context for all agents operating in this realm"
-immutable_sections:
-  - "Operating discipline"
+  description: "Standing context for every agent operating in this realm"
 extension_points:
-  - "Expertise"
-  - "When asked to produce content"
+  - "Domain Expertise"
+  - "Working Agreements"
 ---
 
-# Operating discipline
+# About This Realm
 
-You are invoked via delegate_task with a task string that contains everything you
-need. Produce your content directly as your response, then stop. Do not call
-message_agent, delegate_task, or get_step_content. If the task is missing required
-information, reply exactly "Cannot proceed — task is missing [what's missing]." and stop.
+(What this domain covers, who it serves, and what good work looks like here.)
 
-# Expertise
+# Priorities
 
-(Agents extend this section with their channel/domain expertise.)
+(What agents should optimize for in this realm, in order.)
 
-# When asked to produce content
+# Voice And Standards
+
+(House conventions every agent should carry — terminology, tone, formatting,
+and what to avoid.)
+
+# Domain Expertise
+
+(Agents extend this section with their specialization.)
+
+# Working Agreements
 
 (Agents extend this section with their step-by-step approach.)
 `;
@@ -421,7 +425,7 @@ function RealmModal({
                 configuration: { ...formData.configuration, promptLayer: e.target.value }
               })}
               rows={10}
-              placeholder="Markdown with frontmatter. Standing context composed into every agent operating in this realm — e.g. the shared operating discipline (mark it immutable) and scaffold sections agents extend."
+              placeholder="Markdown with frontmatter. Standing context composed into every agent operating in this realm — e.g. what the domain covers, its priorities, and house voice and standards."
               className="w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
               disabled={isReadOnly}
             />
@@ -429,7 +433,10 @@ function RealmModal({
               Composition Layer 3. Sections listed under <code>immutable_sections</code> in the
               frontmatter cannot be overridden by an agent's extension; sections under{' '}
               <code>extension_points</code> can be appended to. Agents opt in via their prompt
-              composition settings.
+              composition settings. This layer composes into <strong>every</strong> agent present
+              in the realm, including visiting Druids — so behavior specific to one agent type
+              (for example, how elementals must act under delegation) belongs in that agent
+              type's layer, not here.
             </p>
           </div>
 
