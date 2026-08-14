@@ -53,11 +53,11 @@ shelves.
 Resist mirroring departments. Mirror **work that gets done together**, then
 factor out knowledge that more than one kind of work needs.
 
-1. **List the recurring jobs.** "Launch a product," "respond to an RFP," "review
-   a field report." Each becomes a candidate activity realm.
+1. **List the recurring jobs.** "Launch a practice area," "prepare a
+   submission," "work a renewal." Each becomes a candidate activity realm.
 2. **List the bodies of knowledge those jobs depend on.** "Our service catalog
-   and pricing rules," "state and federal testing regulations," "our brand
-   voice." Each becomes a candidate knowledge realm.
+   and pricing rules," "state filing requirements," "our brand voice." Each
+   becomes a candidate knowledge realm.
 3. **Factor.** Knowledge needed by two or more activity realms belongs in its
    own knowledge realm, not copied into each. Knowledge needed by exactly one,
    and meaningless outside it, can live in that activity realm.
@@ -69,52 +69,59 @@ factor out knowledge that more than one kind of work needs.
 The factoring step in (3) is the one people skip, and skipping it produces the
 same document ingested into four realms with four divergent copies.
 
-## 4. Worked example: an environmental testing services company
+## 4. Worked example: a specialty insurance brokerage
 
-A company performing lead, asbestos, and water testing for residential and
-commercial clients. It markets itself, bids on public contracts, and must stay
-current with regulation.
+A brokerage placing commercial coverage for mid-market clients. It prepares
+submissions to carriers, manages renewals, markets its practice areas, and
+operates under state regulation throughout.
+
+This example is illustrative. Any regulated professional-services business has
+the same shape: an external body of rules it must respect, an internal body of
+practice it must stay consistent with, and several distinct workflows drawing on
+both.
 
 ### 4.1 The realm map
 
 **Knowledge realms**
 
-- **`industry-standards`** — federal and state testing regulations, sampling
-  protocols, accreditation requirements, industry journals. Sourced externally;
-  changes when regulators change it.
-- **`company-canon`** — service catalog, pricing rules, SOPs, past reports,
-  brand voice, differentiators. Sourced internally; changes when the business
-  changes.
+- **`industry-regulation`** — state filing requirements, policy form libraries,
+  regulatory bulletins, market condition reports. Sourced externally; changes
+  when regulators and carriers change it.
+- **`brokerage-canon`** — carrier appetite guide, underwriting guidelines,
+  service catalog, brand voice, prohibited representations, past submissions.
+  Sourced internally; changes when the business changes.
 
 **Activity realms**
 
-- **`campaign-launch`** — channel elementals (LinkedIn, Reddit, Hacker News,
-  X, plus a positioner) that turn a brief into multi-channel messaging.
-- **`proposal-desk`** — elementals for scope drafting, pricing narrative, and
-  compliance-matrix assembly.
-- **`field-report-qa`** — elementals that review technician reports for
-  protocol adherence and defensible language.
+- **`new-business-submission`** — elementals for risk narrative, coverage
+  comparison, and submission packaging.
+- **`renewal-review`** — elementals for exposure-change analysis and
+  remarketing rationale.
+- **`campaign-launch`** — channel elementals for the channels the brokerage
+  actually publishes on, plus a positioner, turning a brief into messaging.
 
 **Druids**
 
+- **`submission-coordinator`** — spans `new-business-submission` + both
+  knowledge realms.
+- **`renewal-coordinator`** — spans `renewal-review` + both knowledge realms.
 - **`campaign-coordinator`** — spans `campaign-launch` + both knowledge realms.
-- **`proposal-coordinator`** — spans `proposal-desk` + both knowledge realms.
-- **`qa-coordinator`** — spans `field-report-qa` + `industry-standards`.
 
 ### 4.2 Why this shape
 
 Both knowledge realms serve **all three** activity realms, which is exactly why
-they are separate. A regulation about water sampling is cited by a campaign
-claim, a proposal compliance matrix, and a field report review. One corpus,
-three consumers, no duplication.
+they are separate. A state's cancellation-notice rule is cited by a submission,
+by a renewal remarketing rationale, and by a marketing claim that must not
+overstate coverage. One corpus, three consumers, no duplication.
 
 Note also that a single document can associate with **more than one realm** —
-realm association is many-to-many, so an accreditation standard can serve both
-`industry-standards` and `company-canon` without being copied. An item is in
-scope if *any* of its associated realms is in scope.
+realm association is many-to-many, so a filing requirement the brokerage has
+built internal procedure around can serve both `industry-regulation` and
+`brokerage-canon` without being copied. An item is in scope if *any* of its
+associated realms is in scope.
 
 The activity realms stay ignorant of each other. A campaign elemental has no
-path to proposal pricing logic, and that is deliberate.
+path to submission pricing logic, and that is deliberate.
 
 ## 5. The two shelves
 
@@ -143,8 +150,8 @@ searched. See §6 for which layer.
 model can use text already in its context.
 
 So a document explaining *how to write for this channel* placed in the reference
-corpus will essentially never be retrieved — during a campaign about water
-testing, the queries are about water testing, and the embedding of a
+corpus will essentially never be retrieved — during work on a cyber-liability
+placement, the queries are about cyber liability, and the embedding of a
 craft-guidance document sits nowhere near them. It is present, indexed, and
 invisible.
 
@@ -155,16 +162,16 @@ encounter it**, never by what kind of file it is.
 
 | The artifact | Shelf | Mechanism |
 |---|---|---|
-| State lead-abatement regulation (PDF) | Knowledge — reference | Chunked, embedded, retrieved by query |
-| Service catalog with pricing tiers | Knowledge — reference | Chunked, embedded |
-| Past inspection reports | Knowledge — reference | Chunked, embedded |
-| "How we write for regulators" | Knowledge — **foundational** | Distilled to a brief, injected on presence |
-| Brand voice and prohibited claims | Knowledge — **foundational** | Distilled, injected on presence |
-| "What good positioning looks like here" | Knowledge — **foundational** | Distilled, injected on presence |
+| State cancellation-notice regulation (PDF) | Knowledge — reference | Chunked, embedded, retrieved by query |
+| Carrier appetite guide with limits and classes | Knowledge — reference | Chunked, embedded |
+| Past submission packages | Knowledge — reference | Chunked, embedded |
+| "How we write to underwriters" | Knowledge — **foundational** | Distilled to a brief, injected on presence |
+| Brand voice and prohibited representations | Knowledge — **foundational** | Distilled, injected on presence |
+| "What a good risk narrative looks like here" | Knowledge — **foundational** | Distilled, injected on presence |
 | Realm priorities and house standards | Behavior — realm layer | Composed into every agent present |
 | "Elementals produce and stop under delegation" | Behavior — **agent-type layer** | Composed into every elemental everywhere |
-| This elemental's channel expertise | Behavior — agent extension | Composed into that agent only |
-| A finding from last quarter's launch | Knowledge — promoted outcome | Promoted from session, provenance retained |
+| This elemental's coverage-line expertise | Behavior — agent extension | Composed into that agent only |
+| A finding from last quarter's renewals | Knowledge — promoted outcome | Promoted from session, provenance retained |
 
 ## 6. The prompt layers, and the scope rule
 
@@ -250,8 +257,8 @@ The consequences for modeling:
 Knowledge crosses a realm boundary through a curated hand-off, never by widening
 an elemental's access.
 
-1. **Gather.** The coordinator druid, directed at `industry-standards` and
-   `company-canon`, researches and produces **cited references**, writing them
+1. **Gather.** The coordinator druid, directed at `industry-regulation` and
+   `brokerage-canon`, researches and produces **cited references**, writing them
    into a session-scoped research namespace.
 2. **Produce.** The activity elementals do their work. They retrieve the curated
    session references through ordinary search. They never touch the knowledge
@@ -267,20 +274,21 @@ why quality is better than granting broad access would produce.
 
 ### The example, end to end
 
-A launch campaign for a new water-testing service:
+A launch campaign for a newly opened practice area:
 
 1. `campaign-coordinator` opens a session with research scope
-   `[industry-standards, company-canon]`.
-2. It gathers: the claims substantiation rules it must not violate, the service's
-   actual scope and pricing posture, the brand's prohibited claims. Each cited.
+   `[industry-regulation, brokerage-canon]`.
+2. It gathers: the representations it may not make about coverage, the practice
+   area's actual appetite and limits, the brand's prohibited claims. Each cited.
 3. It travels into `campaign-launch` and delegates to the positioner, which
    produces positioning grounded in the seeded references.
 4. It delegates to each channel elemental. Each carries: the elemental
    delegation contract (Layer 2), `campaign-launch` priorities and house voice
    (Layer 3), its own channel craft (Layer 4), the realm's foundational briefs on
    how campaigns are written here, and the session's cited references via search.
-5. Findings worth keeping are promoted into `company-canon` as outcomes, with the
-   originating session as provenance. The next campaign starts better informed.
+5. Findings worth keeping are promoted into `brokerage-canon` as outcomes, with
+   the originating session as provenance. The next campaign starts better
+   informed.
 
 Step 5 is what compounds. Without it every campaign starts from zero.
 
