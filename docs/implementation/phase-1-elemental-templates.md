@@ -1,7 +1,7 @@
 # Phase 1 Implementation Plan — Elemental Templates via the Composition System
 
 **Design:** [../design/realm-foundational-context-and-elemental-templates.md](../design/realm-foundational-context-and-elemental-templates.md)
-**Status:** In progress — WS1 done (composition activated on the coordination path, session-scoped realm), WS2 done (realm layer DB-backed via `configuration.promptLayer` + realm prompt editor UI). Next: WS3/WS4 (populate `promptConfig`, migrate launch-visibility elementals) + first end-to-end validation.
+**Status:** Substantially complete. WS1 done (composition activated on the coordination path, session-scoped realm). WS2 done (realm layer DB-backed via `configuration.promptLayer` + realm prompt editor UI). WS3 resolved as opt-in — no code change required. WS4 done **with a deviation**: the shared operating discipline went to the **agent-type** layer, not the realm layer (see §WS4). WS5 done — no agent extension carries the discipline any more. One WS4 deliverable remains and is partly subsumed by Phase 2 (see §Remaining).
 
 ## Reconciliation (supersedes the `{{named}}`-slot design)
 
@@ -12,10 +12,13 @@ section-based with `immutable` / `protected` / `override_points` /
 Phase 1 **reconciles onto that engine** instead of building a `{{named}}`-slot
 mechanism. The design doc's §5.4 (`templateValues` / `{{named}}`) is superseded:
 an elemental's specialization is supplied as its **`agentExtension` Markdown**
-(filling `extension_points`), and the realm's shared operating discipline is an
-**`immutable_section`** of the realm layer.
+(filling `extension_points`), and the shared operating discipline is an
+**`immutable_section`** of the **agent-type** layer.
 
-## Current state (from investigation)
+> Originally this said "of the realm layer." That was wrong for the reason given
+> in §WS4 — the realm layer reaches travelling Druids too.
+
+## Current state at the time of investigation *(historical — superseded by the workstream sections below)*
 
 **Backend — the engine is fully built but dormant:**
 - 4 fixed layers, composed in order: **global base** → **agent-type** → **realm
@@ -78,82 +81,169 @@ The load-bearing change. Today `usePersonaPrompt` short-circuits composition.
 - **Acceptance:** edit a realm's prompt layer in the UI → persisted → composed
   into every agent operating in that realm.
 
-### WS3 — Engage composition for real agents *(backend + migration)*
+### WS3 — Engage composition for real agents — **RESOLVED: opt-in, no code change**
 Composition only runs when `agent.promptConfig` is truthy.
-- New agents: the UI already defaults `usePromptComposition` ON, so they send
-  `promptConfig`. Confirm `createAgent` preserves it (it does — passthrough).
-- Existing/seeded agents: **decision needed** — default `promptConfig`
-  (`baseTemplate: 'standard'`) in `createAgent`, and/or a backfill migration for
-  agents that should compose. Guard against silently changing agents that rely on
-  a legacy `systemPrompt`.
-- Activating composition automatically makes the existing `disableRealmPrompt` /
-  `baseTemplate: 'minimal'` frontend artifacts functional (already read by the
-  composer) — no new UI needed for those.
 
-### WS4 — Migrate existing elemental prompts into layers *(one-time, assisted)*
-- Extract the shared **operating discipline** (produce-and-stop, forbidden
-  `message_agent`/`delegate_task`, fail-loudly contract) into the **realm layer**
-  as an `immutable_section` (`## Operating discipline`) plus scaffold sections
-  marked as `extension_points`.
-- Move each elemental's **specialization** (expertise, when-asked steps, output
-  path) into its **`agentExtension`** (filling the extension-point sections).
-- Drop the leaked chat prose ("Why this should fix it…") that ended up in the
-  current HN system prompt.
-- Deliver the **launch-visibility** realm layer + the 5 channel elementals'
-  extensions as the reference implementation and validation case.
+**Decision: fully opt-in.** `createAgent` stays pure passthrough
+(`AgentService.ts:366`); no server-side default and no backfill migration.
+Composition engages only where `promptConfig` is set explicitly — via the UI or
+a targeted change.
 
-### WS5 — De-duplicate across layers
-- Once the operating discipline lives in the realm layer, remove it from each
-  elemental's extension so it isn't injected twice (the §7 cross-layer de-dup
-  win). Composer already blocks override attempts on immutable sections and
-  reports them as `security_violations` — surface those in logs during
-  migration to catch elementals that still try to restate discipline.
+Why this was the low-risk call: the fleet was already largely converted. Of the
+agents present when this was decided, all but one carried `promptConfig` with
+real content in `agentExtension`, and every agent's legacy
+`llm_config.systemPrompt` was a 21-character placeholder. There was nothing
+meaningful to back-fill, and nothing depending on the legacy path.
 
-## Data model changes
-- **realms:** add `prompt_layer text` (or a `configuration.promptLayer` jsonb
-  field — decide in Open items). Migration `NNN_realm_prompt_layer.sql`.
-- **agents:** none — reuse the existing `prompt_config` jsonb (`baseTemplate`,
-  `agentExtension`, `disableRealmPrompt` already defined and UI-wired).
-- **Frontend types/payloads:** add the realm prompt-layer field to `Realm`,
+**Accepted asymmetry, recorded so it is not "fixed" later:** the frontend
+defaults `usePromptComposition` ON for new agents, so agents created through the
+UI compose, while agents created via API, MCP, or seeding do not. That is
+intentional, not an oversight.
+
+Activating composition also makes the existing `disableRealmPrompt` /
+`baseTemplate: 'minimal'` frontend artifacts functional (already read by the
+composer) — no new UI needed for those.
+
+### WS4 — Migrate existing elemental prompts into layers — **DONE, with a deviation**
+
+**What the plan said:** extract the shared operating discipline into the **realm
+layer** as an `immutable_section` plus scaffold `extension_points`.
+
+**What was done:** the discipline went into the **agent-type layer**
+(`prompts/agent-types/elemental.md`) as an immutable H1 `# Operating Discipline`.
+
+**Why the plan was wrong.** Nothing in that text is realm-specific — it
+describes how *any* elemental behaves under delegation. And Layer 3 composes into
+every agent **present** in a realm, including travelling Druids. Putting it in
+the realm layer gave the coordinator druid an immutable instruction forbidding
+`delegate_task`, the very tool its role depends on, and blocked its own extension
+from correcting it (logged as a `security_violation`). This was observed live
+before being corrected. This supersedes design §5.5 ("operating discipline —
+decided: realm-only"); open item #3 below anticipated the revisit.
+
+**The rule that came out of it:** ask which population needs a rule — a *type*
+(Layer 2), a *place* (Layer 3), or one *agent* (Layer 4).
+
+Other WS4 items:
+- **Specializations already lived in `agentExtension`** — no move was needed.
+- **The leaked chat prose was already gone** before the migration; that item was
+  stale.
+- **Mechanical gotcha found:** sections are extracted at **H1 only**
+  (`MarkdownPromptParser.extractSections`, `token.depth === 1`). The `##
+  Operating discipline` heading the elementals used was never a recognized
+  section and could not have been enforced as immutable in *any* layer.
+
+The discipline blocks were byte-identical across five elementals (same md5;
+exactly 1,077 characters removed from each), so the hoist was mechanical with
+nothing to reconcile. `facebook-elemental` had been missing the block entirely —
+a real behavioral divergence under delegation — and gained it by inheritance.
+
+### WS5 — De-duplicate across layers — **DONE**
+The discipline was removed from all five elemental extensions that carried it, so
+it is no longer injected twice. Verified: no `agentExtension` in the database
+contains it, and each elemental composes it exactly once from Layer 2. The
+coordinator druid receives none of it (no `druid.md` agent-type prompt exists) and
+retains its own `delegate_task`-permitting variant.
+
+The composer still blocks override attempts on immutable sections and reports
+them as `security_violations`; that remains the mechanism for catching any future
+extension that tries to restate the discipline.
+
+**Operational note for any future data-level migration.** The de-dup was applied
+as direct SQL, which bypassed the write-through path. `AgentService.getAgent`
+checks an in-memory map before falling through to Postgres
+(`AgentService.ts:438-455`), and `PromptCompositionService` has its own prompt
+cache, so the running app kept serving pre-migration values until it was
+restarted. Either go through the REST API (which invalidates properly) or restart
+`druids-main` and `druids-mcp-server` after direct SQL.
+
+## Data model changes — as built
+- **realms:** no schema change. The layer lives in the existing `configuration`
+  jsonb as `configuration.promptLayer`. No migration was needed.
+- **agents:** none — reuses the existing `prompt_config` jsonb (`baseTemplate`,
+  `agentExtension`, `disableRealmPrompt`, already defined and UI-wired).
+- **Frontend types/payloads:** realm prompt-layer field added to `Realm`,
   `CreateRealmRequest`, and the update path.
 
-## Layer semantics (as reconciled)
-| Layer | Source | Holds |
-|---|---|---|
-| 1 Global base | file `prompts/base/global.md` | system-wide baseline (unchanged) |
-| 2 Agent-type | file `prompts/agent-types/*.md` | left as-is; **operating discipline stays realm-only** for now (§5.5) |
-| 3 Realm context | **NEW: DB via `resolveRealmLayer`** | realm operating discipline (`immutable`) + scaffold (`extension_points`) |
-| 4 Agent extension | `promptConfig.agentExtension` | elemental specialization |
-| opt-out | `disableRealmPrompt` / `baseTemplate:'minimal'` | skip Layer 3 (now functional) |
+## Layer semantics (as built)
+| Layer | Source | Holds | Reaches |
+|---|---|---|---|
+| 1 Global base | file `prompts/base/global.md` | system-wide baseline | every agent |
+| 2 Agent-type | file `prompts/agent-types/{type}.md` | **the operating discipline** (`immutable`) + type identity | every agent of that type, in all realms |
+| 3 Realm context | DB `realm.configuration.promptLayer` | realm-wide standing context: priorities, house standards | every agent **present** in the realm, including visiting Druids |
+| 4 Agent extension | `promptConfig.agentExtension` | that agent's specialization | one agent |
+| opt-out | `disableRealmPrompt` / `baseTemplate:'minimal'` | skips Layer 3 | — |
 
-## Sequencing (PRs)
-1. **PR1 — WS1:** activate composition on the coordination path + session-scoped
-   realm. Validate end-to-end with a *file-based* realm prompt (no DB work yet).
-   Unblocks everything and is independently testable.
-2. **PR2 — WS2:** realm layer DB-backed + realm prompt editor UI.
-3. **PR3 — WS3 + WS4 + WS5:** engage composition for the real agents, migrate the
-   launch-visibility realm + elementals, de-dup.
+Layer 2 has **no per-agent opt-out** — it loads from the agent's type. Only
+`elemental.md` exists today; other types are `optional: true` in
+`config/prompt-sources.json` and contribute nothing when absent, which is why the
+coordinator druid receives no type layer at all.
 
-## Open items to confirm during implementation
-1. **Realm storage:** dedicated `prompt_layer` column vs `configuration` jsonb
-   field. (Lean: dedicated column — it's large Markdown, queried/edited on its
-   own, mirrors `agents.prompt_config`.)
-2. **Existing-agent activation:** default-on `promptConfig` in `createAgent` +
-   backfill, vs opt-in. (Risk: flipping composition on for agents that depend on
-   a legacy `systemPrompt`.)
-3. **Agent-type layer (Layer 2):** leave file-based for now; revisit only if a
-   system-wide operating protocol is later factored out of realms (§5.5).
-4. **Legacy path:** keep as the fallback for agents without `promptConfig` — do
-   not remove in Phase 1.
+## Sequencing (as delivered)
+1. **WS1** — composition activated on the coordination path + session-scoped
+   realm.
+2. **WS2** — realm layer DB-backed + realm prompt editor UI.
+3. **WS3** — resolved as opt-in; no code change.
+4. **WS4 + WS5** — discipline hoisted to the agent-type layer and removed from the
+   five elemental extensions, with a follow-up correcting the realm prompt
+   editor's "Insert template" scaffold, which had seeded the same layer-scope
+   mistake.
+
+## Open items — all resolved
+1. **Realm storage:** ~~dedicated `prompt_layer` column vs `configuration` jsonb~~
+   → **RESOLVED against the stated lean:** implemented as
+   `configuration.promptLayer` (jsonb), not a dedicated column. Read at
+   `AgentService.ts:882` and `PromptCompositionService.ts:93`.
+2. **Existing-agent activation:** → **RESOLVED: fully opt-in.** No server
+   default, no backfill. See §WS3.
+3. **Agent-type layer (Layer 2):** → **RESOLVED, and it became load-bearing.**
+   The operating discipline now lives here. Still file-based.
+4. **Legacy path:** unchanged — retained as the fallback for agents without
+   `promptConfig`.
+
+## Remaining
+
+One WS4 deliverable is outstanding: **the launch-visibility realm layer as a
+reference implementation.** No realm currently carries a `promptLayer`.
+
+This is deliberately parked rather than pending, because the natural content for
+that layer — how campaigns are written here, the house voice, the craft — is
+**foundational context**, the Phase 2 knowledge tier that does not exist yet.
+Authoring it as a realm prompt layer today would file knowledge on the
+configuration shelf, which is the specific misfile the taxonomy design exists to
+prevent.
+
+Two ways forward, in preference order:
+
+1. **Wait for Phase 2** and deliver it as foundational context, which is its
+   correct home.
+2. **Interim measure** — hand-author a short realm layer covering genuine
+   realm-wide standing context (priorities, house standards), keeping it authored
+   and brief rather than pasting documents in, so the eventual migration to
+   foundational context is mechanical.
+
+Either way, Phase 1's mechanism work is complete: the layer exists, is
+DB-backed, is editable in the UI, and composes correctly. What is missing is
+*content*, and the right tier for that content is Phase 2's job.
 
 ## Verification
-- **Unit:** `composePrompt` with a realm layer (immutable `## Operating
-  discipline`) + an agent extension that both fills an extension point and
-  *attempts* to override the immutable section → final prompt contains the
-  discipline once, the override is blocked and reported in `security_violations`,
-  and the specialization is present.
-- **Integration:** run a coordination session; confirm (from logs) the elemental
-  system prompt shows composed layers with the **session-scoped** realm, and that
-  delegation still succeeds through the governed transport.
-- **Regression:** an agent with no `promptConfig` still uses the legacy path
-  unchanged.
+
+**Done:**
+- **Unit** — 62 unit tests pass, including immutable-section enforcement and
+  Layer 3 composition.
+- **Template validity** — all three prompt files parse and validate, with
+  immutable sections resolving to real H1 sections (`global.md` → Critical
+  Security Rules, Access Control Requirements; `elemental.md` → Operating
+  Discipline).
+- **Composition scoping** — every elemental composes the discipline exactly once
+  from Layer 2; the coordinator druid receives none of it and retains its own
+  `delegate_task`-permitting variant; no realm carries a `promptLayer`.
+
+**Still outstanding:**
+- **Integration** — run a real coordination session and confirm from logs that
+  the elemental system prompt shows composed layers with the **session-scoped**
+  realm, and that delegation still succeeds through the governed transport. This
+  is the "first end-to-end validation" that was pending and remains so; all
+  verification to date has been static and unit-level.
+- **Regression** — confirm an agent with no `promptConfig` still uses the legacy
+  path unchanged.
