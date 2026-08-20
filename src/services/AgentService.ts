@@ -17,7 +17,7 @@ import { RepositoryManager } from './RepositoryManager';
 import { getWorldTreeQueryService } from './WorldTreeQueryService';
 import { RealmService } from './RealmService';
 import { resolveSearchScope } from './searchScope';
-import { generateUUID, AgentIdMapper } from '../utils/uuidUtils';
+import { isValidUUID, slugifyAgentName } from '../utils/uuidUtils';
 import { MCPConfigLoader } from './mcp/MCPConfigLoader';
 import { HttpMCPClient } from './mcp/HttpMCPClient';
 import { SSEMCPClient } from './mcp/SSEMCPClient';
@@ -278,19 +278,13 @@ export class AgentService {
     try {
       const dbAgents = await this.repositoryManager.agents.findAll();
       
-      // Load database agents into memory for fast access
+      // The repository already returns agents keyed by their stored slug id, so
+      // there is nothing to derive or map here. Identity comes from the database
+      // rather than being recomputed from the display name on every load, which
+      // is what previously made a rename silently change an agent's identity.
       for (const dbAgent of dbAgents) {
-        // Generate slug ID from agent name
-        const slugId = dbAgent.name.toLowerCase().replace(/[^a-z0-9]+/g, '-');
-        
-        // Establish the mapping between slug ID and UUID
-        AgentIdMapper.mapExistingAgent(slugId, dbAgent.id);
-        
-        // Use the slug ID as the service ID
-        const serviceAgent = { ...dbAgent, id: slugId };
-        this.agents.set(slugId, serviceAgent);
-        
-        console.log(`🔄 Loaded agent ${slugId} (DB UUID: ${dbAgent.id}) from database`);
+        this.agents.set(dbAgent.id, dbAgent);
+        console.log(`🔄 Loaded agent ${dbAgent.id} from database`);
       }
       
       if (dbAgents.length > 0) {
@@ -338,8 +332,18 @@ export class AgentService {
       throw new Error(`Access denied: ${accessDecision.reason}`);
     }
 
-    const agentId = request.id || this.generateAgentId();
-    const dbAgentId = AgentIdMapper.needsMapping(agentId) ? AgentIdMapper.getUUIDForStringId(agentId) : agentId;
+    // Agents are identified by slug. An explicitly supplied slug wins; otherwise
+    // one is derived from the display name, which matches how every existing
+    // agent's slug was backfilled. A caller passing a UUID is honouring the old
+    // contract, so derive a slug for it rather than persisting the UUID as
+    // identity.
+    const requestedId = request.id && !isValidUUID(request.id) ? request.id : undefined;
+    const agentId = requestedId || slugifyAgentName(request.name);
+
+    if (!agentId) {
+      throw new Error('Cannot derive an agent slug id: provide an id, or a name containing alphanumeric characters');
+    }
+
     const now = Date.now().toString();
 
     const agent: Agent = {
@@ -375,9 +379,8 @@ export class AgentService {
     // Write to database as single source of truth
     if (this.repositoryManager) {
       try {
-        const dbAgent = { ...agent, id: dbAgentId };
-        await this.repositoryManager.agents.create(dbAgent);
-        console.log(`💾 Stored agent ${agentId} (DB ID: ${dbAgentId}) in database`);
+        await this.repositoryManager.agents.create(agent);
+        console.log(`💾 Stored agent ${agentId} in database`);
       } catch (error) {
         // Remove from memory cache if database write fails
         this.agents.delete(agentId);
@@ -443,14 +446,11 @@ export class AgentService {
       // 2. Read from database as single source of truth
       if (this.repositoryManager) {
         try {
-          const dbAgentId = AgentIdMapper.needsMapping(agentId) ? 
-            AgentIdMapper.getUUIDForStringId(agentId) : agentId;
-          const dbAgent = await this.repositoryManager.agents.findById(dbAgentId);
-          
+          const dbAgent = await this.repositoryManager.agents.findById(agentId);
+
           if (dbAgent) {
-            // Convert database format back to application format
-            agent = { ...dbAgent, id: agentId };
-            
+            agent = dbAgent;
+
             // Update memory cache
             this.agents.set(agentId, agent);
             console.log(`📥 Database hit: Loaded agent ${agentId} into memory cache`);
@@ -669,18 +669,16 @@ export class AgentService {
     // Write-through cache: Database is source of truth, Redis is cache
     if (this.repositoryManager) {
       try {
-        const dbAgentId = AgentIdMapper.needsMapping(agentId) ? AgentIdMapper.getUUIDForStringId(agentId) : agentId;
-        const dbAgent = { ...updatedAgent, id: dbAgentId };
-        
-        // Try to update first, if it returns null (not found), create the agent
-        const updateResult = await this.repositoryManager.agents.update(dbAgentId, dbAgent);
+        // Update first; if the agent is not in the database, create it. The
+        // create is an upsert on the slug, so this fallback can no longer insert
+        // a second row for an agent that already exists.
+        const updateResult = await this.repositoryManager.agents.update(agentId, updatedAgent);
         if (updateResult === null) {
-          // Agent not found in database, create it
           console.log(`⚠️ Agent ${agentId} not found in database, creating new entry...`);
-          await this.repositoryManager.agents.create(dbAgent);
-          console.log(`💾 Created agent ${agentId} (DB ID: ${dbAgentId}) in database`);
+          await this.repositoryManager.agents.create(updatedAgent);
+          console.log(`💾 Created agent ${agentId} in database`);
         } else {
-          console.log(`💾 Updated agent ${agentId} (DB ID: ${dbAgentId}) in database`);
+          console.log(`💾 Updated agent ${agentId} in database`);
         }
         
         // Update cache on successful database write
@@ -1883,10 +1881,8 @@ Your responses and behavior should be appropriate to this realm's context and ch
     // Delete from database first
     if (this.repositoryManager?.agents) {
       try {
-        // Convert service ID to database UUID if needed
-        const dbUUID = AgentIdMapper.getUUIDForStringId(agentId) || agentId;
-        await this.repositoryManager.agents.delete(dbUUID);
-        console.log(`🗑️ Agent ${agentId} deleted from database (UUID: ${dbUUID})`);
+        await this.repositoryManager.agents.delete(agentId);
+        console.log(`🗑️ Agent ${agentId} deleted from database`);
       } catch (error) {
         console.error('Failed to delete agent from database:', error instanceof Error ? error.message : 'Unknown error');
         throw new Error(`Failed to delete agent from database: ${error instanceof Error ? error.message : 'Unknown error'}`);
@@ -1994,9 +1990,6 @@ Your responses and behavior should be appropriate to this realm's context and ch
 
     // Clear current cache
     this.agents.clear();
-
-    // Clear ID mappings
-    AgentIdMapper.clearMappings();
 
     // Reload from database
     await this.loadAgentsFromDatabase();
@@ -3545,11 +3538,4 @@ Your entire response will be written to a file. Start with the formatted content
     return result;
   }
 
-  /**
-   * Generate a unique agent ID
-   */
-  private generateAgentId(): AgentId {
-    // Generate a proper UUID for new agents to ensure database compatibility
-    return generateUUID();
-  }
 }
