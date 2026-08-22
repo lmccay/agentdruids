@@ -1,0 +1,62 @@
+-- Migration 020: realms.slug_id — give realms a stable, human-meaningful identity
+--
+-- Companion to migration 018, which did the same for agents. This is the schema
+-- half only: nothing reads slug_id yet, so this migration changes no behaviour.
+--
+-- Why realms need it. Unlike agents — where migration 016 had already
+-- established the slug as the runtime identity and 018 merely stored it — realm
+-- identity today *is* the surrogate UUID, and it leaks:
+--
+--   GET /api/agents -> agent.realmAccess.boundRealmId
+--                      = "6825f24b-7d51-41cf-9cd2-91a55cf4fd99"  (launch-visibility)
+--                      accessibleRealms[] = [ ...more UUIDs... ]
+--
+-- A deployment-local surrogate is therefore a durable, user-visible identifier
+-- that would end up in any descriptor, export or declarative configuration.
+-- There is also no unique constraint on realms.name, so two realms may share a
+-- name (none do today, so there is no cleanup prerequisite).
+--
+-- The follow-up change flips realm identity to the slug and rewrites the stored
+-- references (agents.realm_access, worldtree_item_scopes.scope_ref). Those must
+-- land together, because code compares realm ids directly — for example
+-- accessibleRealms.includes(realmId) — so returning slugs while references still
+-- hold UUIDs would silently break presence and travel checks. Splitting the
+-- schema out keeps that behavioural change reviewable on its own.
+--
+-- The backfill uses the same derivation as migration 018 and must not be
+-- "improved" for the same reason: the follow-up code derives slugs identically,
+-- and any divergence would stop resolving already-backfilled realms.
+--
+--   ETS               -> ets
+--   Open Source Realm -> open-source-realm
+--   launch-visibility -> launch-visibility
+--
+-- slug_id is left NULLable so realm creation keeps working until the service is
+-- taught to populate it. Postgres permits multiple NULLs under a unique index,
+-- so existing realms are protected now and newly created realms are covered by
+-- the follow-up.
+--
+-- Note: 'default' is a reserved sentinel meaning "not present in any realm"
+-- (see AgentService.resolveCurrentRealm and searchScope). It is not a realm and
+-- must never be created as one.
+--
+-- Rollback:
+--   DROP INDEX IF EXISTS druids_core.uq_realms_slug_id;
+--   ALTER TABLE druids_core.realms DROP COLUMN IF EXISTS slug_id;
+
+BEGIN;
+
+ALTER TABLE druids_core.realms
+  ADD COLUMN IF NOT EXISTS slug_id VARCHAR(255);
+
+UPDATE druids_core.realms
+SET slug_id = regexp_replace(lower(name), '[^a-z0-9]+', '-', 'g')
+WHERE slug_id IS NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_realms_slug_id
+  ON druids_core.realms (slug_id);
+
+COMMENT ON COLUMN druids_core.realms.slug_id IS
+  'Stable identity for this realm. Immutable once set; "name" is a display label and may change freely. The id UUID is a deployment-local surrogate and must not appear in an API, UI or descriptor. Reserved: "default" is a sentinel meaning no realm, never a stored realm.';
+
+COMMIT;
