@@ -970,11 +970,17 @@ export class WorldTreeQueryService {
   async assertRealmsExist(realmRefs: string[]): Promise<void> {
     const refs = Array.from(new Set(realmRefs.filter(Boolean)));
     if (refs.length === 0) return;
-    const { rows } = await this.db.query<{ id: string }>(
-      `SELECT id::text AS id FROM druids_core.realms WHERE id::text = ANY($1::text[])`,
+    // Realms are identified by slug (migration 020/021), and scope_ref now
+    // holds slugs. Matching only id::text would reject every valid scope and
+    // block realm-scoped ingestion entirely. A surrogate UUID is still accepted
+    // so callers holding a pre-migration id are not broken.
+    const { rows } = await this.db.query<{ ref: string }>(
+      `SELECT slug_id AS ref FROM druids_core.realms WHERE slug_id = ANY($1::text[])
+       UNION
+       SELECT id::text AS ref FROM druids_core.realms WHERE id::text = ANY($1::text[])`,
       [refs]
     );
-    const known = new Set(rows.map((r) => r.id));
+    const known = new Set(rows.map((r) => r.ref));
     const unknown = refs.filter((r) => !known.has(r));
     if (unknown.length > 0) {
       throw new Error(`Cannot scope to unknown realm(s): ${unknown.join(', ')}`);

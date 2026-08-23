@@ -237,6 +237,58 @@ export class AgentService {
     }
   }
 
+
+  /**
+   * Normalise every realm reference on an agent's realmAccess to canonical
+   * slugs before it is stored.
+   *
+   * Migration 021 rewrote the references already held; this stops new ones
+   * arriving in the old form. A caller creating or updating an agent with a
+   * pre-migration realm UUID would otherwise reintroduce it into
+   * agents.realm_access and back onto /api/agents, and every grant, travel and
+   * search check compares exactly — so the reference would be present but never
+   * match.
+   *
+   * accessibleRealms is polymorphic: typed as { realmId, permissions, ... }
+   * objects but historically written as plain id strings. Both are handled, and
+   * object entries keep their metadata.
+   */
+  private async normalizeRealmAccess(realmAccess: any): Promise<any> {
+    if (!realmAccess || typeof realmAccess !== 'object') {
+      return realmAccess;
+    }
+
+    const toSlug = async (value: unknown): Promise<string | undefined> => {
+      if (!value || typeof value !== 'string') return undefined;
+      const resolved = await this.realmService.resolveRealmIds([value]);
+      return resolved[0] ?? value;
+    };
+
+    const normalized: any = { ...realmAccess };
+
+    for (const field of ['boundRealmId', 'currentRealmId'] as const) {
+      if (normalized[field]) {
+        const slug = await toSlug(normalized[field]);
+        if (slug) normalized[field] = slug;
+      }
+    }
+
+    if (Array.isArray(normalized.accessibleRealms)) {
+      normalized.accessibleRealms = await Promise.all(
+        normalized.accessibleRealms.map(async (entry: any) => {
+          if (entry && typeof entry === 'object') {
+            const slug = await toSlug(entry.realmId);
+            return slug ? { ...entry, realmId: slug } : entry;
+          }
+          const slug = await toSlug(entry);
+          return slug ?? entry;
+        })
+      );
+    }
+
+    return normalized;
+  }
+
   /**
    * Set the RealmService instance (for shared service injection)
    */
@@ -366,7 +418,7 @@ export class AgentService {
       },
       bindings: [],
       ...(request.resourceAccess && { resourceAccess: request.resourceAccess }),
-      ...(request.realmAccess && { realmAccess: request.realmAccess }),
+      ...(request.realmAccess && { realmAccess: await this.normalizeRealmAccess(request.realmAccess) }),
       ...(request.promptConfig && { promptConfig: request.promptConfig }),
       tags: request.tags || [],
       metadata: request.metadata || {},
@@ -660,7 +712,7 @@ export class AgentService {
       ...(resolvedPromptConfig !== undefined && { promptConfig: resolvedPromptConfig }),
       ...(requesterId && { lastModifiedBy: requesterId }),
       // Replace realmAccess completely instead of merging to allow removing fields
-      ...(updateData.realmAccess !== undefined && { realmAccess: updateData.realmAccess as RealmAccess })
+      ...(updateData.realmAccess !== undefined && { realmAccess: await this.normalizeRealmAccess(updateData.realmAccess) as RealmAccess })
     };
 
     console.log(`🔍 DEBUG AgentService: Setting agent ${agentId} with realmAccess:`, updatedAgent.realmAccess);

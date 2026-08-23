@@ -100,15 +100,30 @@ WHERE a.realm_access ? 'currentRealmId'
   );
 
 -- accessibleRealms[]: map each entry through realms, dropping unresolvable ones.
+--
+-- The array is polymorphic in practice. RealmAccess types it as objects —
+-- { realmId, permissions, grantedAt, grantedBy } — while the rows written to
+-- date hold plain id strings. Both forms must survive: an object keeps every
+-- field and has only its realmId rewritten, and a string becomes the slug.
+-- Flattening with jsonb_array_elements_text would stringify each object, join
+-- to nothing, and silently discard the grant along with its permissions.
 UPDATE druids_core.agents a
 SET realm_access = a.realm_access || jsonb_build_object(
       'accessibleRealms',
       COALESCE(
         (
-          SELECT jsonb_agg(DISTINCT r.slug_id ORDER BY r.slug_id)
-          FROM jsonb_array_elements_text(a.realm_access->'accessibleRealms') AS ref(value)
+          SELECT jsonb_agg(
+                   CASE
+                     WHEN jsonb_typeof(e.value) = 'object'
+                       THEN jsonb_set(e.value, '{realmId}', to_jsonb(r.slug_id))
+                     ELSE to_jsonb(r.slug_id)
+                   END
+                   ORDER BY r.slug_id
+                 )
+          FROM jsonb_array_elements(a.realm_access->'accessibleRealms') AS e(value)
           JOIN druids_core.realms r
-            ON r.id::text = ref.value OR r.slug_id = ref.value
+            ON r.id::text  = COALESCE(e.value->>'realmId', e.value #>> '{}')
+            OR r.slug_id   = COALESCE(e.value->>'realmId', e.value #>> '{}')
           WHERE r.slug_id IS NOT NULL
         ),
         '[]'::jsonb
@@ -128,5 +143,40 @@ BEGIN
     RAISE WARNING 'migration 021: % agent(s) still contain a UUID-shaped realm reference after conversion', remaining;
   END IF;
 END $$;
+
+-- ---------------------------------------------------------------------------
+-- 3. UUID-typed realm reference columns
+-- ---------------------------------------------------------------------------
+--
+-- Three columns still reference realms(id) as UUID foreign keys. Once the
+-- application speaks slugs they cannot be written — the same mismatch migration
+-- 019 resolved for agent references, and migration 016 before it. Leaving them
+-- is not neutral: RealmService's delete path cleans up namespaces.realm_id, so
+-- a delete by slug would fail the UUID cast, be misread as "not a database
+-- realm", and drop the realm from memory while leaving the row behind.
+--
+-- All three are unpopulated (scenarios 0, namespaces 0 rows entirely, no realm
+-- has a parent), so the type change is safe and reinterprets nothing.
+
+ALTER TABLE druids_core.scenarios
+  DROP CONSTRAINT IF EXISTS scenarios_realm_id_fkey;
+ALTER TABLE druids_core.scenarios
+  ALTER COLUMN realm_id TYPE VARCHAR(255);
+COMMENT ON COLUMN druids_core.scenarios.realm_id IS
+  'Realm slug id, not the realms.id UUID.';
+
+ALTER TABLE druids_knowledge.namespaces
+  DROP CONSTRAINT IF EXISTS namespaces_realm_id_fkey;
+ALTER TABLE druids_knowledge.namespaces
+  ALTER COLUMN realm_id TYPE VARCHAR(255);
+COMMENT ON COLUMN druids_knowledge.namespaces.realm_id IS
+  'Realm slug id, not the realms.id UUID.';
+
+ALTER TABLE druids_core.realms
+  DROP CONSTRAINT IF EXISTS realms_parent_realm_id_fkey;
+ALTER TABLE druids_core.realms
+  ALTER COLUMN parent_realm_id TYPE VARCHAR(255);
+COMMENT ON COLUMN druids_core.realms.parent_realm_id IS
+  'Parent realm slug id, not the realms.id UUID.';
 
 COMMIT;

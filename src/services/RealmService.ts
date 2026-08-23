@@ -111,6 +111,16 @@ export class RealmService {
       );
     }
 
+    if (isValidUUID(slug)) {
+      // A realm named like a UUID would derive a UUID-shaped slug, which every
+      // resolver treats as the surrogate rather than a slug — the repository
+      // would reject it on create and misclassify it on lookup.
+      throw new Error(
+        `"${slug}" cannot be used as a realm id: it has the shape of an internal ` +
+        'identifier. Choose a name or id that is not formatted as a UUID.'
+      );
+    }
+
     if (isRealmSentinel(slug)) {
       throw new Error(
         `"${slug}" is reserved: it is the sentinel meaning "not present in any realm", ` +
@@ -256,6 +266,11 @@ export class RealmService {
     const updatedRealm = {
       ...realm,
       ...updates,
+      // Identity is immutable and is not settable through an update payload.
+      // Without this, a PUT carrying { id: ... } would change the returned id
+      // while the realm stayed stored under its real key and slug — the caller
+      // would then be unable to find it by the id it was just handed.
+      id: key,
       updatedAt: new Date().toISOString()
     };
     
@@ -329,24 +344,26 @@ export class RealmService {
             DELETE FROM druids_knowledge.namespaces 
             WHERE realm_id = $1
           `;
-          const namespacesResult = await this.repositoryManager!.database.query(namespacesDeleteQuery, [realmId]);
-          console.log(`💾 Deleted ${namespacesResult.rowCount || 0} namespaces for realm ${realmId}`);
-          
+          // Both operations key on the resolved slug. namespaces.realm_id is a
+          // slug column as of migration 021; passing the caller's raw id could
+          // be a surrogate UUID and would match nothing.
+          const namespacesResult = await this.repositoryManager!.database.query(namespacesDeleteQuery, [key]);
+          console.log(`💾 Deleted ${namespacesResult.rowCount || 0} namespaces for realm ${key}`);
+
           // Then delete the realm itself
-          await this.repositoryManager!.realms.delete(realmId);
-          console.log(`💾 Deleted realm ${realmId} from database`);
+          await this.repositoryManager!.realms.delete(key);
+          console.log(`💾 Deleted realm ${key} from database`);
         });
       } catch (error) {
-        // Check if this is a UUID format error (non-UUID realms only exist in Redis)
+        // Previously a "uuid" in the message was swallowed as "this realm only
+        // exists in Redis". That was a workaround for passing a slug to a
+        // UUID-typed column — the mismatch migration 021 removes. Keeping it
+        // would now hide a real failure and leave the row behind while the
+        // realm disappeared from memory, so every error is treated as real.
         const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-        if (errorMessage.includes('uuid') || errorMessage.includes('UUID')) {
-          console.log(`⚠️ Realm ${realmId} not in database (Redis-only realm), continuing with Redis cleanup`);
-        } else {
-          console.warn('Failed to delete realm from database:', errorMessage);
-          // Re-add to memory if database deletion failed for other reasons
-          this.realms.set(key, realm);
-          throw error;
-        }
+        console.error(`❌ Failed to delete realm ${key} from database:`, errorMessage);
+        this.realms.set(key, realm);
+        throw error;
       }
     }
     

@@ -3,7 +3,7 @@ import { DatabaseService } from './DatabaseService';
 import { Realm } from '../models/Realm';
 import { RealmId, AgentId } from '../models/Types';
 import { safeJsonParse } from '../utils/jsonUtils';
-import { isValidUUID } from '../utils/uuidUtils';
+import { isValidUUID, slugifyName } from '../utils/uuidUtils';
 
 /**
  * Repository for Realm entities with PostgreSQL persistence.
@@ -65,10 +65,15 @@ export class RealmRepository extends BaseRepository<Realm> {
    */
   protected rowToEntity(row: Record<string, any>): Realm {
     return {
-      // The slug is the application-facing identity (migration 020). The
-      // surrogate UUID is only a fallback for a row written outside the
-      // application before the column was backfilled.
-      id: row['slug_id'] ?? row['id'],
+      // The slug is the application-facing identity (migration 020).
+      //
+      // A NULL slug should not exist: 020 backfilled every row and 021 rewrote
+      // the references. It can only arise from a realm inserted directly, or
+      // created while 020 was deployed without 021. Falling back to the
+      // surrogate would quietly reintroduce a UUID as a user-facing id — the
+      // exact thing this work removes — so derive the slug from the name
+      // instead and say so, leaving a repairable row rather than a leak.
+      id: row['slug_id'] ?? this.deriveFallbackSlug(row),
       name: row['name'],
       description: row['description'],
       type: row['type'],
@@ -92,6 +97,21 @@ export class RealmRepository extends BaseRepository<Realm> {
       lastModifiedBy: row['last_modified_by'],
       version: row['version'] || 1
     };
+  }
+
+  /**
+   * Last-resort identity for a row whose slug_id is NULL, which the schema
+   * permits only so realm creation kept working between migrations 020 and 021.
+   * Derived the same way the backfill derived it, so the value matches what a
+   * repair would write.
+   */
+  private deriveFallbackSlug(row: Record<string, any>): string {
+    const derived = slugifyName(String(row['name'] ?? ''));
+    console.warn(
+      `⚠️ Realm ${row['id']} has no slug_id; using "${derived}" derived from its name. ` +
+      'Repair it by setting slug_id, or this realm cannot be resolved by id.'
+    );
+    return derived;
   }
 
   /**
@@ -156,8 +176,16 @@ export class RealmRepository extends BaseRepository<Realm> {
     const columns = Object.keys(row);
     const placeholders = columns.map((_, index) => `$${index + 1}`);
 
+    // Columns preserved on conflict rather than overwritten:
+    //   slug_id, created_at  — identity and provenance
+    //   agents               — membership accumulated at runtime via
+    //                          addAgent/removeAgent. RealmService.createRealm
+    //                          always builds a fresh object with an empty agent
+    //                          list, so overwriting here would silently empty a
+    //                          realm's roster on any repeated create.
+    const PRESERVE_ON_CONFLICT = new Set(['slug_id', 'created_at', 'agents']);
     const assignments = columns
-      .filter((col) => col !== 'slug_id' && col !== 'created_at')
+      .filter((col) => !PRESERVE_ON_CONFLICT.has(col))
       .map((col) => `${col} = EXCLUDED.${col}`)
       .join(', ');
 
