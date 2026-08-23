@@ -1,10 +1,12 @@
-import { v4 as uuidv4 } from 'uuid';
 import { RealmId } from "../models/Types";
+import { isValidUUID, slugifyName, isRealmSentinel } from '../utils/uuidUtils';
 import { RepositoryManager } from './RepositoryManager';
 import { MCPConfigLoader } from './mcp/MCPConfigLoader';
 
 export class RealmService {
   private realms: Map<RealmId, any> = new Map();
+  /** Legacy realm UUID -> canonical slug, memoised from the unique index. */
+  private uuidToSlug: Map<string, string> = new Map();
   private loadingPromise: Promise<void>;
   private repositoryManager: RepositoryManager | null = null;
   private mcpConfigLoader: MCPConfigLoader;
@@ -95,10 +97,29 @@ export class RealmService {
   }
   
   async createRealm(request: any): Promise<any> {
+    // Realms are identified by slug (migration 020). An explicitly supplied id
+    // is normalised through the same derivation rather than rejected, so
+    // "My Realm" and "my-realm" both land on the canonical form the database
+    // requires; otherwise the caller would meet a raw constraint violation.
+    const requestedSlug =
+      request.id && !isValidUUID(request.id) ? slugifyName(String(request.id)) : undefined;
+    const slug = requestedSlug || slugifyName(String(request.name ?? ''));
+
+    if (!slug || slug === '-') {
+      throw new Error(
+        'Cannot derive a realm slug id: provide an id, or a name containing alphanumeric characters'
+      );
+    }
+
+    if (isRealmSentinel(slug)) {
+      throw new Error(
+        `"${slug}" is reserved: it is the sentinel meaning "not present in any realm", ` +
+        'so a realm cannot use it as an identity. Choose a different name or id.'
+      );
+    }
+
     const realm = {
-      // Fallback id for the no-database path only. When a repository is present,
-      // BaseRepository.create mints its own UUID and we adopt it below.
-      id: request.id || uuidv4(),
+      id: slug,
       name: request.name,
       description: request.description,
       type: request.type || 'development',
@@ -144,9 +165,65 @@ export class RealmService {
     return realm;
   }
   
+  /**
+   * Resolve any accepted realm reference to the slug the in-memory map is keyed
+   * by.
+   *
+   * The application speaks slugs, but UUIDs still arrive from outside: external
+   * MCP clients hold ids issued before migration 020, and REST callers may have
+   * bookmarked one. Rather than break them, a UUID is translated once via the
+   * unique index and cached. Anything unrecognised is returned unchanged so the
+   * caller's own "not found" handling applies.
+   */
+  async resolveRealmKey(idOrSlug: RealmId): Promise<RealmId> {
+    if (!idOrSlug || this.realms.has(idOrSlug)) {
+      return idOrSlug;
+    }
+
+    if (isValidUUID(String(idOrSlug)) && this.repositoryManager) {
+      const cached = this.uuidToSlug.get(String(idOrSlug));
+      if (cached) {
+        return cached as RealmId;
+      }
+      try {
+        const slug = await this.repositoryManager.realms.resolveSlug(String(idOrSlug));
+        if (slug) {
+          this.uuidToSlug.set(String(idOrSlug), slug);
+          console.log(`🔄 Resolved legacy realm UUID ${idOrSlug} to slug "${slug}"`);
+          return slug as RealmId;
+        }
+      } catch (error) {
+        console.warn(
+          `Failed to resolve realm UUID ${idOrSlug}:`,
+          error instanceof Error ? error.message : 'Unknown error'
+        );
+      }
+    }
+
+    return idOrSlug;
+  }
+
+  /**
+   * Normalise a list of realm references to canonical slugs, preserving order
+   * and dropping duplicates. Used at inbound boundaries (coordination research
+   * scope, directed corpus search) so a caller holding a pre-migration UUID is
+   * still understood.
+   */
+  async resolveRealmIds(ids: Array<string | null | undefined>): Promise<string[]> {
+    await this.loadingPromise;
+    const out: string[] = [];
+    for (const id of ids) {
+      if (!id) continue;
+      const slug = String(await this.resolveRealmKey(String(id) as RealmId));
+      if (slug && !out.includes(slug)) out.push(slug);
+    }
+    return out;
+  }
+
   async getRealm(realmId: RealmId): Promise<any | null> {
     await this.loadingPromise; // Ensure data is loaded
-    return this.realms.get(realmId) || null;
+    const key = await this.resolveRealmKey(realmId);
+    return this.realms.get(key) || null;
   }
   
   async listRealms(filters?: any): Promise<any[]> {
@@ -169,7 +246,8 @@ export class RealmService {
 
   async updateRealm(realmId: RealmId, updates: any): Promise<any> {
     await this.loadingPromise; // Ensure data is loaded
-    const realm = this.realms.get(realmId);
+    const key = await this.resolveRealmKey(realmId);
+    const realm = this.realms.get(key);
     if (!realm) {
       throw new Error(`Realm not found: ${realmId}`);
     }
@@ -181,7 +259,7 @@ export class RealmService {
       updatedAt: new Date().toISOString()
     };
     
-    this.realms.set(realmId, updatedRealm);
+    this.realms.set(key, updatedRealm);
     
     // Persist to database first (primary persistence)
     if (this.repositoryManager) {
@@ -231,14 +309,15 @@ export class RealmService {
 
   async deleteRealm(realmId: RealmId): Promise<void> {
     await this.loadingPromise; // Ensure service is initialized
+    const key = await this.resolveRealmKey(realmId);
     
-    const realm = this.realms.get(realmId);
+    const realm = this.realms.get(key);
     if (!realm) {
       throw new Error(`Realm not found: ${realmId}`);
     }
     
     // Remove from memory
-    this.realms.delete(realmId);
+    this.realms.delete(key);
     
     // Remove from database if available
     if (this.repositoryManager) {
@@ -265,7 +344,7 @@ export class RealmService {
         } else {
           console.warn('Failed to delete realm from database:', errorMessage);
           // Re-add to memory if database deletion failed for other reasons
-          this.realms.set(realmId, realm);
+          this.realms.set(key, realm);
           throw error;
         }
       }
@@ -330,8 +409,9 @@ export class RealmService {
    */
   async assignMCPServers(realmId: RealmId, serverIds: string[]): Promise<void> {
     await this.loadingPromise;
+    const key = await this.resolveRealmKey(realmId);
 
-    const realm = this.realms.get(realmId);
+    const realm = this.realms.get(key);
     if (!realm) {
       throw new Error(`Realm not found: ${realmId}`);
     }
@@ -356,8 +436,9 @@ export class RealmService {
    */
   async addMCPServer(realmId: RealmId, serverId: string): Promise<void> {
     await this.loadingPromise;
+    const key = await this.resolveRealmKey(realmId);
 
-    const realm = this.realms.get(realmId);
+    const realm = this.realms.get(key);
     if (!realm) {
       throw new Error(`Realm not found: ${realmId}`);
     }
@@ -387,8 +468,9 @@ export class RealmService {
    */
   async removeMCPServer(realmId: RealmId, serverId: string): Promise<void> {
     await this.loadingPromise;
+    const key = await this.resolveRealmKey(realmId);
 
-    const realm = this.realms.get(realmId);
+    const realm = this.realms.get(key);
     if (!realm) {
       throw new Error(`Realm not found: ${realmId}`);
     }
@@ -413,8 +495,9 @@ export class RealmService {
    */
   async getMCPServers(realmId: RealmId): Promise<string[]> {
     await this.loadingPromise;
+    const key = await this.resolveRealmKey(realmId);
 
-    const realm = this.realms.get(realmId);
+    const realm = this.realms.get(key);
     if (!realm) {
       throw new Error(`Realm not found: ${realmId}`);
     }

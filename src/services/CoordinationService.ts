@@ -288,6 +288,16 @@ export class CoordinationService {
     participantIds: string[]
   ): Promise<string[]> {
     if (Array.isArray(explicit) && explicit.length > 0) {
+      // Normalise to canonical realm slugs. A caller may still be holding a
+      // pre-migration realm UUID (external MCP clients especially), and the
+      // scope is later intersected exactly against the agent's grants, which
+      // are slugs — so an unnormalised UUID would silently drop out of scope.
+      if (this.realmService) {
+        const resolved = await this.realmService.resolveRealmIds(explicit);
+        if (resolved.length > 0) {
+          return resolved;
+        }
+      }
       return Array.from(new Set(explicit.map((r) => String(r)).filter(Boolean)));
     }
     const derived = new Set<string>();

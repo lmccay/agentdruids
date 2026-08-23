@@ -17,7 +17,7 @@ import { RepositoryManager } from './RepositoryManager';
 import { getWorldTreeQueryService } from './WorldTreeQueryService';
 import { RealmService } from './RealmService';
 import { resolveSearchScope } from './searchScope';
-import { isValidUUID, slugifyAgentName } from '../utils/uuidUtils';
+import { isValidUUID, slugifyName } from '../utils/uuidUtils';
 import { MCPConfigLoader } from './mcp/MCPConfigLoader';
 import { HttpMCPClient } from './mcp/HttpMCPClient';
 import { SSEMCPClient } from './mcp/SSEMCPClient';
@@ -338,7 +338,7 @@ export class AgentService {
     // contract, so derive a slug for it rather than persisting the UUID as
     // identity.
     const requestedId = request.id && !isValidUUID(request.id) ? request.id : undefined;
-    const agentId = requestedId || slugifyAgentName(request.name);
+    const agentId = requestedId || slugifyName(request.name);
 
     if (!agentId) {
       throw new Error('Cannot derive an agent slug id: provide an id, or a name containing alphanumeric characters');
@@ -3428,7 +3428,13 @@ Your entire response will be written to a file. Start with the formatted content
       sessionId && typeof this.coordinationService?.getSessionResearchRealms === 'function'
         ? (this.coordinationService.getSessionResearchRealms(sessionId) ?? [])
         : [];
-    const explicitRealms = Array.isArray(params.realms) ? params.realms.map((r) => String(r)) : undefined;
+    // Normalise requested realms to canonical slugs before the grant check.
+    // External MCP clients may still pass a pre-migration realm UUID, and the
+    // intersection below is exact, so an unnormalised id would be reported as
+    // inaccessible and silently dropped from the scope.
+    const explicitRealms = Array.isArray(params.realms)
+      ? await this.realmService.resolveRealmIds(params.realms.map((r) => String(r)))
+      : undefined;
     if (explicitRealms) {
       for (const id of explicitRealms) {
         if (!accessibleSet.has(id)) {
