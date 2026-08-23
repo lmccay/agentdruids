@@ -3,7 +3,7 @@ import { DatabaseService } from './DatabaseService';
 import { Realm } from '../models/Realm';
 import { RealmId, AgentId } from '../models/Types';
 import { safeJsonParse } from '../utils/jsonUtils';
-import { isValidUUID, slugifyName } from '../utils/uuidUtils';
+import { isValidUUID } from '../utils/uuidUtils';
 
 /**
  * Repository for Realm entities with PostgreSQL persistence.
@@ -65,15 +65,17 @@ export class RealmRepository extends BaseRepository<Realm> {
    */
   protected rowToEntity(row: Record<string, any>): Realm {
     return {
-      // The slug is the application-facing identity (migration 020).
+      // The slug is the application-facing identity. Migration 021 backfills
+      // any remaining NULL and then makes the column NOT NULL, so there is no
+      // fallback here by design.
       //
-      // A NULL slug should not exist: 020 backfilled every row and 021 rewrote
-      // the references. It can only arise from a realm inserted directly, or
-      // created while 020 was deployed without 021. Falling back to the
-      // surrogate would quietly reintroduce a UUID as a user-facing id — the
-      // exact thing this work removes — so derive the slug from the name
-      // instead and say so, leaving a repairable row rather than a leak.
-      id: row['slug_id'] ?? this.deriveFallbackSlug(row),
+      // An earlier revision derived a slug from the name when slug_id was NULL.
+      // That was wrong in a way worth recording: resolveDbId looks up
+      // non-UUID ids with `WHERE slug_id = $1`, so a derived slug matched
+      // nothing — the entity was handed out with an id that findById, update
+      // and delete would all miss, and two unnamed rows could derive the same
+      // one. Fabricating identity is the failure this whole change removes.
+      id: row['slug_id'],
       name: row['name'],
       description: row['description'],
       type: row['type'],
@@ -97,21 +99,6 @@ export class RealmRepository extends BaseRepository<Realm> {
       lastModifiedBy: row['last_modified_by'],
       version: row['version'] || 1
     };
-  }
-
-  /**
-   * Last-resort identity for a row whose slug_id is NULL, which the schema
-   * permits only so realm creation kept working between migrations 020 and 021.
-   * Derived the same way the backfill derived it, so the value matches what a
-   * repair would write.
-   */
-  private deriveFallbackSlug(row: Record<string, any>): string {
-    const derived = slugifyName(String(row['name'] ?? ''));
-    console.warn(
-      `⚠️ Realm ${row['id']} has no slug_id; using "${derived}" derived from its name. ` +
-      'Repair it by setting slug_id, or this realm cannot be resolved by id.'
-    );
-    return derived;
   }
 
   /**

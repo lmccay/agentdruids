@@ -38,6 +38,26 @@
 BEGIN;
 
 -- ---------------------------------------------------------------------------
+-- 0. Backfill any realm still missing a slug — BEFORE anything joins on it
+-- ---------------------------------------------------------------------------
+--
+-- Migration 020 left slug_id nullable so realm creation kept working while only
+-- the schema half was deployed. A realm created in that window has no slug, and
+-- every join below is `... WHERE r.slug_id IS NOT NULL`, so such a realm would
+-- be skipped silently: its grants would be dropped as unresolvable and its
+-- corpus scopes would stay UUIDs, pointing at a realm the application can no
+-- longer address.
+--
+-- Backfilling first closes that hole. If a derived slug collides with an
+-- existing one, or resolves to the reserved sentinel, the constraints from
+-- migration 020 reject it and this migration aborts — which is the outcome we
+-- want. A migration that stops with a constraint violation is repairable; one
+-- that leaves an unaddressable realm behind is not.
+UPDATE druids_core.realms
+SET slug_id = regexp_replace(lower(name), '[^a-z0-9]+', '-', 'g')
+WHERE slug_id IS NULL;
+
+-- ---------------------------------------------------------------------------
 -- 1. worldtree_item_scopes.scope_ref  (realm-scoped corpus)
 -- ---------------------------------------------------------------------------
 
@@ -214,6 +234,22 @@ SET child_realm_ids = COALESCE(
     )
 WHERE jsonb_typeof(a.child_realm_ids) = 'array'
   AND jsonb_array_length(a.child_realm_ids) > 0;
+
+-- ---------------------------------------------------------------------------
+-- 4. Make the NULL-slug state impossible from here on
+-- ---------------------------------------------------------------------------
+--
+-- Every row now has a slug, and RealmService supplies one on create. Enforcing
+-- it means the repository never has to decide what to do with a realm that has
+-- no identity — previously it derived one from the name, which produced an id
+-- that resolveDbId could not look up, so the entity was returned with an id
+-- that findById, update and delete would all miss.
+--
+-- Safe for fresh installs: docker/init.sql seeds its realm before slug_id
+-- exists, and migration 020 backfills it, so the column is populated long
+-- before this runs.
+ALTER TABLE druids_core.realms
+  ALTER COLUMN slug_id SET NOT NULL;
 
 DO $$
 DECLARE
