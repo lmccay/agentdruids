@@ -1,0 +1,19 @@
+{
+  // Build-only configuration.
+  //
+  // tsconfig.json intentionally includes tests so `npm run type-check` covers
+  // them. That is wrong for emitting: with both src/ and tests/ in scope, tsc
+  // infers a common rootDir of the repository root and emits dist/src/... and
+  // dist/tests/..., which put the entrypoint at dist/src/index.js (while the
+  // Dockerfile runs dist/index.js) and shipped the test suite in the production
+  // image.
+  //
+  // Pinning rootDir to ./src and building only src/ gives dist/index.js and
+  // dist/database/migrations, which is what the runtime expects.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "./src"
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist", "tests", "**/*.test.ts", "**/*.js"]
+}

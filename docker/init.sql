@@ -240,7 +240,10 @@ ON CONFLICT (version) DO NOTHING;
 -- Record schema version in knowledge base
 INSERT INTO druids_knowledge.entries (namespace, key, value, created_by, last_modified_by)
 VALUES
-  ('worldtree://public/system', 'schema_version', '{"version": "2.0", "timestamp": "' || NOW() || '", "source": "init.sql", "migration_version": 1}'::jsonb, 'system', 'system')
+  -- The parentheses matter: '::' binds tighter than '||', so without them only
+  -- the trailing literal is cast, and '", "source": ...}' is not valid JSON.
+  -- That aborted database initialisation for every fresh deployment.
+  ('worldtree://public/system', 'schema_version', ('{"version": "2.0", "timestamp": "' || NOW() || '", "source": "init.sql", "migration_version": 1}')::jsonb, 'system', 'system')
 ON CONFLICT (namespace, key) DO UPDATE SET
   value = EXCLUDED.value,
   updated_at = CURRENT_TIMESTAMP,

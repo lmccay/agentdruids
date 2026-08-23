@@ -14,7 +14,7 @@ WORKDIR /app
 
 # Copy package files
 COPY package*.json ./
-COPY tsconfig.json ./
+COPY tsconfig.json tsconfig.build.json ./
 
 # Development stage
 FROM base AS development
@@ -34,19 +34,21 @@ CMD ["npm", "run", "dev"]
 
 # Build stage
 FROM base AS build
-ENV NODE_ENV=production
 
-# Install all dependencies for building
+# NODE_ENV must NOT be 'production' here: npm omits devDependencies when it is,
+# so TypeScript would be absent and `npm run build` would fail with
+# "sh: tsc: not found". The production stage sets NODE_ENV itself, and the prune
+# below removes devDependencies from what gets copied out.
 RUN npm ci
 
 # Copy source code
 COPY . .
 
-# Build the application
+# Build the application (tsc, then copy non-TS runtime assets into dist/)
 RUN npm run build
 
 # Remove development dependencies
-RUN npm ci --only=production && npm cache clean --force
+RUN npm ci --omit=dev && npm cache clean --force
 
 # Production stage
 FROM node:20-alpine AS production
@@ -67,6 +69,14 @@ WORKDIR /app
 COPY --from=build --chown=druids:druids /app/dist ./dist
 COPY --from=build --chown=druids:druids /app/node_modules ./node_modules
 COPY --from=build --chown=druids:druids /app/package*.json ./
+
+# Runtime assets that tsc does not emit. These are read from process.cwd() at
+# runtime (PromptSourceResolver -> cwd/prompts, AgentService -> cwd/config), so
+# without them prompt composition fails to load its required global base layer
+# and silently falls back to the legacy prompt path. SQL migrations are already
+# inside dist/ via the build step.
+COPY --from=build --chown=druids:druids /app/prompts ./prompts
+COPY --from=build --chown=druids:druids /app/config ./config
 
 # Switch to non-root user
 USER druids
