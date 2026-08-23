@@ -1011,11 +1011,24 @@ export class WorldTreeQueryService {
       canonical.set(row.slug_id, row.slug_id);
     }
 
-    return scopes.map((s) =>
+    const rewritten = scopes.map((s) =>
       s.scopeType === 'realm' && s.scopeRef && canonical.has(s.scopeRef)
         ? { ...s, scopeRef: canonical.get(s.scopeRef) as string }
         : s
     );
+
+    // Deduplicate after rewriting. A caller may legitimately pass both the
+    // legacy UUID and the slug for the same realm; they collapse to the same
+    // scope_ref here, and the second INSERT would then violate
+    // uq_item_scopes_ref — after the DELETE in the same transaction has already
+    // removed the existing scopes, so the item would end up with none at all.
+    const seen = new Set<string>();
+    return rewritten.filter((s) => {
+      const key = `${s.scopeType}:${s.scopeRef ?? ''}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
   }
 
   async setItemScopes(itemType: 'document' | 'contribution' | 'chunk', itemId: string, scopes: ScopeAssoc[]): Promise<void> {

@@ -212,6 +212,10 @@ export class RealmTravelService {
    */
   async getElementalsInRealm(realmId: string): Promise<ElementalInfo[]> {
     try {
+      // Bindings are slugs, and the comparison below is exact, so a caller
+      // holding a pre-migration UUID would get an empty list even though the
+      // realm resolves fine everywhere else.
+      realmId = await this.resolveTargetRealm(realmId);
       const allAgents = await this.agentService.listAgents();
       
       const elementals = allAgents
@@ -324,6 +328,9 @@ export class RealmTravelService {
    */
   async getAgentsInRealm(realmId: string): Promise<string[]> {
     try {
+      // Same exact-comparison hazard as getElementalsInRealm: currentRealmId is
+      // a slug, so an unnormalised UUID would return an empty list.
+      realmId = await this.resolveTargetRealm(realmId);
       const allAgents = await this.agentService.listAgents();
       
       return allAgents

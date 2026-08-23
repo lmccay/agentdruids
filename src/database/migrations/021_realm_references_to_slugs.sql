@@ -23,8 +23,10 @@
 -- are left untouched rather than guessed at, and the migration reports counts
 -- for both.
 --
--- 'default' is never stored as a realm reference — it is the sentinel meaning
--- "no realm" — so it cannot appear here and needs no special case.
+-- 'default' IS stored as a realm reference, in realmAccess.currentRealmId, and
+-- means "not present in any realm". It deliberately has no realm row, so it
+-- resolves to nothing and must be excluded from the unresolvable-reference
+-- cleanup below — removing it would relocate the agent rather than tidy it up.
 --
 -- Dangling references are dropped, not carried over. accessibleRealms on the
 -- coordinator druid contains 'realm-1780166130971', which matches no realm and
@@ -103,10 +105,17 @@ FROM druids_core.realms r
 WHERE a.realm_access->>'currentRealmId' = r.id::text
   AND r.slug_id IS NOT NULL;
 
+-- Dropping an unresolvable reference must not drop the sentinel. 'default'
+-- means "not present in any realm" and is deliberately not a realm row, so it
+-- matches nothing above. Deleting it would silently relocate an agent: with the
+-- key gone, resolveCurrentRealm falls through to boundRealmId, so an agent that
+-- had explicitly left its realm would appear to be back inside it. Compared
+-- case-insensitively, matching the runtime.
 UPDATE druids_core.agents a
 SET realm_access = a.realm_access - 'boundRealmId'
 WHERE a.realm_access ? 'boundRealmId'
   AND a.realm_access->>'boundRealmId' IS NOT NULL
+  AND lower(a.realm_access->>'boundRealmId') <> 'default'
   AND NOT EXISTS (
     SELECT 1 FROM druids_core.realms r WHERE r.slug_id = a.realm_access->>'boundRealmId'
   );
@@ -115,6 +124,7 @@ UPDATE druids_core.agents a
 SET realm_access = a.realm_access - 'currentRealmId'
 WHERE a.realm_access ? 'currentRealmId'
   AND a.realm_access->>'currentRealmId' IS NOT NULL
+  AND lower(a.realm_access->>'currentRealmId') <> 'default'
   AND NOT EXISTS (
     SELECT 1 FROM druids_core.realms r WHERE r.slug_id = a.realm_access->>'currentRealmId'
   );
