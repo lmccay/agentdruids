@@ -38,9 +38,18 @@
 --
 -- Note: 'default' is a reserved sentinel meaning "not present in any realm"
 -- (see AgentService.resolveCurrentRealm and searchScope). It is not a realm and
--- must never be created as one.
+-- must never be created as one, so the sentinel is enforced by a CHECK rather
+-- than left to convention: a realm whose slug resolved to 'default' would be
+-- read as "no realm" by presence and retrieval scoping, silently emptying that
+-- realm's search scope.
+--
+-- Consequence worth knowing: this rejects a realm named "Default" (or "default",
+-- "DEFAULT", …), since the slug derivation would collide with the sentinel. That
+-- is the intended outcome. The follow-up change should catch it earlier with a
+-- comprehensible message rather than surfacing a raw constraint violation.
 --
 -- Rollback:
+--   ALTER TABLE druids_core.realms DROP CONSTRAINT IF EXISTS realms_slug_id_not_sentinel;
 --   DROP INDEX IF EXISTS druids_core.uq_realms_slug_id;
 --   ALTER TABLE druids_core.realms DROP COLUMN IF EXISTS slug_id;
 
@@ -55,6 +64,15 @@ WHERE slug_id IS NULL;
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_realms_slug_id
   ON druids_core.realms (slug_id);
+
+-- The sentinel is reserved, not merely documented. NULL is still permitted so
+-- realm creation keeps working until the service populates slug_id.
+ALTER TABLE druids_core.realms
+  DROP CONSTRAINT IF EXISTS realms_slug_id_not_sentinel;
+
+ALTER TABLE druids_core.realms
+  ADD CONSTRAINT realms_slug_id_not_sentinel
+  CHECK (slug_id IS NULL OR slug_id <> 'default');
 
 COMMENT ON COLUMN druids_core.realms.slug_id IS
   'Stable identity for this realm. Immutable once set; "name" is a display label and may change freely. The id UUID is a deployment-local surrogate and must not appear in an API, UI or descriptor. Reserved: "default" is a sentinel meaning no realm, never a stored realm.';
