@@ -65,7 +65,7 @@ CREATE TABLE IF NOT EXISTS druids_core.scenarios (
   description TEXT,
   type VARCHAR(50) NOT NULL,
   status VARCHAR(20) NOT NULL DEFAULT 'draft',
-  coordinator_agent_id UUID REFERENCES druids_core.agents(id),
+  coordinator_agent_id VARCHAR(255),  -- agent slug id, not agents.id (see migration 019)
   participant_agent_ids JSONB DEFAULT '[]',
   realm_id UUID REFERENCES druids_core.realms(id),
   configuration JSONB DEFAULT '{}',
@@ -108,7 +108,7 @@ CREATE TABLE IF NOT EXISTS druids_knowledge.entries (
 CREATE TABLE IF NOT EXISTS druids_core.async_results (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
   request_id VARCHAR(255) NOT NULL UNIQUE,
-  agent_id UUID REFERENCES druids_core.agents(id),
+  agent_id VARCHAR(255),  -- agent slug id, not agents.id (see migration 019)
   status VARCHAR(20) NOT NULL DEFAULT 'pending',
   progress INTEGER DEFAULT 0,
   result JSONB,
