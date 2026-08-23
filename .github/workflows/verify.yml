@@ -1,0 +1,67 @@
+name: Verify
+
+# Backstop for scripts/verify.sh. The script is the primary gate — run it before
+# pushing so failures are found in seconds rather than after a round trip. This
+# workflow exists for when that is forgotten, and so main is always known-good.
+#
+# Deliberately runs the same script rather than reimplementing the steps: a CI
+# job that drifts from what developers run locally is worse than no CI, because
+# it produces failures nobody can reproduce.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# A newer push supersedes an in-flight run on the same ref.
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fast:
+    name: Type-check and unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20' # matches the node:20-alpine base image
+          cache: npm
+
+      - run: npm ci
+
+      - name: Verify (fast)
+        run: ./scripts/verify.sh fast
+
+  deployable:
+    name: Production image is deployable
+    runs-on: ubuntu-latest
+    # Only worth the minutes once the cheap checks pass.
+    needs: fast
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - run: npm ci
+
+      # Docker is preinstalled on ubuntu-latest, so the script's own container
+      # handling works unchanged. A `services:` block is deliberately not used:
+      # it cannot mount a file into docker-entrypoint-initdb.d, which is exactly
+      # the path that was broken and therefore the one worth exercising.
+      - name: Verify (full)
+        run: ./scripts/verify.sh
+
+      - name: Container logs on failure
+        if: failure()
+        run: |
+          for c in $(docker ps -a --format '{{.Names}}' | grep '^druids-verify-' || true); do
+            echo "::group::$c"
+            docker logs "$c" 2>&1 | tail -80
+            echo "::endgroup::"
+          done
