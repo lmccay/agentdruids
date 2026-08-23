@@ -4,7 +4,31 @@ import { RepositoryManager } from './RepositoryManager';
 /**
  * Async result status types
  */
-export type AsyncResultStatus = 'pending' | 'processing' | 'completed' | 'failed' | 'expired';
+export const ASYNC_RESULT_STATUSES = [
+  'pending',
+  'processing',
+  'completed',
+  'failed',
+  'expired',
+] as const;
+
+/**
+ * Async result status types.
+ *
+ * Derived from ASYNC_RESULT_STATUSES so the set is enumerable at runtime and
+ * can be asserted against the database. The `async_results_status_check`
+ * constraint (migration 022) must list exactly these values — they disagreed
+ * for the lifetime of the feature, and because every write failure was
+ * swallowed, nothing surfaced it.
+ */
+export type AsyncResultStatus = typeof ASYNC_RESULT_STATUSES[number];
+
+/** Statuses after which no further work happens; these stamp completed_at. */
+export const TERMINAL_ASYNC_RESULT_STATUSES: readonly AsyncResultStatus[] = [
+  'completed',
+  'failed',
+  'expired',
+];
 
 /**
  * Async result metadata
@@ -77,6 +101,12 @@ export class AsyncResultManager {
   private results: Map<string, AsyncResult> = new Map();
   private processingTasks: Map<string, NodeJS.Timeout> = new Map();
   private repositoryManager: RepositoryManager | null = null;
+  /**
+   * Whether the last database interaction succeeded. Exposed via
+   * getStatistics so "results are memory-only" is observable rather than
+   * something you discover after a restart loses them.
+   */
+  private persistenceHealthy = false;
 
   constructor() {
     this.initializeDatabase();
@@ -97,12 +127,16 @@ export class AsyncResultManager {
     if (!this.repositoryManager) return;
 
     try {
-      // Load recent async results from database into memory
+      // Column names follow the table, not the other way round: the payload is
+      // `result`, and the lifecycle timestamps are `started_at`/`completed_at`.
+      // There is no `created_at`/`updated_at` here, and referencing them is what
+      // made every query fail.
       const dbResults = await this.repositoryManager.query(`
-        SELECT request_id, agent_id, status, result_data, error_message, progress, metadata, created_at, updated_at
-        FROM druids_core.async_results 
+        SELECT request_id, agent_id, status, result, error_message, progress, metadata,
+               started_at, completed_at
+        FROM druids_core.async_results
         WHERE expires_at > NOW() OR expires_at IS NULL
-        ORDER BY created_at DESC
+        ORDER BY started_at DESC
         LIMIT 1000
       `);
 
@@ -111,17 +145,25 @@ export class AsyncResultManager {
           requestId: row.request_id,
           agentId: row.agent_id,
           status: row.status,
-          result: row.result_data,
+          result: row.result,
           error: row.error_message,
-          progress: row.progress,
+          ...(row.progress ? { progress: row.progress } : {}),
           metadata: row.metadata
         };
         this.results.set(result.requestId, result);
       }
 
+      this.persistenceHealthy = true;
       console.log(`✅ Loaded ${dbResults.rows.length} async results from database`);
     } catch (error) {
-      console.warn('⚠️ Failed to load async results from database:', error instanceof Error ? error.message : 'Unknown error');
+      // Loud, and specific. This previously warned and moved on, which is how a
+      // feature documented as durable ran memory-only from the day it shipped.
+      this.persistenceHealthy = false;
+      console.error(
+        '❌ async_results: could not read from the database, so results are memory-only ' +
+        'and will not survive a restart. This is usually a schema mismatch rather than an outage:',
+        error instanceof Error ? error.message : 'Unknown error'
+      );
     }
   }
 
@@ -300,33 +342,49 @@ export class AsyncResultManager {
       try {
         const expiresAt = new Date(Date.now() + this.DEFAULT_EXPIRY_MS);
         
+        // `completed_at` is the row's terminal timestamp; there is no
+        // `updated_at` on this table, and writing to one is what broke the
+        // upsert. `started_at` defaults on insert and is preserved on conflict.
+        const isTerminal = TERMINAL_ASYNC_RESULT_STATUSES.includes(result.status);
+
         await this.repositoryManager.query(`
           INSERT INTO druids_core.async_results (
-            request_id, agent_id, status, result_data, error_message, 
-            progress, metadata, expires_at
-          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-          ON CONFLICT (request_id) 
-          DO UPDATE SET 
+            request_id, agent_id, status, result, error_message,
+            progress, metadata, expires_at, completed_at
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+          ON CONFLICT (request_id)
+          DO UPDATE SET
             status = EXCLUDED.status,
-            result_data = EXCLUDED.result_data,
+            result = EXCLUDED.result,
             error_message = EXCLUDED.error_message,
             progress = EXCLUDED.progress,
             metadata = EXCLUDED.metadata,
-            updated_at = CURRENT_TIMESTAMP
+            expires_at = EXCLUDED.expires_at,
+            completed_at = COALESCE(EXCLUDED.completed_at, druids_core.async_results.completed_at)
         `, [
           result.requestId,
           result.agentId,
           result.status,
-          result.result ? JSON.stringify(result.result) : null,
+          result.result !== undefined && result.result !== null ? JSON.stringify(result.result) : null,
           result.error || null,
           result.progress ? JSON.stringify(result.progress) : null,
           JSON.stringify(result.metadata),
-          expiresAt
+          expiresAt,
+          isTerminal ? new Date() : null
         ]);
-        
+
+        this.persistenceHealthy = true;
         console.log(`💾 Persisted async result to database: ${result.requestId} (${result.status})`);
       } catch (error) {
-        console.warn(`⚠️ Failed to persist async result to database:`, error instanceof Error ? error.message : 'Unknown error');
+        // Error, not warning. A caller that asked for an async result has been
+        // told it is durable; silently keeping it in memory only is the failure
+        // this feature shipped with.
+        this.persistenceHealthy = false;
+        console.error(
+          `❌ async_results: failed to persist ${result.requestId} — it exists in memory only ` +
+          'and will be lost on restart:',
+          error instanceof Error ? error.message : 'Unknown error'
+        );
       }
     }
     
@@ -349,6 +407,8 @@ export class AsyncResultManager {
     byStatus: Record<AsyncResultStatus, number>;
     byAgent: Record<string, number>;
     averageDuration: number;
+    /** False when results are being held in memory only and will not survive a restart. */
+    persistenceHealthy: boolean;
   }> {
     const results = Array.from(this.results.values());
     const total = results.length;
@@ -379,7 +439,8 @@ export class AsyncResultManager {
       total,
       byStatus,
       byAgent,
-      averageDuration: completedCount > 0 ? totalDuration / completedCount : 0
+      averageDuration: completedCount > 0 ? totalDuration / completedCount : 0,
+      persistenceHealthy: this.persistenceHealthy
     };
   }
 }
