@@ -153,7 +153,14 @@ export class RealmService {
       try {
         const dbRealm = this.transformServiceRealmToDbFormat(realm);
         const persisted = await this.repositoryManager.realms.create(dbRealm);
+
+        // Adopt the persisted entity, not just its id. create() is an upsert
+        // that deliberately preserves an existing realm's agent roster, while
+        // this object was built with an empty one — caching the local copy
+        // would report the realm as empty until a restart, and a later
+        // membership update could then write that emptiness back.
         realm.id = persisted.id;
+        realm.agentIds = (persisted as any).agents ?? realm.agentIds;
         console.log(`💾 Stored realm ${realm.id} in database`);
       } catch (error) {
         console.warn('Failed to persist realm to database:', error instanceof Error ? error.message : 'Unknown error');

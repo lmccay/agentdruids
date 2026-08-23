@@ -266,13 +266,26 @@ export class RealmRepository extends BaseRepository<Realm> {
    * Find realms connected via ley lines to a specific realm
    */
   async findConnectedRealms(realmId: RealmId): Promise<Realm[]> {
+    // Connection targets are plain JSON values, not foreign keys, so they are
+    // not rewritten by a migration. Stored connections may therefore hold a
+    // surrogate UUID while callers now pass a slug. Match either form rather
+    // than silently returning nothing.
+    const forms = new Set<string>([String(realmId)]);
+    const slug = await this.resolveSlug(String(realmId));
+    if (slug) forms.add(slug);
+    const dbId = await this.resolveDbId(String(realmId));
+    if (dbId) forms.add(dbId);
+
     const query = `
       SELECT * FROM ${this.getFullTableName()}
-      WHERE ley_line_connections @> $1
+      WHERE ${[...forms].map((_, i) => `ley_line_connections @> $${i + 1}`).join(' OR ')}
       ORDER BY created_at DESC
     `;
-    
-    const { rows } = await this.db.query(query, [JSON.stringify([{ targetRealmId: realmId }])]);
+
+    const { rows } = await this.db.query(
+      query,
+      [...forms].map((form) => JSON.stringify([{ targetRealmId: form }]))
+    );
     return rows.map(row => this.rowToEntity(row));
   }
 
@@ -280,6 +293,8 @@ export class RealmRepository extends BaseRepository<Realm> {
    * Add agent to realm
    */
   async addAgent(realmId: RealmId, agentId: AgentId): Promise<void> {
+    const dbId = await this.resolveDbId(String(realmId));
+    if (!dbId) return;
     const query = `
       UPDATE ${this.getFullTableName()}
       SET agents = COALESCE(agents, '[]'::jsonb) || $2,
@@ -288,8 +303,8 @@ export class RealmRepository extends BaseRepository<Realm> {
     `;
     
     await this.db.query(query, [
-      realmId, 
-      JSON.stringify([agentId]), 
+      dbId,
+      JSON.stringify([agentId]),
       new Date().toISOString(),
       agentId
     ]);
@@ -299,6 +314,8 @@ export class RealmRepository extends BaseRepository<Realm> {
    * Remove agent from realm
    */
   async removeAgent(realmId: RealmId, agentId: AgentId): Promise<void> {
+    const dbId = await this.resolveDbId(String(realmId));
+    if (!dbId) return;
     const query = `
       UPDATE ${this.getFullTableName()}
       SET agents = agents - $2,
@@ -306,16 +323,22 @@ export class RealmRepository extends BaseRepository<Realm> {
       WHERE id = $1
     `;
     
-    await this.db.query(query, [realmId, agentId, new Date().toISOString()]);
+    await this.db.query(query, [dbId, agentId, new Date().toISOString()]);
   }
 
   /**
    * Add ley line connection between realms
    */
   async addLeyLineConnection(sourceRealmId: RealmId, targetRealmId: RealmId, connectionType: string = 'bidirectional'): Promise<void> {
+    // Both ends are resolved: the source keys the UPDATE, and the target is
+    // stored canonically so findConnectedRealms can match it by slug.
+    const dbId = await this.resolveDbId(String(sourceRealmId));
+    if (!dbId) return;
+    const canonicalTarget = (await this.resolveSlug(String(targetRealmId))) ?? targetRealmId;
+
     const leyLineConnection = {
-      id: `ley_${sourceRealmId}_${targetRealmId}_${Date.now()}`,
-      targetRealmId,
+      id: `ley_${sourceRealmId}_${canonicalTarget}_${Date.now()}`,
+      targetRealmId: canonicalTarget,
       connectionType,
       protocol: 'mcp',
       security: {
@@ -338,7 +361,7 @@ export class RealmRepository extends BaseRepository<Realm> {
     `;
     
     await this.db.query(query, [
-      sourceRealmId,
+      dbId,
       JSON.stringify([leyLineConnection]),
       new Date().toISOString()
     ]);

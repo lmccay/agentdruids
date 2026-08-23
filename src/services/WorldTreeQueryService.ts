@@ -987,11 +987,49 @@ export class WorldTreeQueryService {
     }
   }
 
+  /**
+   * Rewrite realm scope references to their canonical slug, leaving other scope
+   * types untouched. A reference that resolves to no realm is left as-is;
+   * assertRealmsExist has already rejected genuinely unknown realms.
+   */
+  private async canonicaliseRealmScopes(scopes: ScopeAssoc[]): Promise<ScopeAssoc[]> {
+    const realmRefs = Array.from(
+      new Set(scopes.filter((s) => s.scopeType === 'realm' && s.scopeRef).map((s) => s.scopeRef as string))
+    );
+    if (realmRefs.length === 0) return scopes;
+
+    const { rows } = await this.db.query<{ id: string; slug_id: string | null }>(
+      `SELECT id::text AS id, slug_id FROM druids_core.realms
+        WHERE id::text = ANY($1::text[]) OR slug_id = ANY($1::text[])`,
+      [realmRefs]
+    );
+
+    const canonical = new Map<string, string>();
+    for (const row of rows) {
+      if (!row.slug_id) continue;
+      canonical.set(row.id, row.slug_id);
+      canonical.set(row.slug_id, row.slug_id);
+    }
+
+    return scopes.map((s) =>
+      s.scopeType === 'realm' && s.scopeRef && canonical.has(s.scopeRef)
+        ? { ...s, scopeRef: canonical.get(s.scopeRef) as string }
+        : s
+    );
+  }
+
   async setItemScopes(itemType: 'document' | 'contribution' | 'chunk', itemId: string, scopes: ScopeAssoc[]): Promise<void> {
     // Backstop guard (the ingest entry points validate up front to fail fast).
     await this.assertRealmsExist(
       scopes.filter((s) => s.scopeType === 'realm' && s.scopeRef).map((s) => s.scopeRef as string)
     );
+
+    // Canonicalise before writing. Validation accepts a legacy surrogate UUID so
+    // existing callers are not broken, but retrieval compares scope_ref to
+    // slugs — storing the UUID as given would produce a document that passes
+    // ingest and is then invisible to every realm-scoped search. This is the
+    // final write boundary, so it is the right place to normalise.
+    scopes = await this.canonicaliseRealmScopes(scopes);
 
     await this.db.transaction(async (client) => {
       await client.query(

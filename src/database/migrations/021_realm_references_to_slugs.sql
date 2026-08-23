@@ -179,4 +179,54 @@ ALTER TABLE druids_core.realms
 COMMENT ON COLUMN druids_core.realms.parent_realm_id IS
   'Parent realm slug id, not the realms.id UUID.';
 
+-- Widening the type is not enough: any value already stored is still a UUID
+-- string, while every new reference is a slug. These are empty in this
+-- deployment, but a populated one would keep references that silently stop
+-- matching — a realm delete would miss its namespaces, and parent/scenario
+-- lookups would quietly return nothing. Translate them the same way as above,
+-- by joining realms rather than manipulating strings.
+
+UPDATE druids_core.scenarios s
+SET realm_id = r.slug_id
+FROM druids_core.realms r
+WHERE s.realm_id = r.id::text AND r.slug_id IS NOT NULL;
+
+UPDATE druids_knowledge.namespaces n
+SET realm_id = r.slug_id
+FROM druids_core.realms r
+WHERE n.realm_id = r.id::text AND r.slug_id IS NOT NULL;
+
+UPDATE druids_core.realms child
+SET parent_realm_id = parent.slug_id
+FROM druids_core.realms parent
+WHERE child.parent_realm_id = parent.id::text AND parent.slug_id IS NOT NULL;
+
+-- child_realm_ids is a jsonb array of realm ids, likewise not a foreign key.
+UPDATE druids_core.realms a
+SET child_realm_ids = COALESCE(
+      (
+        SELECT jsonb_agg(COALESCE(r.slug_id, e.value #>> '{}') ORDER BY 1)
+        FROM jsonb_array_elements(a.child_realm_ids) AS e(value)
+        LEFT JOIN druids_core.realms r
+          ON r.id::text = e.value #>> '{}' OR r.slug_id = e.value #>> '{}'
+      ),
+      '[]'::jsonb
+    )
+WHERE jsonb_typeof(a.child_realm_ids) = 'array'
+  AND jsonb_array_length(a.child_realm_ids) > 0;
+
+DO $$
+DECLARE
+  stragglers integer;
+BEGIN
+  SELECT (SELECT count(*) FROM druids_core.scenarios WHERE realm_id ~ '^[0-9a-f]{8}-')
+       + (SELECT count(*) FROM druids_knowledge.namespaces WHERE realm_id ~ '^[0-9a-f]{8}-')
+       + (SELECT count(*) FROM druids_core.realms WHERE parent_realm_id ~ '^[0-9a-f]{8}-')
+    INTO stragglers;
+
+  IF stragglers > 0 THEN
+    RAISE WARNING 'migration 021: % realm reference(s) outside agents/item_scopes remain UUID-shaped and could not be resolved', stragglers;
+  END IF;
+END $$;
+
 COMMIT;
