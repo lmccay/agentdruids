@@ -4,7 +4,7 @@
   "description": "Sophisticated multi-agent system with federated architecture",
   "main": "dist/app.js",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc -p tsconfig.build.json && node scripts/copy-runtime-assets.js",
     "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
     "start": "node dist/index.js",
     "test": "jest",

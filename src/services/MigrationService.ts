@@ -100,8 +100,32 @@ export class MigrationService {
    * Migrations start from version 002 (000 and 001 are baseline from init.sql)
    */
   private getAvailableMigrations(): Array<{ version: number; name: string; filename: string }> {
+    // Only the directory read is guarded. Everything after it — filename
+    // validation, the reserved-version check, and the empty-set check — must
+    // propagate, so it deliberately sits outside the try.
+    let files: string[];
     try {
-      const files = readdirSync(this.migrationsDir);
+      files = readdirSync(this.migrationsDir);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException | undefined)?.code;
+      if (code === 'ENOENT' || (error instanceof Error && error.message.includes('ENOENT'))) {
+        // A missing migrations directory is a packaging fault, not "no
+        // migrations to run". Treating it as the latter is how a production
+        // image shipped without its .sql files could start cleanly, report
+        // success, and serve an unmigrated database — silently. Fail fast
+        // instead; index.ts turns this into a clear startup failure.
+        throw new Error(
+          `Migrations directory not found at ${this.migrationsDir}. ` +
+          'This is a packaging error, not an empty migration set: tsc does not ' +
+          'emit .sql files, so they must be copied into the build output ' +
+          '(see scripts/copy-runtime-assets.js, run by `npm run build`). ' +
+          'Refusing to start against a potentially unmigrated database.'
+        );
+      }
+      throw error;
+    }
+
+    {
       const migrations = files
         .filter((f) => f.endsWith('.sql'))
         .map((filename) => {
@@ -130,17 +154,21 @@ export class MigrationService {
         })
         .sort((a, b) => a.version - b.version);
 
+      // An empty directory is the same packaging fault as a missing one — the
+      // copy step ran but produced nothing — and would otherwise read as
+      // "nothing to apply". This repository always has migrations, so zero is
+      // never a legitimate state.
+      if (migrations.length === 0) {
+        throw new Error(
+          `No migration files found in ${this.migrationsDir}. ` +
+          'Expected at least one .sql file. This is a packaging error: tsc does ' +
+          'not emit .sql files, so they must be copied into the build output ' +
+          '(see scripts/copy-runtime-assets.js, run by `npm run build`). ' +
+          'Refusing to start against a potentially unmigrated database.'
+        );
+      }
+
       return migrations;
-    } catch (error) {
-      if (error instanceof Error && error.message.includes('ENOENT')) {
-        // Directory doesn't exist yet - that's ok, no migrations
-        return [];
-      }
-      if (error instanceof Error && error.message.includes('reserved')) {
-        throw error; // Re-throw validation errors
-      }
-      console.warn('⚠️  Could not read migrations directory:', error);
-      return [];
     }
   }
 
