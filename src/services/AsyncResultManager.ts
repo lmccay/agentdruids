@@ -100,7 +100,7 @@ export class AsyncResultManager {
       // Load recent async results from database into memory
       const dbResults = await this.repositoryManager.query(`
         SELECT request_id, agent_id, status, result_data, error_message, progress, metadata, created_at, updated_at
-        FROM async_results 
+        FROM druids_core.async_results 
         WHERE expires_at > NOW() OR expires_at IS NULL
         ORDER BY created_at DESC
         LIMIT 1000
@@ -301,7 +301,7 @@ export class AsyncResultManager {
         const expiresAt = new Date(Date.now() + this.DEFAULT_EXPIRY_MS);
         
         await this.repositoryManager.query(`
-          INSERT INTO async_results (
+          INSERT INTO druids_core.async_results (
             request_id, agent_id, status, result_data, error_message, 
             progress, metadata, expires_at
           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
