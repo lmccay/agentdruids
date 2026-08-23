@@ -50,6 +50,7 @@
 --
 -- Rollback:
 --   ALTER TABLE druids_core.realms DROP CONSTRAINT IF EXISTS realms_slug_id_not_sentinel;
+--   ALTER TABLE druids_core.realms DROP CONSTRAINT IF EXISTS realms_slug_id_lowercase;
 --   DROP INDEX IF EXISTS druids_core.uq_realms_slug_id;
 --   ALTER TABLE druids_core.realms DROP COLUMN IF EXISTS slug_id;
 
@@ -65,14 +66,36 @@ WHERE slug_id IS NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS uq_realms_slug_id
   ON druids_core.realms (slug_id);
 
--- The sentinel is reserved, not merely documented. NULL is still permitted so
--- realm creation keeps working until the service populates slug_id.
+-- Slugs are canonically lowercase. The derivation above already lowercases, so
+-- this only constrains explicitly supplied slugs — but without it two problems
+-- open up: the unique index is case-sensitive, so 'Ets' and 'ets' could coexist
+-- as distinct realms, and an uppercase slug could evade the sentinel check.
+ALTER TABLE druids_core.realms
+  DROP CONSTRAINT IF EXISTS realms_slug_id_lowercase;
+
+ALTER TABLE druids_core.realms
+  ADD CONSTRAINT realms_slug_id_lowercase
+  CHECK (slug_id IS NULL OR slug_id = lower(slug_id));
+
+-- The sentinel is reserved, not merely documented, and is compared
+-- case-insensitively to match the runtime, which lowercases before testing it:
+--
+--   AgentService.ts:871   currentRealm.toLowerCase() !== 'default'
+--   AgentService.ts:2575  sessionRealm.toLowerCase() !== 'default'
+--
+-- A realm stored as 'Default' would satisfy a case-sensitive check and then be
+-- read as "no realm" at runtime, silently collapsing its own presence and search
+-- scope. Belt and braces with the lowercase constraint above: either alone
+-- closes the hole, and each reports a specific reason.
+--
+-- NULL is still permitted so realm creation keeps working until the service
+-- populates slug_id.
 ALTER TABLE druids_core.realms
   DROP CONSTRAINT IF EXISTS realms_slug_id_not_sentinel;
 
 ALTER TABLE druids_core.realms
   ADD CONSTRAINT realms_slug_id_not_sentinel
-  CHECK (slug_id IS NULL OR slug_id <> 'default');
+  CHECK (slug_id IS NULL OR lower(slug_id) <> 'default');
 
 COMMENT ON COLUMN druids_core.realms.slug_id IS
   'Stable identity for this realm. Immutable once set; "name" is a display label and may change freely. The id UUID is a deployment-local surrogate and must not appear in an API, UI or descriptor. Reserved: "default" is a sentinel meaning no realm, never a stored realm.';
