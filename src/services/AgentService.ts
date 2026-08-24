@@ -560,12 +560,17 @@ export class AgentService {
     }
 
     if (filters.realmId) {
+      // Canonicalise the filter: agent realm references are slugs and this
+      // comparison is exact, so a caller passing a pre-migration id would get
+      // an empty result set rather than an error.
+      const wanted = (await this.realmService.resolveRealmIds([String(filters.realmId)]))[0]
+        ?? filters.realmId;
       agents = agents.filter(agent => {
         // Check the agent's realm through multiple possible sources
-        const agentRealmId = (agent as any).realmId || 
-                           agent.realmAccess?.currentRealmId || 
+        const agentRealmId = (agent as any).realmId ||
+                           agent.realmAccess?.currentRealmId ||
                            agent.realmAccess?.boundRealmId;
-        return agentRealmId === filters.realmId;
+        return agentRealmId === wanted;
       });
     }
 
@@ -2772,11 +2777,19 @@ Please use your available tools to execute this task now and provide your comple
       throw new Error(`Agent ${agentId} is not a druid and cannot travel between realms`);
     }
 
-    // Resolve target realm name to UUID if needed
-    let targetRealmId = params.target_realm;
+    // Resolve the target to a canonical realm slug.
+    //
+    // This is the travel path agents actually use (the `travel_to_realm` tool),
+    // distinct from RealmTravelService which serves the REST route. Grants are
+    // slugs since migration 021 and the check below is exact, so an id that is
+    // not canonicalised here is both denied and — on the write side — stored
+    // back into currentRealmId in the old form.
+    let targetRealmId = (await this.realmService.resolveRealmIds([params.target_realm]))[0]
+      ?? params.target_realm;
 
-    // Check if the target_realm is a name (not a UUID)
-    const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(params.target_realm);
+    // A legacy surrogate resolves above. Anything still UUID-shaped names no
+    // realm, so fall through to the name lookup rather than trusting it.
+    const isUUID = isValidUUID(targetRealmId);
 
     if (!isUUID) {
       // Try to find realm by name (case-insensitive, handle common variations)
@@ -2802,13 +2815,16 @@ Please use your available tools to execute this task now and provide your comple
       }
     }
 
-    // Check if agent has access to target realm (check both the original param and resolved UUID)
-    const hasAccess = agent.realmAccess?.accessibleRealms?.some(
-      realm => {
-        const realmId = typeof realm === 'string' ? realm : realm.realmId;
-        return realmId === params.target_realm || realmId === targetRealmId;
-      }
+    // Compare grants against the canonical form. accessibleRealms is
+    // polymorphic — plain id strings in older rows, { realmId, ... } objects in
+    // the typed model — and migration 021 preserves both, so each entry is
+    // normalised before comparison rather than assuming a shape.
+    const grantedSlugs = await this.realmService.resolveRealmIds(
+      (agent.realmAccess?.accessibleRealms ?? []).map(
+        (realm: any) => (typeof realm === 'string' ? realm : realm?.realmId)
+      )
     );
+    const hasAccess = grantedSlugs.includes(targetRealmId);
 
     if (!hasAccess) {
       throw new Error(`Agent ${agentId} does not have access to realm ${params.target_realm} (resolved: ${targetRealmId})`);
@@ -2879,6 +2895,7 @@ Please use your available tools to execute this task now and provide your comple
   private agentCanAccessRealm(agent: Agent, realmId: string): boolean {
     const ra = agent.realmAccess;
     if (!ra) return false;
+    // Callers are expected to pass a canonical slug; see toolGetRealmElementals.
     if (ra.boundRealmId === realmId || ra.currentRealmId === realmId) return true;
     return (ra.accessibleRealms ?? []).some(
       (r: any) => (typeof r === 'string' ? r : r.realmId) === realmId
@@ -2886,10 +2903,16 @@ Please use your available tools to execute this task now and provide your comple
   }
 
   private async toolGetRealmElementals(callingAgent: Agent, params: { realm_id: string }): Promise<any> {
+    // Normalise the caller-supplied id once: both the access check and the
+    // binding comparison below are exact, and bindings are slugs. An external
+    // MCP client holding a pre-migration id would otherwise be refused access,
+    // or told the realm has no elementals — a wrong answer rather than an error.
+    const realmId = (await this.realmService.resolveRealmIds([params.realm_id]))[0] ?? params.realm_id;
+
     // Realm discovery is scoped: a caller may only enumerate elementals in a
     // realm it can access (prevents cross-realm enumeration of agents the
     // caller could never reach).
-    if (!this.agentCanAccessRealm(callingAgent, params.realm_id)) {
+    if (!this.agentCanAccessRealm(callingAgent, realmId)) {
       throw new Error(
         `Agent ${callingAgent.id} does not have access to realm ${params.realm_id} and cannot list its elementals`
       );
@@ -2899,7 +2922,7 @@ Please use your available tools to execute this task now and provide your comple
     const allAgents = Array.from(this.agents.values()).filter(agent =>
       agent.type === 'elemental' &&
       agent.status === 'active' &&
-      agent.realmAccess?.boundRealmId === params.realm_id
+      agent.realmAccess?.boundRealmId === realmId
     );
 
     return {

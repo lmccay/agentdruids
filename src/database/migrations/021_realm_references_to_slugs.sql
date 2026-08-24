@@ -231,6 +231,31 @@ SET parent_realm_id = parent.slug_id
 FROM druids_core.realms parent
 WHERE child.parent_realm_id = parent.id::text AND parent.slug_id IS NOT NULL;
 
+-- ley_line_connections[].targetRealmId is the same class of non-FK JSON realm
+-- reference. Leaving it untranslated would mix forms within one array, since
+-- new connections are written canonically — so a realm's connections would be
+-- half slugs and half surrogates, and only the one read path that compensates
+-- would find them.
+UPDATE druids_core.realms a
+SET ley_line_connections = COALESCE(
+      (
+        SELECT jsonb_agg(
+                 CASE
+                   WHEN r.slug_id IS NOT NULL
+                     THEN jsonb_set(e.value, '{targetRealmId}', to_jsonb(r.slug_id))
+                   ELSE e.value
+                 END
+               )
+        FROM jsonb_array_elements(a.ley_line_connections) AS e(value)
+        LEFT JOIN druids_core.realms r
+          ON r.id::text = e.value->>'targetRealmId'
+         AND e.value->>'targetRealmId' IS NOT NULL
+      ),
+      '[]'::jsonb
+    )
+WHERE jsonb_typeof(a.ley_line_connections) = 'array'
+  AND jsonb_array_length(a.ley_line_connections) > 0;
+
 -- child_realm_ids is a jsonb array of realm ids, likewise not a foreign key.
 UPDATE druids_core.realms a
 SET child_realm_ids = COALESCE(

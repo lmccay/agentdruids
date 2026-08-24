@@ -331,6 +331,12 @@ export class WorldTreeQueryService {
   async listSessions(filters: ListSessionsFilters = {}): Promise<{ sessions: SessionSummary[]; limit: number; offset: number }> {
     const limit = clampLimit(filters.limit, DEFAULT_SESSION_LIMIT);
     const offset = clampOffset(filters.offset);
+    // coordination_sessions.realm_id is slug-valued. The column is not yet
+    // populated by any writer, so this is latent today — canonicalising now
+    // means it does not become a defect the moment it is.
+    const realmFilter = filters.realmId
+      ? (await this.canonicaliseRealmRefs([filters.realmId]))[0] ?? filters.realmId
+      : filters.realmId;
     const { rows } = await this.db.query<SessionRow>(
       `SELECT session_id, status, coordinator_agent_id, realm_id, prompt,
               started_at, completed_at, participant_agent_ids, metadata
@@ -345,7 +351,7 @@ export class WorldTreeQueryService {
       [
         filters.status ?? null,
         filters.coordinatorId ?? null,
-        filters.realmId ?? null,
+        realmFilter ?? null,
         filters.since ?? null,
         filters.until ?? null,
         limit,
@@ -728,6 +734,10 @@ export class WorldTreeQueryService {
   ): Promise<{ documents: DocumentSummary[]; limit: number; offset: number }> {
     const limit = clampLimit(filters.limit, DEFAULT_DOCUMENT_LIMIT);
     const offset = clampOffset(filters.offset);
+    // The realm filter is matched exactly against scope_ref, which holds slugs.
+    const realmFilter = filters.realm
+      ? (await this.canonicaliseRealmRefs([filters.realm]))[0] ?? filters.realm
+      : filters.realm;
     const { rows } = await this.db.query<DocumentRow & { formats: string[] | null; scopes: DocumentScope[] | null }>(
       `SELECT d.id, d.source_uri, d.title, d.source_format, d.namespace, d.access_level,
               d.checksum, d.fetched_at, d.created_at,
@@ -749,7 +759,7 @@ export class WorldTreeQueryService {
         GROUP BY d.id
         ORDER BY d.created_at DESC
         LIMIT $4 OFFSET $5`,
-      [filters.sourceUri ?? null, filters.namespace ?? null, filters.since ?? null, limit, offset, filters.realm ?? null]
+      [filters.sourceUri ?? null, filters.namespace ?? null, filters.since ?? null, limit, offset, realmFilter ?? null]
     );
     return { documents: rows.map(mapDocumentRow), limit, offset };
   }
@@ -875,6 +885,11 @@ export class WorldTreeQueryService {
 
   /** Lexical (Postgres full-text) chunk retrieval — the fallback / no-provider path. */
   private async searchChunksLexical(query: string, lim: number, scope?: ScopeFilter): Promise<ChunkSearchResult[]> {
+    // Canonicalise the requested realms: SCOPE_EXISTS matches scope_ref
+    // exactly, and scope_ref holds slugs.
+    if (scope && scope.realms?.length) {
+      scope = { ...scope, realms: await this.canonicaliseRealmRefs(scope.realms) };
+    }
     const scopeClause = scope ? ` AND ${SCOPE_EXISTS('$3')}` : '';
     const params: unknown[] = scope ? [query, lim, scope.realms] : [query, lim];
     const { rows } = await this.db.query<ChunkSearchRow>(
@@ -896,6 +911,11 @@ export class WorldTreeQueryService {
   async searchChunksByVector(queryVector: number[], limit?: number, scope?: ScopeFilter): Promise<ChunkSearchResult[]> {
     const lim = clampLimit(limit, 5);
     const literal = `[${queryVector.join(',')}]`;
+    // Canonicalise the requested realms: SCOPE_EXISTS matches scope_ref
+    // exactly, and scope_ref holds slugs.
+    if (scope && scope.realms?.length) {
+      scope = { ...scope, realms: await this.canonicaliseRealmRefs(scope.realms) };
+    }
     const scopeClause = scope ? ` AND ${SCOPE_EXISTS('$3')}` : '';
     const params: unknown[] = scope ? [literal, lim, scope.realms] : [literal, lim];
     const { rows } = await this.db.query<ChunkSearchRow>(
@@ -988,6 +1008,45 @@ export class WorldTreeQueryService {
   }
 
   /**
+   * Map every accepted realm reference form to its canonical slug.
+   *
+   * Realm ids reaching this service come from REST query strings and MCP tool
+   * arguments as well as from in-process callers, and an external client may
+   * still hold a pre-migration surrogate. Every realm comparison below is an
+   * exact SQL match against slug-valued columns, so an unconverted id yields an
+   * empty result that is indistinguishable from "nothing indexed" rather than
+   * an error. Unknown references are simply absent from the map and left alone.
+   */
+  private async realmCanonicalMap(refs: Array<string | null | undefined>): Promise<Map<string, string>> {
+    const wanted = Array.from(new Set(refs.filter((r): r is string => !!r)));
+    const canonical = new Map<string, string>();
+    if (wanted.length === 0) return canonical;
+
+    const { rows } = await this.db.query<{ id: string; slug_id: string | null }>(
+      `SELECT id::text AS id, slug_id FROM druids_core.realms
+        WHERE id::text = ANY($1::text[]) OR slug_id = ANY($1::text[])`,
+      [wanted]
+    );
+    for (const row of rows) {
+      if (!row.slug_id) continue;
+      canonical.set(row.id, row.slug_id);
+      canonical.set(row.slug_id, row.slug_id);
+    }
+    return canonical;
+  }
+
+  /** Canonicalise a list of realm references, preserving order and dropping duplicates. */
+  private async canonicaliseRealmRefs(refs: string[]): Promise<string[]> {
+    const canonical = await this.realmCanonicalMap(refs);
+    const out: string[] = [];
+    for (const ref of refs) {
+      const slug = canonical.get(ref) ?? ref;
+      if (!out.includes(slug)) out.push(slug);
+    }
+    return out;
+  }
+
+  /**
    * Rewrite realm scope references to their canonical slug, leaving other scope
    * types untouched. A reference that resolves to no realm is left as-is;
    * assertRealmsExist has already rejected genuinely unknown realms.
@@ -998,18 +1057,7 @@ export class WorldTreeQueryService {
     );
     if (realmRefs.length === 0) return scopes;
 
-    const { rows } = await this.db.query<{ id: string; slug_id: string | null }>(
-      `SELECT id::text AS id, slug_id FROM druids_core.realms
-        WHERE id::text = ANY($1::text[]) OR slug_id = ANY($1::text[])`,
-      [realmRefs]
-    );
-
-    const canonical = new Map<string, string>();
-    for (const row of rows) {
-      if (!row.slug_id) continue;
-      canonical.set(row.id, row.slug_id);
-      canonical.set(row.slug_id, row.slug_id);
-    }
+    const canonical = await this.realmCanonicalMap(realmRefs);
 
     const rewritten = scopes.map((s) =>
       s.scopeType === 'realm' && s.scopeRef && canonical.has(s.scopeRef)

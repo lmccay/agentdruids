@@ -755,7 +755,7 @@ Create instruction steps as JSON:
       "action": "travel_and_collaborate",
       "assignedDruidId": "<DRUID agent ID from AVAILABLE PARTICIPANTS>",
       "assignedDruidName": "<DRUID agent name>",
-      "realmId": "<exact UUID from AVAILABLE REALMS list>",
+      "realmId": "<exact realm id from the AVAILABLE REALMS list>",
       "realmName": "<exact name from AVAILABLE REALMS list>",
       "collaborationTargets": [
         {
@@ -774,7 +774,7 @@ Create instruction steps as JSON:
       "action": "travel_and_collaborate",
       "assignedDruidId": "<DRUID agent ID for second task>",
       "assignedDruidName": "<DRUID agent name>",
-      "realmId": "<realm UUID>",
+      "realmId": "<realm id, exactly as listed in AVAILABLE REALMS>",
       "realmName": "<realm name>",
       "collaborationTargets": [
         {
@@ -2002,7 +2002,7 @@ CRITICAL: Only assign tasks to DRUIDs. If an Elemental's expertise is needed, as
 CRITICAL REALM COORDINATION RULES:
 - AGENTS ≠ REALMS: Agent names (like "De Lint", "Tolkien") are NOT realm identifiers
 - ELEMENTALS are bound to specific realms and work within their domains only
-- DRUIDS can travel between realms using proper realm IDs (like "8c3e2c6b-ba77-49cd-884e-4e67afd230d0")
+- DRUIDS can travel between realms using realm ids exactly as given in AVAILABLE REALMS (e.g. "launch-visibility")
 - When coordination involves realm travel, break it into clear sequential steps:
   1. First, assign elementals to work within their own bound realms
   2. Then, assign druids to travel between realms using proper realm IDs
@@ -2718,7 +2718,7 @@ ${participantDetails.join('\n')}
 
 REALM COORDINATION GUIDELINES:
 - Agent names (e.g., "De Lint", "Tolkien") are NOT realm identifiers
-- Use proper realm IDs for travel (e.g., "8c3e2c6b-ba77-49cd-884e-4e67afd230d0")
+- Use realm ids exactly as given in AVAILABLE REALMS (e.g. "launch-visibility"), never an invented one
 - ELEMENTALS work within their bound realm only - assign direct content creation tasks
 - DRUIDS can travel between realms - assign step-by-step coordination tasks
 - Break complex multi-realm workflows into sequential steps
@@ -2769,14 +2769,13 @@ COORDINATION_NOTES:
    */
   private async getRealmName(realmId: string): Promise<string> {
     try {
-      // This is a simplified approach - in a full implementation, 
-      // you'd query the realm service or database
-      const realmMap: { [key: string]: string } = {
-        '8c3e2c6b-ba77-49cd-884e-4e67afd230d0': 'Newford',
-        '9d8fb809-e2f0-411a-aca8-e7e202360069': 'Middle Earth',
-        'd92bab7c-8183-42ce-9c64-062f8c5acba0': 'Galaxy Far Far Away'
-      };
-      return realmMap[realmId] || `Unknown Realm (${realmId})`;
+      // Was a hardcoded map keyed on pre-migration UUIDs. Callers now pass
+      // slugs, so every lookup fell through to "Unknown Realm (...)" — and that
+      // string is interpolated into the coordinator's planning prompt, telling
+      // the model every realm is unknown. Resolve against the realm service
+      // instead, which accepts either id form.
+      const realm = await this.realmService?.getRealm(realmId);
+      return realm?.name || `Unknown Realm (${realmId})`;
     } catch (error) {
       return `Unknown Realm (${realmId})`;
     }
