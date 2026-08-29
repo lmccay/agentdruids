@@ -17,7 +17,7 @@ import { RepositoryManager } from './RepositoryManager';
 import { getWorldTreeQueryService } from './WorldTreeQueryService';
 import { RealmService } from './RealmService';
 import { resolveSearchScope } from './searchScope';
-import { isValidUUID, slugifyName } from '../utils/uuidUtils';
+import { isValidUUID, slugifyName, isRealmSentinel, REALM_SENTINEL_SLUG } from '../utils/uuidUtils';
 import { grantRealmId, grantRealmIds, grantsIncludeRealm } from '../utils/realmGrants';
 import { MCPConfigLoader } from './mcp/MCPConfigLoader';
 import { HttpMCPClient } from './mcp/HttpMCPClient';
@@ -797,7 +797,9 @@ export class AgentService {
       ...agent,
       status: 'active',
       deployment: {
-        realmId: agent.deployment?.realmId || 'default',
+        // A value is structurally required here (AgentDeployment.realmId), so
+        // the reserved sentinel is used rather than a slug-shaped placeholder.
+        realmId: agent.deployment?.realmId || REALM_SENTINEL_SLUG,
         deployedAt: Date.now().toString(),
         lastHeartbeat: Date.now().toString(),
         health: 'healthy',
@@ -926,9 +928,9 @@ export class AgentService {
       // paths below, so this only affects agents that opted into composition.
       try {
         // Session-scoped current realm (reflects in-session travel), NOT the
-        // agent's global realm state. 'default' => no realm layer.
+        // agent's global realm state. The sentinel => no realm layer.
         const currentRealm = this.resolveCurrentRealm(agent, agent.id, request.sessionId);
-        const realmId = currentRealm && currentRealm.toLowerCase() !== 'default' ? currentRealm : undefined;
+        const realmId = currentRealm && !isRealmSentinel(currentRealm) ? currentRealm : undefined;
 
         // DB-backed realm layer (Layer 3): pull the realm's authored prompt layer
         // so composition uses it instead of a file. (RealmService owns realm data;
@@ -2632,11 +2634,11 @@ Please use your available tools to execute this task now and provide your comple
     if (sessionId && this.coordinationService) {
       const sessionAgentManager = this.coordinationService.getSessionAgentManager(sessionId);
       const sessionRealm = sessionAgentManager?.getAgentSessionState(agentId)?.currentRealm;
-      if (sessionRealm && sessionRealm.toLowerCase() !== 'default') {
+      if (sessionRealm && !isRealmSentinel(sessionRealm)) {
         return sessionRealm;
       }
     }
-    return agent.realmAccess?.currentRealmId || agent.realmAccess?.boundRealmId || 'default';
+    return agent.realmAccess?.currentRealmId || agent.realmAccess?.boundRealmId || REALM_SENTINEL_SLUG;
   }
 
   private async toolDelegateTask(
@@ -2832,7 +2834,7 @@ Please use your available tools to execute this task now and provide your comple
     }
 
     // Determine previous realm
-    const previousRealmId = agent.realmAccess?.currentRealmId || agent.realmAccess?.boundRealmId || 'default';
+    const previousRealmId = agent.realmAccess?.currentRealmId || agent.realmAccess?.boundRealmId || REALM_SENTINEL_SLUG;
 
     // Update realm location - session-aware for concurrent sessions
     if (sessionId && this.coordinationService) {
@@ -2877,9 +2879,9 @@ Please use your available tools to execute this task now and provide your comple
   private async toolGetCurrentRealm(agentId: AgentId): Promise<any> {
     const agent = await this.getAgent(agentId);
     
-    const currentRealm = agent.realmAccess?.currentRealmId || 
-                        agent.realmAccess?.boundRealmId || 
-                        'default';
+    const currentRealm = agent.realmAccess?.currentRealmId ||
+                        agent.realmAccess?.boundRealmId ||
+                        REALM_SENTINEL_SLUG;
 
     return {
       agent_id: agentId,

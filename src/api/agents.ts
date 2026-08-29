@@ -5,6 +5,7 @@ import { AgentId, AgentType, RealmId } from '../models/Types';
 import { CreateAgentRequest, UpdateAgentRequest } from '../models/Agent';
 import { modelRegistryService } from '../services/ModelRegistryService';
 import { RealmService } from '../services/RealmService';
+import { realmIdField } from '../utils/realmPayload';
 
 const router = Router();
 
@@ -94,7 +95,7 @@ router.get('/', async (req: Request, res: Response) => {
           personality: fullAgent.personality,
           llmConfig: fullAgent.llmConfig, // Include full LLM configuration
           systemPrompt: fullAgent.llmConfig?.systemPrompt || 'Default system prompt',
-          realmId: fullAgent.deployment?.realmId || 'default-realm', // Use actual realm if available
+          ...realmIdField(fullAgent.deployment?.realmId),
           realmAccess: fullAgent.realmAccess, // Include realm access information
           mcpTools: fullAgent.mcpTools, // Include MCP tools configuration
           promptConfig: fullAgent.promptConfig, // Include prompt composition configuration
@@ -124,7 +125,7 @@ router.get('/', async (req: Request, res: Response) => {
             decisionMaking: 'analytical'
           },
           systemPrompt: 'Default system prompt',
-          realmId: summary.realmId || 'default-realm',
+          ...realmIdField(summary.realmId),
           createdAt: new Date().toISOString(),
           updatedAt: summary.lastActive || new Date().toISOString()
         };
@@ -581,7 +582,7 @@ router.get('/:agentId', async (req: Request, res: Response) => {
       personality: agent.personality,
       llmConfig: agent.llmConfig, // Include full LLM configuration
       systemPrompt: agent.llmConfig?.systemPrompt || 'Default system prompt',
-      realmId: agent.deployment?.realmId || 'default-realm',
+      ...realmIdField(agent.deployment?.realmId),
       realmAccess: agent.realmAccess, // Include realm access information
       resourceAccess: agent.resourceAccess, // Include resource access permissions
       promptConfig: agent.promptConfig, // Include prompt composition configuration
