@@ -1218,12 +1218,19 @@ CRITICAL: Only assign tasks to DRUIDs. If an Elemental's expertise is needed, as
           
           // Skip the druid, only include elementals
           if (agent.type === 'elemental') {
-            const realmId = agent.realmAccess?.boundRealmId || 'default-realm';
+            // Kept in step with the live sentinel handling even though this block
+            // is disabled: 'default-realm' is now a well-formed slug — precisely
+            // the one a realm named "Default Realm" would receive — so reviving
+            // this as written would reintroduce the collision it used to avoid.
+            // Reviving it also needs REALM_SENTINEL_SLUG and isRealmSentinel
+            // imported from ../utils/uuidUtils; they are deliberately not
+            // imported now, since nothing outside this comment would use them.
+            const realmId = agent.realmAccess?.boundRealmId || REALM_SENTINEL_SLUG;
             if (!realmGroups[realmId]) {
               realmGroups[realmId] = [];
             }
-            
-            const realmName = realmId === 'default-realm' ? 'Default Realm' : await this.getRealmName(realmId);
+
+            const realmName = isRealmSentinel(realmId) ? 'No realm' : await this.getRealmName(realmId);
             realmGroups[realmId].push({
               name: agent.name,
               agentId: agent.id,

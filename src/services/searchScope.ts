@@ -7,12 +7,15 @@
  * AgentService/DB stack. `global` is always implicit at the query layer; this
  * returns only the *additional* realms to scope to.
  */
+
+import { isRealmSentinel } from '../utils/uuidUtils';
+
 export interface SearchScopeInputs {
   /** Realms this agent may access (its realm grants collapsed to ids). */
   accessibleRealms: string[];
   /** The session's declared research realms (campaign scope); [] / omit if none. */
   sessionResearchRealms?: string[] | undefined;
-  /** The realm the agent is currently present in; null/'default' => not present. */
+  /** The realm the agent is currently present in; null/sentinel => not present. */
   currentRealm?: string | null | undefined;
   /** Realms the caller requested explicitly on the tool call. */
   explicitRealms?: string[] | undefined;
@@ -41,7 +44,7 @@ export function resolveSearchScope(inputs: SearchScopeInputs): string[] {
   }
 
   const current = inputs.currentRealm;
-  if (current && current.toLowerCase() !== 'default') scope.add(String(current));
+  if (current && !isRealmSentinel(current)) scope.add(String(current));
 
   for (const r of inputs.explicitRealms ?? []) {
     const id = String(r);
