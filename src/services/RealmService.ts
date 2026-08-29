@@ -144,11 +144,15 @@ export class RealmService {
       updatedAt: new Date().toISOString()
     };
 
-    // Persist to database first (primary persistence). BaseRepository.create
-    // generates its own UUID and ignores the id we pass, so we MUST adopt the
-    // persisted id as canonical — otherwise the in-memory cache and the DB
-    // diverge on id and realm-scoped lookups (e.g. ingest scope validation)
-    // fail until a restart reloads the map from the DB.
+    // Persist to the database first (primary persistence).
+    //
+    // RealmRepository.create is an upsert keyed on slug_id: the slug we derived
+    // above *is* the identity, the surrogate UUID is left to the column default,
+    // and the entity comes back with the slug as its id. We still read the
+    // persisted entity rather than assuming our local copy is authoritative —
+    // see the note below on the agent roster — because a divergence between the
+    // in-memory map and the database would break realm-scoped lookups (e.g.
+    // ingest scope validation) until a restart reloaded the map.
     if (this.repositoryManager) {
       try {
         const dbRealm = this.transformServiceRealmToDbFormat(realm);

@@ -53,8 +53,10 @@ describe('Agent slug identity', () => {
       expect([...slugs][0]).toBe('foo-bar');
     });
 
-    it('yields an empty slug for a name with no alphanumerics', () => {
-      // AgentService rejects this rather than persisting an empty identity.
+    it('yields no usable slug for a name with no alphanumerics', () => {
+      // Not empty — punctuation collapses to a single separator, because the
+      // derivation deliberately does not trim. Both results are unusable as an
+      // identity, and AgentService rejects them rather than persisting one.
       expect(slugifyName('!!!')).toBe('-');
       expect(slugifyName('')).toBe('');
     });
