@@ -316,7 +316,14 @@ export class RealmService {
 
         // Don't add updated_at here - BaseRepository will handle it automatically
 
-        await this.repositoryManager.realms.update(key, dbUpdates);
+        // The return value matters: update() resolves null when the id maps to
+        // no row, which is a write that did not happen just as surely as a
+        // thrown error. Ignoring it would leave the same silent-success hole
+        // this change exists to close, one branch over.
+        const persisted = await this.repositoryManager.realms.update(key, dbUpdates);
+        if (!persisted) {
+          throw new Error(`no realm row matched id "${key}"`);
+        }
         console.log(`💾 Updated realm ${key} in database`);
       } catch (error) {
         // Loud, and re-thrown. The in-memory map was already updated above, so
@@ -327,7 +334,15 @@ export class RealmService {
         const message = error instanceof Error ? error.message : 'Unknown error';
         console.error(`❌ Failed to persist realm ${key}; rolling back the in-memory copy:`, message);
         this.realms.set(key, realm);
-        throw new Error(`Failed to update realm ${key}: ${message}`);
+
+        const failure = new Error(`Failed to update realm ${key}: ${message}`);
+        // Preserve the original error — a driver-level pg error carries the
+        // constraint, column and position that make this diagnosable, and the
+        // point of throwing here is that failures stay debuggable. tsconfig
+        // targets ES2020, so the `cause` constructor option is not in the type
+        // lib; assigning it directly is equivalent at runtime.
+        (failure as Error & { cause?: unknown }).cause = error;
+        throw failure;
       }
     }
     
