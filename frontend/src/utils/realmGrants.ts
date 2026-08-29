@@ -32,8 +32,8 @@ export const grantRealmIds = (grants: RealmGrant[] | undefined): string[] =>
  * access was granted — not with what permissions — and inventing a permission
  * set here would be a silent policy decision.
  *
- * Order follows the checkbox state, so the result is stable for a given
- * selection regardless of how the original list was ordered.
+ * Order follows the `checked` array provided by the caller. If you want a stable
+ * ordering (e.g., realm list order), ensure `checked` is constructed in that order.
  */
 export const reconcileRealmGrants = (
   original: RealmGrant[] | undefined,
