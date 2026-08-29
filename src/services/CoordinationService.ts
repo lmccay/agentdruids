@@ -1,4 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
+import { grantRealmIds } from '../utils/realmGrants';
 import fs from 'fs/promises';
 import path from 'path';
 import { AgentService } from './AgentService';
@@ -2688,9 +2689,7 @@ When synthesizing results, focus on:
             realmName = await this.getRealmName(agent.realmAccess.boundRealmId);
           } else if (agent.realmAccess?.accessibleRealms?.length) {
             // For druids who can travel
-            const realmIds = agent.realmAccess.accessibleRealms.map(r => 
-              typeof r === 'string' ? r : r.realmId
-            );
+            const realmIds = grantRealmIds(agent.realmAccess.accessibleRealms);
             realmInfo = `CAN TRAVEL to realms: ${realmIds.join(', ')}`;
             const realmNames = await Promise.all(realmIds.map(id => this.getRealmName(id)));
             realmName = realmNames.join(', ');

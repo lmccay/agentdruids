@@ -235,9 +235,20 @@ export class AgentRepository extends BaseRepository<Agent> {
       params.push(filters.tags);
     }
 
-    // Realm filtering (search in realm_access JSON)
+    // Realm filtering (search in realm_access JSON).
+    //
+    // accessibleRealms holds either bare id strings or { realmId, ... } objects.
+    // The jsonb `?` operator tests for a top-level *string* element, so it could
+    // never match an object grant. Containment handles both: `@> to_jsonb(id)`
+    // for a string element, `@> [{"realmId": id}]` for an object, and the object
+    // form matches on that key alone regardless of the metadata alongside it.
     if (filters.realmId) {
-      conditions.push(`(realm_access->>'boundRealmId' = $${params.length + 1} OR realm_access->'accessibleRealms' ? $${params.length + 1})`);
+      const p = params.length + 1;
+      conditions.push(
+        `(realm_access->>'boundRealmId' = $${p}` +
+        ` OR realm_access->'accessibleRealms' @> to_jsonb($${p}::text)` +
+        ` OR realm_access->'accessibleRealms' @> jsonb_build_array(jsonb_build_object('realmId', $${p}::text)))`
+      );
       params.push(filters.realmId);
     }
 
@@ -252,13 +263,20 @@ export class AgentRepository extends BaseRepository<Agent> {
   }
 
   /**
-   * Find agents by realm access
+   * Find agents by realm access.
+   *
+   * `realmId` is matched exactly, so callers holding a pre-migration surrogate
+   * should canonicalise it first (RealmService.resolveRealmIds) — this class has
+   * no realm resolver of its own.
    */
   async findByRealmAccess(realmId: string): Promise<Agent[]> {
+    // See findWithFilters: containment matches both stored grant shapes, where
+    // the jsonb `?` operator matched only bare strings.
     const query = `
       SELECT * FROM ${this.getFullTableName()}
-      WHERE realm_access->>'boundRealmId' = $1 
-         OR realm_access->'accessibleRealms' ? $1
+      WHERE realm_access->>'boundRealmId' = $1
+         OR realm_access->'accessibleRealms' @> to_jsonb($1::text)
+         OR realm_access->'accessibleRealms' @> jsonb_build_array(jsonb_build_object('realmId', $1::text))
       ORDER BY created_at DESC
     `;
     

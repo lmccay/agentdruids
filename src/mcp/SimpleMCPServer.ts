@@ -1,4 +1,5 @@
 import express, { NextFunction, Request, Response } from 'express';
+import { grantsIncludeRealm } from '../utils/realmGrants';
 import { AsyncLocalStorage } from 'async_hooks';
 import cors from 'cors';
 import { v4 as uuidv4 } from 'uuid';
@@ -1459,9 +1460,12 @@ export class SimpleMCPServer {
             
             if (targetRealm) {
               const realmId = targetRealm.id;
-              agents = agents.filter((agent: any) => 
+              // accessibleRealms may hold bare id strings or { realmId, ... }
+              // objects; `.includes()` only ever matched the former, so druids
+              // with object grants were filtered out entirely.
+              agents = agents.filter((agent: any) =>
                 agent.realmAccess?.boundRealmId === realmId ||
-                agent.realmAccess?.accessibleRealms?.includes(realmId)
+                grantsIncludeRealm(agent.realmAccess?.accessibleRealms, realmId)
               );
               console.log(`🔍 Found ${agents.length} agents in realm ${args.realm}`);
             } else {
