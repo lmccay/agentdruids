@@ -64,9 +64,6 @@ export class RealmTravelService {
   }
 
   /**
-   * Validate if agent can travel to target realm based on profile configuration
-   */
-  /**
    * Map any accepted realm reference to the canonical slug the grants use.
    * An unresolvable value is returned unchanged so the caller's own
    * "not found" / "denied" handling still applies.
