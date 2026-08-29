@@ -2,6 +2,67 @@ import { DatabaseService } from './DatabaseService';
 import { readFileSync, readdirSync } from 'fs';
 import { join } from 'path';
 
+export interface MigrationDescriptor {
+  version: number;
+  name: string;
+  filename: string;
+}
+
+export interface MigrationPlan {
+  /** Migrations to apply, in ascending version order. */
+  pending: MigrationDescriptor[];
+  /**
+   * Pending migrations whose version is *below* the highest applied version.
+   * These are the ones a high-water mark would have skipped, and their presence
+   * means something already went wrong — a branch landed out of order, or a row
+   * was removed from the tracking table.
+   */
+  outOfOrder: MigrationDescriptor[];
+  /** Highest successfully applied version, or 0 if none. */
+  highestApplied: number;
+}
+
+/**
+ * Decide which migrations to apply, from the *set* of applied versions rather
+ * than a high-water mark.
+ *
+ * The runner previously computed `version > MAX(applied)`, so a migration whose
+ * version sat below the maximum was never applied and never reported. Two
+ * branches adding 021 and 022 in parallel were enough to trigger it: a database
+ * that applied 022 first would never apply 021, and would report itself up to
+ * date. That is exactly what happened during review of #95 — 021 was rolled back
+ * for re-testing and silently refused to re-apply because 022 was present.
+ *
+ * A set difference applies out-of-order arrivals and is otherwise identical: for
+ * a database that has applied a contiguous prefix, it selects the same files.
+ *
+ * Gaps in the *file* numbering are not gaps here. There is no 002 and never has
+ * been — numbering starts at 003 — and since no such file exists it can never be
+ * pending, so it needs no special case. Only a file that exists and is unapplied
+ * is reported.
+ *
+ * @param available every migration file found on disk
+ * @param appliedVersions versions recorded as *successfully* applied; a failed
+ *   migration is deliberately absent so it is retried
+ */
+export function planPendingMigrations(
+  available: readonly MigrationDescriptor[],
+  appliedVersions: Iterable<number>
+): MigrationPlan {
+  const applied = new Set(appliedVersions);
+  const highestApplied = applied.size === 0 ? 0 : Math.max(...applied);
+
+  const pending = available
+    .filter((m) => !applied.has(m.version))
+    .sort((a, b) => a.version - b.version);
+
+  return {
+    pending,
+    outOfOrder: pending.filter((m) => m.version < highestApplied),
+    highestApplied,
+  };
+}
+
 /**
  * MigrationService handles database schema migrations
  * Uses a version-based approach similar to Flyway/Liquibase
@@ -27,28 +88,42 @@ export class MigrationService {
       // Ensure migration tracking table exists
       await this.ensureMigrationTable();
 
-      // Get current version
-      const currentVersion = await this.getCurrentVersion();
-      console.log(`📊 Current schema version: ${currentVersion}`);
+      // Which versions the database has actually applied — the set, not just the
+      // maximum. See planPendingMigrations for why the difference matters.
+      const appliedVersions = await this.getAppliedVersions();
 
       // Get available migrations
       const availableMigrations = this.getAvailableMigrations();
       console.log(`📁 Found ${availableMigrations.length} migration files`);
 
-      // Filter to pending migrations
-      const pendingMigrations = availableMigrations.filter(
-        (m) => m.version > currentVersion
-      );
+      const plan = planPendingMigrations(availableMigrations, appliedVersions);
+      console.log(`📊 Current schema version: ${plan.highestApplied}`);
 
-      if (pendingMigrations.length === 0) {
+      if (plan.outOfOrder.length > 0) {
+        // Not fatal — applying them is the fix — but it is reported loudly,
+        // because a migration sitting below the high-water mark means a branch
+        // landed out of order or a tracking row went missing, and the previous
+        // runner would have skipped it in silence.
+        console.warn(
+          `⚠️  ${plan.outOfOrder.length} migration(s) are unapplied despite being below ` +
+          `applied version ${plan.highestApplied}: ` +
+          plan.outOfOrder.map((m) => `${m.version} (${m.name})`).join(', ') +
+          '. Applying them now; a previous run skipped them silently.'
+        );
+      }
+
+      if (plan.pending.length === 0) {
         console.log('✅ Database schema is up to date');
         return;
       }
 
-      console.log(`🔧 Applying ${pendingMigrations.length} pending migrations...`);
+      console.log(
+        `🔧 Applying ${plan.pending.length} pending migrations: ` +
+        plan.pending.map((m) => m.version).join(', ')
+      );
 
       // Apply each migration in order
-      for (const migration of pendingMigrations) {
+      for (const migration of plan.pending) {
         await this.applyMigration(migration);
       }
 
@@ -78,21 +153,28 @@ export class MigrationService {
   }
 
   /**
-   * Get current schema version from database
+   * Every version the database records as successfully applied.
+   *
+   * A failed migration is left out on purpose, so it is retried on the next
+   * start rather than being treated as done.
+   *
+   * Errors propagate. This used to `catch { return 0 }` on the theory that the
+   * table might not exist yet — but ensureMigrationTable has already refused to
+   * continue in that case, so the only thing the catch could still absorb was a
+   * genuine query failure. Absorbing it would report *no* migrations as applied
+   * and re-run every one of them against a live database, which for a migration
+   * that rewrites stored references is far worse than failing to start.
    */
-  private async getCurrentVersion(): Promise<number> {
-    try {
-      const result = await this.db.query(`
-        SELECT MAX(version) as version
-        FROM druids_core.schema_migrations
-        WHERE success = true
-      `);
+  private async getAppliedVersions(): Promise<number[]> {
+    const result = await this.db.query(`
+      SELECT version
+      FROM druids_core.schema_migrations
+      WHERE success = true
+    `);
 
-      return result.rows[0]['version'] || 0;
-    } catch (error) {
-      // Table doesn't exist yet, version is 0
-      return 0;
-    }
+    return result.rows
+      .map((row) => Number(row['version']))
+      .filter((version) => Number.isFinite(version));
   }
 
   /**
