@@ -17,7 +17,7 @@
  * could collide with a real slug.
  */
 
-import { realmIdField } from '../../src/api/agents';
+import { realmIdField } from '../../src/utils/realmPayload';
 import { REALM_SENTINEL_SLUG, isRealmSentinel } from '../../src/utils/uuidUtils';
 import { resolveSearchScope } from '../../src/services/searchScope';
 
