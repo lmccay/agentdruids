@@ -34,7 +34,7 @@ function collectAgentRealms(ra?: RealmAccess): string[] {
   if (ra?.boundRealmId) realms.add(ra.boundRealmId);
   if (ra?.currentRealmId) realms.add(ra.currentRealmId);
   // accessibleRealms may hold bare id strings or { realmId, ... } objects.
-  for (const id of grantRealmIds(ra?.accessibleRealms as any)) realms.add(id);
+  for (const id of grantRealmIds(ra?.accessibleRealms)) realms.add(id);
   return Array.from(realms);
 }
 
@@ -464,7 +464,7 @@ export class AgentService {
           // nothing — so a druid with string grants was never registered in any
           // of its accessible realms.
           for (const grant of agent.realmAccess.accessibleRealms) {
-            const grantRealm = grantRealmId(grant as any);
+            const grantRealm = grantRealmId(grant);
             if (!grantRealm) continue;
             const realm = await this.realmService.getRealm(grantRealm);
             if (realm) {
@@ -2823,7 +2823,7 @@ Please use your available tools to execute this task now and provide your comple
     // the typed model — and migration 021 preserves both, so each entry is
     // normalised before comparison rather than assuming a shape.
     const grantedSlugs = await this.realmService.resolveRealmIds(
-      grantRealmIds(agent.realmAccess?.accessibleRealms as any)
+      grantRealmIds(agent.realmAccess?.accessibleRealms)
     );
     const hasAccess = grantedSlugs.includes(targetRealmId);
 
@@ -2898,7 +2898,7 @@ Please use your available tools to execute this task now and provide your comple
     if (!ra) return false;
     // Callers are expected to pass a canonical slug; see toolGetRealmElementals.
     if (ra.boundRealmId === realmId || ra.currentRealmId === realmId) return true;
-    return grantsIncludeRealm(ra.accessibleRealms as any, realmId);
+    return grantsIncludeRealm(ra.accessibleRealms, realmId);
   }
 
   private async toolGetRealmElementals(callingAgent: Agent, params: { realm_id: string }): Promise<any> {

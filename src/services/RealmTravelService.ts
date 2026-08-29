@@ -97,7 +97,7 @@ export class RealmTravelService {
       // Check if realm is in agent's accessible realms list
       // Handle both string array and object array formats
       const hasAccess = grantsIncludeRealm(
-        agent.realmAccess.accessibleRealms as any,
+        agent.realmAccess.accessibleRealms,
         targetRealmId
       );
 

@@ -2689,7 +2689,7 @@ When synthesizing results, focus on:
             realmName = await this.getRealmName(agent.realmAccess.boundRealmId);
           } else if (agent.realmAccess?.accessibleRealms?.length) {
             // For druids who can travel
-            const realmIds = grantRealmIds(agent.realmAccess.accessibleRealms as any);
+            const realmIds = grantRealmIds(agent.realmAccess.accessibleRealms);
             realmInfo = `CAN TRAVEL to realms: ${realmIds.join(', ')}`;
             const realmNames = await Promise.all(realmIds.map(id => this.getRealmName(id)));
             realmName = realmNames.join(', ');
