@@ -64,9 +64,21 @@ export class RealmTravelService {
   }
 
   /**
-   * Validate if agent can travel to target realm based on profile configuration
+   * Map any accepted realm reference to the canonical slug the grants use.
+   * An unresolvable value is returned unchanged so the caller's own
+   * "not found" / "denied" handling still applies.
    */
+  private async resolveTargetRealm(targetRealmId: string): Promise<string> {
+    try {
+      const resolved = await this.realmService.resolveRealmIds([targetRealmId]);
+      return resolved[0] ?? targetRealmId;
+    } catch {
+      return targetRealmId;
+    }
+  }
+
   async canTravelToRealm(agentId: string, targetRealmId: string): Promise<boolean> {
+    targetRealmId = await this.resolveTargetRealm(targetRealmId);
     try {
       const agent = await this.agentService.getAgent(agentId);
       
@@ -105,6 +117,14 @@ export class RealmTravelService {
    */
   async travelToRealm(agentId: string, targetRealmId: string): Promise<TravelResult> {
     try {
+      // Normalise the target to its canonical realm slug before anything
+      // compares or stores it. Grants, bindings and currentRealmId are all
+      // slugs now, and every comparison below is exact — so a client still
+      // holding a pre-migration UUID (external MCP callers especially) would be
+      // denied travel it is entitled to, and on success the UUID would be
+      // written straight back into realmAccess.currentRealmId.
+      targetRealmId = await this.resolveTargetRealm(targetRealmId);
+
       // Validate travel permissions
       const canTravel = await this.canTravelToRealm(agentId, targetRealmId);
       if (!canTravel) {
@@ -189,6 +209,10 @@ export class RealmTravelService {
    */
   async getElementalsInRealm(realmId: string): Promise<ElementalInfo[]> {
     try {
+      // Bindings are slugs, and the comparison below is exact, so a caller
+      // holding a pre-migration UUID would get an empty list even though the
+      // realm resolves fine everywhere else.
+      realmId = await this.resolveTargetRealm(realmId);
       const allAgents = await this.agentService.listAgents();
       
       const elementals = allAgents
@@ -301,6 +325,9 @@ export class RealmTravelService {
    */
   async getAgentsInRealm(realmId: string): Promise<string[]> {
     try {
+      // Same exact-comparison hazard as getElementalsInRealm: currentRealmId is
+      // a slug, so an unnormalised UUID would return an empty list.
+      realmId = await this.resolveTargetRealm(realmId);
       const allAgents = await this.agentService.listAgents();
       
       return allAgents

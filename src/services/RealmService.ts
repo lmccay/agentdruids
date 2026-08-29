@@ -1,10 +1,12 @@
-import { v4 as uuidv4 } from 'uuid';
 import { RealmId } from "../models/Types";
+import { isValidUUID, slugifyName, isRealmSentinel } from '../utils/uuidUtils';
 import { RepositoryManager } from './RepositoryManager';
 import { MCPConfigLoader } from './mcp/MCPConfigLoader';
 
 export class RealmService {
   private realms: Map<RealmId, any> = new Map();
+  /** Legacy realm UUID -> canonical slug, memoised from the unique index. */
+  private uuidToSlug: Map<string, string> = new Map();
   private loadingPromise: Promise<void>;
   private repositoryManager: RepositoryManager | null = null;
   private mcpConfigLoader: MCPConfigLoader;
@@ -95,10 +97,39 @@ export class RealmService {
   }
   
   async createRealm(request: any): Promise<any> {
+    // Realms are identified by slug (migration 020). An explicitly supplied id
+    // is normalised through the same derivation rather than rejected, so
+    // "My Realm" and "my-realm" both land on the canonical form the database
+    // requires; otherwise the caller would meet a raw constraint violation.
+    const requestedSlug =
+      request.id && !isValidUUID(request.id) ? slugifyName(String(request.id)) : undefined;
+    const slug = requestedSlug || slugifyName(String(request.name ?? ''));
+
+    if (!slug || slug === '-') {
+      throw new Error(
+        'Cannot derive a realm slug id: provide an id, or a name containing alphanumeric characters'
+      );
+    }
+
+    if (isValidUUID(slug)) {
+      // A realm named like a UUID would derive a UUID-shaped slug, which every
+      // resolver treats as the surrogate rather than a slug — the repository
+      // would reject it on create and misclassify it on lookup.
+      throw new Error(
+        `"${slug}" cannot be used as a realm id: it has the shape of an internal ` +
+        'identifier. Choose a name or id that is not formatted as a UUID.'
+      );
+    }
+
+    if (isRealmSentinel(slug)) {
+      throw new Error(
+        `"${slug}" is reserved: it is the sentinel meaning "not present in any realm", ` +
+        'so a realm cannot use it as an identity. Choose a different name or id.'
+      );
+    }
+
     const realm = {
-      // Fallback id for the no-database path only. When a repository is present,
-      // BaseRepository.create mints its own UUID and we adopt it below.
-      id: request.id || uuidv4(),
+      id: slug,
       name: request.name,
       description: request.description,
       type: request.type || 'development',
@@ -113,16 +144,27 @@ export class RealmService {
       updatedAt: new Date().toISOString()
     };
 
-    // Persist to database first (primary persistence). BaseRepository.create
-    // generates its own UUID and ignores the id we pass, so we MUST adopt the
-    // persisted id as canonical — otherwise the in-memory cache and the DB
-    // diverge on id and realm-scoped lookups (e.g. ingest scope validation)
-    // fail until a restart reloads the map from the DB.
+    // Persist to the database first (primary persistence).
+    //
+    // RealmRepository.create is an upsert keyed on slug_id: the slug we derived
+    // above *is* the identity, the surrogate UUID is left to the column default,
+    // and the entity comes back with the slug as its id. We still read the
+    // persisted entity rather than assuming our local copy is authoritative —
+    // see the note below on the agent roster — because a divergence between the
+    // in-memory map and the database would break realm-scoped lookups (e.g.
+    // ingest scope validation) until a restart reloaded the map.
     if (this.repositoryManager) {
       try {
         const dbRealm = this.transformServiceRealmToDbFormat(realm);
         const persisted = await this.repositoryManager.realms.create(dbRealm);
+
+        // Adopt the persisted entity, not just its id. create() is an upsert
+        // that deliberately preserves an existing realm's agent roster, while
+        // this object was built with an empty one — caching the local copy
+        // would report the realm as empty until a restart, and a later
+        // membership update could then write that emptiness back.
         realm.id = persisted.id;
+        realm.agentIds = (persisted as any).agents ?? realm.agentIds;
         console.log(`💾 Stored realm ${realm.id} in database`);
       } catch (error) {
         console.warn('Failed to persist realm to database:', error instanceof Error ? error.message : 'Unknown error');
@@ -144,9 +186,65 @@ export class RealmService {
     return realm;
   }
   
+  /**
+   * Resolve any accepted realm reference to the slug the in-memory map is keyed
+   * by.
+   *
+   * The application speaks slugs, but UUIDs still arrive from outside: external
+   * MCP clients hold ids issued before migration 020, and REST callers may have
+   * bookmarked one. Rather than break them, a UUID is translated once via the
+   * unique index and cached. Anything unrecognised is returned unchanged so the
+   * caller's own "not found" handling applies.
+   */
+  async resolveRealmKey(idOrSlug: RealmId): Promise<RealmId> {
+    if (!idOrSlug || this.realms.has(idOrSlug)) {
+      return idOrSlug;
+    }
+
+    if (isValidUUID(String(idOrSlug)) && this.repositoryManager) {
+      const cached = this.uuidToSlug.get(String(idOrSlug));
+      if (cached) {
+        return cached as RealmId;
+      }
+      try {
+        const slug = await this.repositoryManager.realms.resolveSlug(String(idOrSlug));
+        if (slug) {
+          this.uuidToSlug.set(String(idOrSlug), slug);
+          console.log(`🔄 Resolved legacy realm UUID ${idOrSlug} to slug "${slug}"`);
+          return slug as RealmId;
+        }
+      } catch (error) {
+        console.warn(
+          `Failed to resolve realm UUID ${idOrSlug}:`,
+          error instanceof Error ? error.message : 'Unknown error'
+        );
+      }
+    }
+
+    return idOrSlug;
+  }
+
+  /**
+   * Normalise a list of realm references to canonical slugs, preserving order
+   * and dropping duplicates. Used at inbound boundaries (coordination research
+   * scope, directed corpus search) so a caller holding a pre-migration UUID is
+   * still understood.
+   */
+  async resolveRealmIds(ids: Array<string | null | undefined>): Promise<string[]> {
+    await this.loadingPromise;
+    const out: string[] = [];
+    for (const id of ids) {
+      if (!id) continue;
+      const slug = String(await this.resolveRealmKey(String(id) as RealmId));
+      if (slug && !out.includes(slug)) out.push(slug);
+    }
+    return out;
+  }
+
   async getRealm(realmId: RealmId): Promise<any | null> {
     await this.loadingPromise; // Ensure data is loaded
-    return this.realms.get(realmId) || null;
+    const key = await this.resolveRealmKey(realmId);
+    return this.realms.get(key) || null;
   }
   
   async listRealms(filters?: any): Promise<any[]> {
@@ -169,7 +267,8 @@ export class RealmService {
 
   async updateRealm(realmId: RealmId, updates: any): Promise<any> {
     await this.loadingPromise; // Ensure data is loaded
-    const realm = this.realms.get(realmId);
+    const key = await this.resolveRealmKey(realmId);
+    const realm = this.realms.get(key);
     if (!realm) {
       throw new Error(`Realm not found: ${realmId}`);
     }
@@ -178,10 +277,15 @@ export class RealmService {
     const updatedRealm = {
       ...realm,
       ...updates,
+      // Identity is immutable and is not settable through an update payload.
+      // Without this, a PUT carrying { id: ... } would change the returned id
+      // while the realm stayed stored under its real key and slug — the caller
+      // would then be unable to find it by the id it was just handed.
+      id: key,
       updatedAt: new Date().toISOString()
     };
     
-    this.realms.set(realmId, updatedRealm);
+    this.realms.set(key, updatedRealm);
     
     // Persist to database first (primary persistence)
     if (this.repositoryManager) {
@@ -231,14 +335,15 @@ export class RealmService {
 
   async deleteRealm(realmId: RealmId): Promise<void> {
     await this.loadingPromise; // Ensure service is initialized
+    const key = await this.resolveRealmKey(realmId);
     
-    const realm = this.realms.get(realmId);
+    const realm = this.realms.get(key);
     if (!realm) {
       throw new Error(`Realm not found: ${realmId}`);
     }
     
     // Remove from memory
-    this.realms.delete(realmId);
+    this.realms.delete(key);
     
     // Remove from database if available
     if (this.repositoryManager) {
@@ -250,24 +355,26 @@ export class RealmService {
             DELETE FROM druids_knowledge.namespaces 
             WHERE realm_id = $1
           `;
-          const namespacesResult = await this.repositoryManager!.database.query(namespacesDeleteQuery, [realmId]);
-          console.log(`💾 Deleted ${namespacesResult.rowCount || 0} namespaces for realm ${realmId}`);
-          
+          // Both operations key on the resolved slug. namespaces.realm_id is a
+          // slug column as of migration 021; passing the caller's raw id could
+          // be a surrogate UUID and would match nothing.
+          const namespacesResult = await this.repositoryManager!.database.query(namespacesDeleteQuery, [key]);
+          console.log(`💾 Deleted ${namespacesResult.rowCount || 0} namespaces for realm ${key}`);
+
           // Then delete the realm itself
-          await this.repositoryManager!.realms.delete(realmId);
-          console.log(`💾 Deleted realm ${realmId} from database`);
+          await this.repositoryManager!.realms.delete(key);
+          console.log(`💾 Deleted realm ${key} from database`);
         });
       } catch (error) {
-        // Check if this is a UUID format error (non-UUID realms only exist in Redis)
+        // Previously a "uuid" in the message was swallowed as "this realm only
+        // exists in Redis". That was a workaround for passing a slug to a
+        // UUID-typed column — the mismatch migration 021 removes. Keeping it
+        // would now hide a real failure and leave the row behind while the
+        // realm disappeared from memory, so every error is treated as real.
         const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-        if (errorMessage.includes('uuid') || errorMessage.includes('UUID')) {
-          console.log(`⚠️ Realm ${realmId} not in database (Redis-only realm), continuing with Redis cleanup`);
-        } else {
-          console.warn('Failed to delete realm from database:', errorMessage);
-          // Re-add to memory if database deletion failed for other reasons
-          this.realms.set(realmId, realm);
-          throw error;
-        }
+        console.error(`❌ Failed to delete realm ${key} from database:`, errorMessage);
+        this.realms.set(key, realm);
+        throw error;
       }
     }
     
@@ -330,8 +437,9 @@ export class RealmService {
    */
   async assignMCPServers(realmId: RealmId, serverIds: string[]): Promise<void> {
     await this.loadingPromise;
+    const key = await this.resolveRealmKey(realmId);
 
-    const realm = this.realms.get(realmId);
+    const realm = this.realms.get(key);
     if (!realm) {
       throw new Error(`Realm not found: ${realmId}`);
     }
@@ -356,8 +464,9 @@ export class RealmService {
    */
   async addMCPServer(realmId: RealmId, serverId: string): Promise<void> {
     await this.loadingPromise;
+    const key = await this.resolveRealmKey(realmId);
 
-    const realm = this.realms.get(realmId);
+    const realm = this.realms.get(key);
     if (!realm) {
       throw new Error(`Realm not found: ${realmId}`);
     }
@@ -387,8 +496,9 @@ export class RealmService {
    */
   async removeMCPServer(realmId: RealmId, serverId: string): Promise<void> {
     await this.loadingPromise;
+    const key = await this.resolveRealmKey(realmId);
 
-    const realm = this.realms.get(realmId);
+    const realm = this.realms.get(key);
     if (!realm) {
       throw new Error(`Realm not found: ${realmId}`);
     }
@@ -413,8 +523,9 @@ export class RealmService {
    */
   async getMCPServers(realmId: RealmId): Promise<string[]> {
     await this.loadingPromise;
+    const key = await this.resolveRealmKey(realmId);
 
-    const realm = this.realms.get(realmId);
+    const realm = this.realms.get(key);
     if (!realm) {
       throw new Error(`Realm not found: ${realmId}`);
     }
