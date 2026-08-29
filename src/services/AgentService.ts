@@ -158,8 +158,8 @@ interface AgentValidationResult {
  *
  * Agents are identified by slug (migrations 016 and 018); the agents.id UUID is
  * a deployment-local surrogate that never surfaces above the repository. An
- * explicitly supplied id wins over the display name, matching how every existing
- * agent's slug was backfilled.
+ * explicitly supplied id wins over the display name (after canonicalisation),
+ * except when it is UUID-shaped (treated as a legacy surrogate), in which case a slug is derived from the name.
  *
  * The explicit id goes through the *same derivation* as a name rather than being
  * taken verbatim — which is what it used to be. `uq_agents_slug_id` is
