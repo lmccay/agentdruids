@@ -147,7 +147,7 @@ export class AsyncResultManager {
           status: row.status,
           result: row.result,
           error: row.error_message,
-          ...(row.progress ? { progress: row.progress } : {}),
+          ...(row.progress !== null && row.progress !== undefined ? { progress: row.progress } : {}),
           metadata: row.metadata
         };
         this.results.set(result.requestId, result);
