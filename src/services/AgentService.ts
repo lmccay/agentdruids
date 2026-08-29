@@ -154,6 +154,60 @@ interface AgentValidationResult {
 }
 
 /**
+ * Decide the slug id a new agent will be identified by.
+ *
+ * Agents are identified by slug (migrations 016 and 018); the agents.id UUID is
+ * a deployment-local surrogate that never surfaces above the repository. An
+ * explicitly supplied id wins over the display name (after canonicalisation),
+ * except when it is UUID-shaped (treated as a legacy surrogate), in which case a slug is derived from the name.
+ *
+ * The explicit id goes through the *same derivation* as a name rather than being
+ * taken verbatim — which is what it used to be. `uq_agents_slug_id` is
+ * case-sensitive, so "Facebook-Elemental" and "facebook-elemental" would have
+ * been accepted as two distinct agents, and `resolveDbId` is an exact match
+ * against that index, so a lookup under either spelling could miss the other.
+ *
+ * Normalising rather than rejecting is the deliberate choice, and the one
+ * `RealmService.createRealm` already makes: a caller supplying a *name* already
+ * gets it transformed, so a caller supplying an *id* should not instead meet an
+ * error. The derivation is idempotent over its own output, so an
+ * already-canonical slug passes through unchanged.
+ *
+ * Two shapes are rejected rather than normalised, because no normalisation makes
+ * them usable as identity.
+ *
+ * @throws if no alphanumeric content is available to derive a slug from, or if
+ *   the resulting slug has the shape of a UUID.
+ */
+export function resolveAgentSlugId(request: { id?: string; name: string }): string {
+  const requestedSlug =
+    request.id && !isValidUUID(request.id) ? slugifyName(String(request.id)) : undefined;
+  const agentId = requestedSlug || slugifyName(request.name ?? '');
+
+  // '-' is what a name of pure punctuation collapses to, since the derivation
+  // deliberately does not trim. It satisfies the lowercase constraint but is not
+  // an identity anyone can use, so it is refused alongside the empty string.
+  if (!agentId || agentId === '-') {
+    throw new Error(
+      'Cannot derive an agent slug id: provide an id, or a name containing alphanumeric characters'
+    );
+  }
+
+  // An agent *named* like a UUID derives a UUID-shaped slug, which every
+  // resolver reads as the deployment-local surrogate rather than as identity —
+  // AgentRepository.resolveDbId would look it up in the wrong column and miss.
+  // Refused here with a comprehensible message, as on the realm path.
+  if (isValidUUID(agentId)) {
+    throw new Error(
+      `"${agentId}" cannot be used as an agent id: it has the shape of an internal ` +
+      'identifier. Choose a name or id that is not formatted as a UUID.'
+    );
+  }
+
+  return agentId;
+}
+
+/**
  * Agent Service for managing agent lifecycle, LLM integration, and policy enforcement
  */
 export class AgentService {
@@ -381,16 +435,10 @@ export class AgentService {
       throw new Error(`Access denied: ${accessDecision.reason}`);
     }
 
-    // Agents are identified by slug. An explicitly supplied slug wins; otherwise
-    // one is derived from the display name, which matches how every existing
-    // agent's slug was backfilled. A caller passing a UUID is honouring the old
-    // contract, so derive a slug for it rather than persisting the UUID as
-    // identity.
-    const requestedId = request.id && !isValidUUID(request.id) ? request.id : undefined;
-    const agentId = requestedId || slugifyName(request.name);
+    const agentId = resolveAgentSlugId(request);
 
-    if (!agentId) {
-      throw new Error('Cannot derive an agent slug id: provide an id, or a name containing alphanumeric characters');
+    if (request.id && agentId !== request.id && !isValidUUID(request.id)) {
+      console.log(`🔄 Normalised requested agent id "${request.id}" to canonical slug "${agentId}"`);
     }
 
     const now = Date.now().toString();

@@ -14,6 +14,7 @@
  */
 
 import { slugifyName, isValidUUID } from '../../src/utils/uuidUtils';
+import { resolveAgentSlugId } from '../../src/services/AgentService';
 
 describe('Agent slug identity', () => {
   describe('slugifyName', () => {
@@ -59,6 +60,76 @@ describe('Agent slug identity', () => {
       // identity, and AgentService rejects them rather than persisting one.
       expect(slugifyName('!!!')).toBe('-');
       expect(slugifyName('')).toBe('');
+    });
+  });
+
+  describe('resolveAgentSlugId', () => {
+    // The function createAgent calls, not a copy of it. An explicit request.id
+    // used to be persisted verbatim, so a non-canonical id became identity —
+    // and uq_agents_slug_id is case-sensitive, so 'Facebook-Elemental' and
+    // 'facebook-elemental' would have been two distinct agents.
+
+    it('derives from the name when no id is supplied', () => {
+      expect(resolveAgentSlugId({ name: 'System Coordinator' })).toBe('system-coordinator');
+    });
+
+    it('prefers an explicitly supplied id over the name', () => {
+      expect(resolveAgentSlugId({ id: 'risk-narrative', name: 'Something Else' }))
+        .toBe('risk-narrative');
+    });
+
+    it('canonicalises an explicit id instead of taking it verbatim', () => {
+      // The defect. Both spellings must land on one identity, not two.
+      expect(resolveAgentSlugId({ id: 'Facebook-Elemental', name: 'x' }))
+        .toBe('facebook-elemental');
+      expect(resolveAgentSlugId({ id: 'Facebook Elemental', name: 'x' }))
+        .toBe('facebook-elemental');
+      expect(resolveAgentSlugId({ id: 'FACEBOOK_ELEMENTAL', name: 'x' }))
+        .toBe('facebook-elemental');
+    });
+
+    it('leaves an already-canonical id untouched', () => {
+      // Idempotence matters: creation upserts on slug_id, so re-creating an
+      // existing agent under its own id must not shift its identity.
+      for (const slug of ['facebook-elemental', 'campaign-coordinator-druid', 'twitter-x-elemental']) {
+        expect(resolveAgentSlugId({ id: slug, name: 'ignored' })).toBe(slug);
+      }
+    });
+
+    it('derives a slug for a caller still passing a UUID as the id', () => {
+      // Honouring the old contract, not persisting the surrogate as identity.
+      expect(resolveAgentSlugId({
+        id: 'd7174e55-98ea-44ee-a6e2-e4eb86f8b264',
+        name: 'Positioner Elemental',
+      })).toBe('positioner-elemental');
+    });
+
+    it('refuses a name with no alphanumeric content', () => {
+      // '-' passes the lowercase constraint but is not a usable identity, and
+      // was previously accepted because only the empty string was checked.
+      expect(() => resolveAgentSlugId({ name: '!!!' })).toThrow(/alphanumeric/);
+      expect(() => resolveAgentSlugId({ name: '' })).toThrow(/alphanumeric/);
+    });
+
+    it('refuses a slug shaped like an internal identifier', () => {
+      // resolveDbId routes a UUID-shaped id to the surrogate column, so this
+      // agent could never be looked up by its own identity.
+      expect(() => resolveAgentSlugId({ name: 'd7174e55-98ea-44ee-a6e2-e4eb86f8b264' }))
+        .toThrow(/shape of an internal identifier/);
+    });
+
+    it('produces a slug that satisfies agents_slug_id_lowercase', () => {
+      // Migration 024's CHECK is the backstop; this is the primary defence, and
+      // the two must not disagree.
+      const inputs = [
+        { name: 'Tier 2 Reviewer' },
+        { id: 'Mixed_Case Id', name: 'x' },
+        { id: 'ALLCAPS', name: 'x' },
+      ];
+      for (const input of inputs) {
+        const slug = resolveAgentSlugId(input);
+        expect(slug).toBe(slug.toLowerCase());
+      }
     });
   });
 
