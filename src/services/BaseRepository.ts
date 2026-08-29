@@ -122,9 +122,31 @@ export abstract class BaseRepository<T extends BaseEntity> {
     // Create entity with just the updated fields to get the correct column mapping
     const updatesWithTimestamp = { ...updates, updatedAt: new Date().toISOString() } as Partial<T>;
     const updatesRow = this.entityToRow(updatesWithTimestamp as T);
-    
-    // Get the database column names that correspond to the updated entity properties
-    const updateColumns = Object.keys(updatesRow).filter(col => col !== 'id' && col !== 'created_at');
+
+    // Get the database column names that correspond to the updated entity
+    // properties, dropping any that resolved to `undefined`.
+    //
+    // This method accepts a Partial, but entityToRow is written against a whole
+    // entity — a subclass that reads fields unconditionally (`name: agent.name`)
+    // therefore yields `undefined` for every field the caller omitted, and those
+    // were being written as NULL. A partial update silently wiped everything it
+    // did not mention: loud where a NOT NULL constraint caught it, silent data
+    // loss everywhere else. The `as T` cast is what let it past the type system.
+    //
+    // `null` is deliberately preserved. A caller passing null is explicitly
+    // clearing a column, which is different from omitting the field, and the
+    // distinction is the whole point of the filter.
+    const updateColumns = Object.keys(updatesRow).filter(
+      (col) => col !== 'id' && col !== 'created_at' && updatesRow[col] !== undefined
+    );
+
+    // Nothing mappable left (the caller passed only id/createdAt, or fields this
+    // entity does not persist). Returning the existing row is the same outcome
+    // as the no-op check above, and avoids emitting `SET` with no assignments.
+    if (updateColumns.length === 0) {
+      return existing;
+    }
+
     const values = updateColumns.map(col => updatesRow[col]);
 
     const setClause = updateColumns.map((col, index) => `${col} = $${index + 2}`).join(', ');
