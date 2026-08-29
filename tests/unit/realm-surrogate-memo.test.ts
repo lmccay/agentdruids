@@ -18,6 +18,7 @@
  */
 
 import { RealmService } from '../../src/services/RealmService';
+import { RepositoryManager } from '../../src/services/RepositoryManager';
 
 const LEGACY_UUID = '3f2a9c1e-7b64-4d2f-9a10-5c8e6b0d4471';
 
@@ -53,18 +54,30 @@ function fakeRepositoryManager(rows: Map<string, string>) {
   return manager;
 }
 
+/**
+ * Stand the service up with the stand-in already in place.
+ *
+ * RepositoryManager.initialize is mocked rather than the manager being swapped in
+ * afterwards, so no Postgres connection is attempted. That is not only about
+ * hygiene: the constructor's real initialise path cost ~30s of wall clock per run
+ * for ~1s of assertions. Mocking it also means the service loads its realm map
+ * through loadFromDatabase, exercising its own initialisation rather than having
+ * that state hand-assembled by the test.
+ */
 async function serviceWith(rows: Map<string, string>) {
-  const service = new RealmService();
-  // Let the constructor's initialisation settle before replacing what it built;
-  // otherwise loadFromDatabase could overwrite the injected manager's effects.
-  await (service as any).loadingPromise;
   const manager = fakeRepositoryManager(rows);
-  (service as any).repositoryManager = manager;
-  (service as any).realms = new Map(
-    [...rows.keys()].map((slug) => [slug, { id: slug, name: slug }])
-  );
+  jest
+    .spyOn(RepositoryManager, 'initialize')
+    .mockResolvedValue(manager as unknown as RepositoryManager);
+
+  const service = new RealmService();
+  await (service as any).loadingPromise;
   return { service, manager };
 }
+
+afterEach(() => {
+  jest.restoreAllMocks();
+});
 
 describe('Realm surrogate memo', () => {
   it('resolves a legacy surrogate to its slug and then serves it from memory', async () => {

@@ -197,16 +197,6 @@ export class RealmService {
   }
   
   /**
-   * Resolve any accepted realm reference to the slug the in-memory map is keyed
-   * by.
-   *
-   * The application speaks slugs, but UUIDs still arrive from outside: external
-   * MCP clients hold ids issued before migration 020, and REST callers may have
-   * bookmarked one. Rather than break them, a UUID is translated once via the
-   * unique index and cached. Anything unrecognised is returned unchanged so the
-   * caller's own "not found" handling applies.
-   */
-  /**
    * Drop every memoised surrogate that resolved to `slug`.
    *
    * The map is keyed by surrogate, not slug, so the entries for a given realm
@@ -222,6 +212,16 @@ export class RealmService {
     }
   }
 
+  /**
+   * Resolve any accepted realm reference to the slug the in-memory map is keyed
+   * by.
+   *
+   * The application speaks slugs, but UUIDs still arrive from outside: external
+   * MCP clients hold ids issued before migration 020, and REST callers may have
+   * bookmarked one. Rather than break them, a UUID is translated once via the
+   * unique index and cached. Anything unrecognised is returned unchanged so the
+   * caller's own "not found" handling applies.
+   */
   async resolveRealmKey(idOrSlug: RealmId): Promise<RealmId> {
     if (!idOrSlug || this.realms.has(idOrSlug)) {
       return idOrSlug;
