@@ -16,6 +16,7 @@ import {
   RefreshCw
 } from 'lucide-react';
 import { agentApi, realmApi, Agent, CreateAgentRequest, UpdateAgentRequest, ModelOption, Realm } from '../services/api';
+import { grantRealmIds, reconcileRealmGrants, type RealmGrant } from '../utils/realmGrants';
 import { CommaInput } from '../components/CommaInput';
 
 interface AgentFormData {
@@ -26,7 +27,19 @@ interface AgentFormData {
   systemPrompt: string;
   // Realm associations based on agent type
   boundRealmId: string; // For Elementals - single realm binding
-  allowedRealms: string[]; // For Druids - multiple realm access
+  /** Realm ids the druid may reach — drives the checkboxes. Ids only. */
+  allowedRealms: string[];
+  /**
+   * The grant entries exactly as the agent stores them, kept so a save can
+   * preserve metadata the form never displays.
+   *
+   * accessibleRealms is polymorphic: older rows hold bare id strings, the model
+   * types it as { realmId, permissions, grantedAt, grantedBy } objects, and
+   * migration 021 deliberately preserves both. Deriving allowedRealms from it
+   * and writing that array straight back would silently discard every object
+   * entry's permissions and provenance.
+   */
+  realmGrants: RealmGrant[];
   // Extended fields for full agent configuration
   capabilities: string[];
   expertise: string[];
@@ -234,7 +247,8 @@ function AgentModal({
     systemPrompt: agent?.systemPrompt || '',
     // Initialize realm associations based on agent type and existing data
     boundRealmId: agent?.type === 'elemental' ? (agent?.realmAccess?.boundRealmId || '') : '',
-    allowedRealms: agent?.type === 'druid' ? (agent?.realmAccess?.accessibleRealms || []) : [],
+    allowedRealms: agent?.type === 'druid' ? grantRealmIds(agent?.realmAccess?.accessibleRealms) : [],
+    realmGrants: agent?.type === 'druid' ? (agent?.realmAccess?.accessibleRealms ?? []) : [],
     capabilities: agent?.capabilities || [],
     expertise: agent?.specialization?.expertise || [],
     knowledgeNamespaces: agent?.specialization?.knowledgeNamespaces || [],
@@ -274,7 +288,8 @@ function AgentModal({
         domain: agent.specialization?.domain || '',
         systemPrompt: agent.systemPrompt || '',
         boundRealmId: agent.type === 'elemental' ? (agent.realmAccess?.boundRealmId || '') : '',
-        allowedRealms: agent.type === 'druid' ? (agent.realmAccess?.accessibleRealms || []) : [],
+        allowedRealms: agent.type === 'druid' ? grantRealmIds(agent.realmAccess?.accessibleRealms) : [],
+        realmGrants: agent.type === 'druid' ? (agent.realmAccess?.accessibleRealms ?? []) : [],
         capabilities: agent.capabilities || [],
         expertise: agent.specialization?.expertise || [],
         knowledgeNamespaces: agent.specialization?.knowledgeNamespaces || [],
@@ -310,6 +325,7 @@ function AgentModal({
         systemPrompt: '',
         boundRealmId: '',
         allowedRealms: [],
+        realmGrants: [],
         capabilities: ['reasoning', 'memory'], // Default capabilities required by validation
         expertise: [],
         knowledgeNamespaces: [],
@@ -1327,7 +1343,7 @@ ${extension}`;
             return { boundRealmId: data.boundRealmId };
           } else if (data.type === 'druid' && data.allowedRealms.length > 0) {
             return {
-              accessibleRealms: data.allowedRealms
+              accessibleRealms: reconcileRealmGrants(data.realmGrants, data.allowedRealms)
               // Druids should NOT have boundRealmId - they can travel between realms
             };
           }
@@ -1418,7 +1434,7 @@ ${extension}`;
             return { boundRealmId: data.boundRealmId }; // Always include, even if empty
           } else if (data.type === 'druid') {
             return {
-              accessibleRealms: data.allowedRealms
+              accessibleRealms: reconcileRealmGrants(data.realmGrants, data.allowedRealms)
               // Druids should NOT have boundRealmId - they can travel between realms
             };
           }
