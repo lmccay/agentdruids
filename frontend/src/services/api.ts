@@ -1,4 +1,5 @@
 import axios from 'axios';
+import type { RealmGrant } from '../utils/realmGrants';
 
 // Types
 export interface Agent {
@@ -41,7 +42,7 @@ export interface Agent {
   realmId?: string; // Deprecated - kept for backward compatibility
   realmAccess?: {
     boundRealmId?: string; // For Elementals
-    accessibleRealms?: string[]; // For Druids - simplified to just realm IDs
+    accessibleRealms?: RealmGrant[]; // For Druids - bare ids or { realmId, permissions, ... }
   };
   mcpTools?: string[]; // MCP tool patterns with wildcard support (e.g., "github:*", "github:list_*")
   promptConfig?: {
@@ -78,7 +79,7 @@ export interface CreateAgentRequest {
   realmId?: string; // Deprecated - use realmAccess instead
   realmAccess?: {
     boundRealmId?: string; // For Elementals
-    accessibleRealms?: string[]; // For Druids
+    accessibleRealms?: RealmGrant[]; // For Druids - bare ids or { realmId, permissions, ... }
   };
   capabilities?: string[];
   expertise?: string[];
@@ -144,7 +145,7 @@ export interface UpdateAgentRequest {
   realmId?: string; // Deprecated - kept for backward compatibility
   realmAccess?: {
     boundRealmId?: string;
-    accessibleRealms?: string[];
+    accessibleRealms?: RealmGrant[];
   };
   modelId?: string; // Named model configuration ID
   mcpTools?: string[]; // MCP tool patterns with wildcard support
