@@ -55,7 +55,7 @@ describe('Session realm presence', () => {
 
   it('canonicalises the sentinel to lower case', () => {
     // So downstream comparisons that test the literal still behave.
-    expect(initialRealmFor({ currentRealmId: 'Default' })).toBe('default');
+    expect(initialRealmFor({ currentRealmId: 'Default' })).toBe(REALM_SENTINEL_SLUG);
   });
 
   it('does not mistake a realm merely starting with "default" for the sentinel', () => {
