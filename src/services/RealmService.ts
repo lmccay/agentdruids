@@ -87,7 +87,9 @@ export class RealmService {
       status: serviceRealm.status,
       configuration: serviceRealm.configuration || {},
       agents: serviceRealm.agentIds || [],
-      mcp_servers: serviceRealm.mcpServers || [],
+      // camelCase: entityToRow tests `realm.mcpServers`, so a snake_case key here
+      // was silently ignored and the field never reached the INSERT.
+      mcpServers: serviceRealm.mcpServers || [],
       createdBy: 'system',
       createdAt: serviceRealm.createdAt,
       updatedAt: serviceRealm.updatedAt,
@@ -314,10 +316,18 @@ export class RealmService {
 
         // Don't add updated_at here - BaseRepository will handle it automatically
 
-        await this.repositoryManager.realms.update(realmId, dbUpdates);
-        console.log(`💾 Updated realm ${realmId} in database`);
+        await this.repositoryManager.realms.update(key, dbUpdates);
+        console.log(`💾 Updated realm ${key} in database`);
       } catch (error) {
-        console.warn('Failed to update realm in database:', error instanceof Error ? error.message : 'Unknown error');
+        // Loud, and re-thrown. The in-memory map was already updated above, so
+        // swallowing this returns success for a write that did not happen — the
+        // caller then reads its own change straight back out of memory and sees
+        // no problem until a restart loses it. That is exactly how the missing
+        // mcp_servers column stayed hidden.
+        const message = error instanceof Error ? error.message : 'Unknown error';
+        console.error(`❌ Failed to persist realm ${key}; rolling back the in-memory copy:`, message);
+        this.realms.set(key, realm);
+        throw new Error(`Failed to update realm ${key}: ${message}`);
       }
     }
     
