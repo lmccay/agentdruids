@@ -5,7 +5,15 @@ import { MCPConfigLoader } from './mcp/MCPConfigLoader';
 
 export class RealmService {
   private realms: Map<RealmId, any> = new Map();
-  /** Legacy realm UUID -> canonical slug, memoised from the unique index. */
+  /**
+   * Legacy realm UUID -> canonical slug, memoised from the unique index.
+   *
+   * Must be invalidated wherever `realms` is, and wherever a slug's underlying
+   * row changes identity. A realm deleted and recreated under the same name
+   * keeps its slug but receives a *new* surrogate UUID from the column default,
+   * so a surviving entry would route a caller holding the old surrogate to the
+   * new realm. See `forgetLegacyIdsFor`.
+   */
   private uuidToSlug: Map<string, string> = new Map();
   private loadingPromise: Promise<void>;
   private repositoryManager: RepositoryManager | null = null;
@@ -189,6 +197,22 @@ export class RealmService {
   }
   
   /**
+   * Drop every memoised surrogate that resolved to `slug`.
+   *
+   * The map is keyed by surrogate, not slug, so the entries for a given realm
+   * can only be found by value. There is at most a handful of them (one per
+   * distinct legacy id ever presented), and this runs on delete, so the scan is
+   * not worth indexing away.
+   */
+  private forgetLegacyIdsFor(slug: RealmId): void {
+    for (const [uuid, cachedSlug] of this.uuidToSlug) {
+      if (cachedSlug === slug) {
+        this.uuidToSlug.delete(uuid);
+      }
+    }
+  }
+
+  /**
    * Resolve any accepted realm reference to the slug the in-memory map is keyed
    * by.
    *
@@ -369,7 +393,12 @@ export class RealmService {
     
     // Remove from memory
     this.realms.delete(key);
-    
+    // And forget any legacy surrogate that pointed here. Safe to do before the
+    // database delete: the map is a pure cache over the unique index, so if the
+    // delete fails and the realm is restored below, the next lookup simply
+    // repopulates it from the still-present row.
+    this.forgetLegacyIdsFor(key);
+
     // Remove from database if available
     if (this.repositoryManager) {
       try {
@@ -422,8 +451,11 @@ export class RealmService {
   async refreshRealmCache(): Promise<void> {
     console.log('🔄 Refreshing realm cache from database...');
 
-    // Clear current cache
+    // Clear current cache. The surrogate memo goes with it — a refresh exists to
+    // pick up changes made by another process, which includes a realm having
+    // been deleted and recreated with a new surrogate behind the same slug.
     this.realms.clear();
+    this.uuidToSlug.clear();
 
     // Reload from database
     await this.loadFromDatabase();
