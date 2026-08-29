@@ -1,4 +1,5 @@
 import { AgentSessionState, SessionAgentManager } from '../models/SessionAgentState';
+import { isRealmSentinel, REALM_SENTINEL_SLUG } from '../utils/uuidUtils';
 import { AgentTask } from '../models/TaskQueueState';
 import { TaskQueueManagerImpl } from './TaskQueueManager';
 
@@ -7,6 +8,35 @@ import { TaskQueueManagerImpl } from './TaskQueueManager';
  * Each coordination session gets its own isolated view of agent states
  * and integrates with task queue for proper concurrency control
  */
+/**
+ * Where an agent starts a session.
+ *
+ * Uses the same precedence as AgentService.resolveCurrentRealm — currentRealmId,
+ * then boundRealmId, then the sentinel.
+ *
+ * The order matters and was previously reversed here (boundRealmId first) while
+ * a comment claimed it matched. The consequence was not cosmetic: an agent that
+ * had explicitly left its realm — currentRealmId set to the sentinel with
+ * boundRealmId still set — was placed back inside its bound realm for the whole
+ * session. And because resolveCurrentRealm consults session state *first*, that
+ * session value then won over the agent's own record, silently relocating it.
+ * Migration 021 guards the same mistake at the database level.
+ *
+ * So an elemental with no travel history starts in its bound realm, an agent
+ * that has left starts in none, and a druid with neither is global-only until it
+ * travels.
+ *
+ * 'default' is the sentinel for "no realm / global-only", never a realm id. It
+ * is canonicalised to lower case so downstream comparisons that test the literal
+ * rather than calling isRealmSentinel still behave.
+ */
+export function resolveInitialSessionRealm(
+  ra: { currentRealmId?: string; boundRealmId?: string } | undefined | null
+): string {
+  const resolved = ra?.currentRealmId || ra?.boundRealmId || REALM_SENTINEL_SLUG;
+  return isRealmSentinel(resolved) ? REALM_SENTINEL_SLUG : resolved;
+}
+
 export class SessionAgentManagerImpl implements SessionAgentManager {
   sessionId: string;
   agentStates: Map<string, AgentSessionState> = new Map();
@@ -29,11 +59,7 @@ export class SessionAgentManagerImpl implements SessionAgentManager {
   createAgentSessionState(agentId: string, baseAgent: any): AgentSessionState {
     const ra = baseAgent.realmAccess;
 
-    // Initial presence: an elemental starts present in its bound realm; a druid
-    // (no bound realm) starts with no realm — global-only until it travels.
-    // 'default' is the sentinel for "no realm / global-only" (matches
-    // AgentService.resolveCurrentRealm), NOT a realm id.
-    const initialRealm: string = ra?.boundRealmId || ra?.currentRealmId || 'default';
+    const initialRealm = resolveInitialSessionRealm(ra);
 
     // Realms this agent may reach in-session: bound realm ∪ accessibleRealms.
     // accessibleRealms entries may be plain id strings or { realmId } objects.
@@ -59,7 +85,7 @@ export class SessionAgentManagerImpl implements SessionAgentManager {
         tasksCompleted: 0,
         averageResponseTime: 0,
         errorCount: 0,
-        realmsVisited: initialRealm !== 'default' ? [initialRealm] : []
+        realmsVisited: isRealmSentinel(initialRealm) ? [] : [initialRealm]
       }
     };
 
