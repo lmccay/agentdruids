@@ -18,6 +18,7 @@ import { getWorldTreeQueryService } from './WorldTreeQueryService';
 import { RealmService } from './RealmService';
 import { resolveSearchScope } from './searchScope';
 import { isValidUUID, slugifyName } from '../utils/uuidUtils';
+import { grantRealmId, grantRealmIds, grantsIncludeRealm } from '../utils/realmGrants';
 import { MCPConfigLoader } from './mcp/MCPConfigLoader';
 import { HttpMCPClient } from './mcp/HttpMCPClient';
 import { SSEMCPClient } from './mcp/SSEMCPClient';
@@ -32,12 +33,8 @@ function collectAgentRealms(ra?: RealmAccess): string[] {
   const realms = new Set<string>();
   if (ra?.boundRealmId) realms.add(ra.boundRealmId);
   if (ra?.currentRealmId) realms.add(ra.currentRealmId);
-  for (const ar of ra?.accessibleRealms ?? []) {
-    // accessibleRealms may be stored as plain realm-id strings or as
-    // { realmId, ... } objects; handle both (matches agentCanAccessRealm).
-    const id = typeof ar === 'string' ? ar : (ar as any)?.realmId;
-    if (id) realms.add(id);
-  }
+  // accessibleRealms may hold bare id strings or { realmId, ... } objects.
+  for (const id of grantRealmIds(ra?.accessibleRealms as any)) realms.add(id);
   return Array.from(realms);
 }
 
@@ -462,18 +459,24 @@ export class AgentService {
           }
         } else if (agent.realmAccess.accessibleRealms && agent.realmAccess.accessibleRealms.length > 0) {
           // For druid agents, add to all accessible realms
-          for (const realmAccess of agent.realmAccess.accessibleRealms) {
-            const realm = await this.realmService.getRealm(realmAccess.realmId);
+          // Read the id through the helper: entries may be bare strings, in
+          // which case `.realmId` was undefined and getRealm(undefined) found
+          // nothing — so a druid with string grants was never registered in any
+          // of its accessible realms.
+          for (const grant of agent.realmAccess.accessibleRealms) {
+            const grantRealm = grantRealmId(grant as any);
+            if (!grantRealm) continue;
+            const realm = await this.realmService.getRealm(grantRealm);
             if (realm) {
               // Update only the agentIds field to avoid schema issues
               const updatedAgentIds = realm.agentIds.includes(agentId) 
                 ? realm.agentIds 
                 : [...realm.agentIds, agentId];
               // Only update agentIds field to avoid field mapping issues
-              await this.realmService.updateRealm(realmAccess.realmId, { 
-                agentIds: updatedAgentIds 
+              await this.realmService.updateRealm(grantRealm, {
+                agentIds: updatedAgentIds
               });
-              console.log(`🌍 Added agent ${agentId} to accessible realm ${realmAccess.realmId}`);
+              console.log(`🌍 Added agent ${agentId} to accessible realm ${grantRealm}`);
             }
           }
         }
@@ -2820,9 +2823,7 @@ Please use your available tools to execute this task now and provide your comple
     // the typed model — and migration 021 preserves both, so each entry is
     // normalised before comparison rather than assuming a shape.
     const grantedSlugs = await this.realmService.resolveRealmIds(
-      (agent.realmAccess?.accessibleRealms ?? []).map(
-        (realm: any) => (typeof realm === 'string' ? realm : realm?.realmId)
-      )
+      grantRealmIds(agent.realmAccess?.accessibleRealms as any)
     );
     const hasAccess = grantedSlugs.includes(targetRealmId);
 
@@ -2897,9 +2898,7 @@ Please use your available tools to execute this task now and provide your comple
     if (!ra) return false;
     // Callers are expected to pass a canonical slug; see toolGetRealmElementals.
     if (ra.boundRealmId === realmId || ra.currentRealmId === realmId) return true;
-    return (ra.accessibleRealms ?? []).some(
-      (r: any) => (typeof r === 'string' ? r : r.realmId) === realmId
-    );
+    return grantsIncludeRealm(ra.accessibleRealms as any, realmId);
   }
 
   private async toolGetRealmElementals(callingAgent: Agent, params: { realm_id: string }): Promise<any> {

@@ -1,4 +1,5 @@
 import { AgentService } from './AgentService';
+import { grantsIncludeRealm } from '../utils/realmGrants';
 import { RealmService } from './RealmService';
 
 /**
@@ -95,14 +96,9 @@ export class RealmTravelService {
 
       // Check if realm is in agent's accessible realms list
       // Handle both string array and object array formats
-      const hasAccess = agent.realmAccess.accessibleRealms.some(
-        (access: any) => {
-          if (typeof access === 'string') {
-            return access === targetRealmId;
-          } else {
-            return access.realmId === targetRealmId;
-          }
-        }
+      const hasAccess = grantsIncludeRealm(
+        agent.realmAccess.accessibleRealms as any,
+        targetRealmId
       );
 
       return hasAccess;
