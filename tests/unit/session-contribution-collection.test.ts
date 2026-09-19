@@ -223,6 +223,63 @@ describe('collectSessionContributions', () => {
       expect(records[0]?.content).toBe('output of step 1');
     });
 
+    it('keeps the orchestration representation when the plan is supplied again', () => {
+      // The session is persisted twice on the orchestration path: once with the
+      // plan, then again after synthesis. generateOrchestrationResult copies the
+      // completed steps into finalResult.participantContributions, so a
+      // plan-less second collect returns the *same step keys* in a poorer shape
+      // — agentRole 'participant', no actionType, no description — and
+      // persistContributions upserts on (session_id, step_number,
+      // sub_step_number), overwriting the richer rows. Passing the plan to the
+      // republish is what prevents that; this pins the shape it must produce.
+      const session = baseSession({
+        finalResult: {
+          summary: 's',
+          participantContributions: [
+            fallbackContribution('campaign-coordinator-druid', 'output of step 1'),
+          ],
+          coordinatorAnalysis: '',
+          recommendations: [],
+          publishedTo: [],
+        },
+      } as Partial<CoordinationSession>);
+      const executed = plan([completedStep(1, 'campaign-coordinator-druid')]);
+
+      const first = collectSessionContributions(session, executed);
+      const republish = collectSessionContributions(session, executed);
+
+      expect(republish).toEqual(first);
+      expect(republish[0]).toMatchObject({
+        agentRole: 'coordinator',
+        actionType: 'travel_and_collaborate',
+        description: 'step 1',
+      });
+    });
+
+    it('degrades the representation if the plan is dropped — why it must be passed', () => {
+      // The failure this guards against, stated explicitly: same step key, same
+      // content, but the metadata the report renders is gone.
+      const session = baseSession({
+        finalResult: {
+          summary: 's',
+          participantContributions: [
+            fallbackContribution('campaign-coordinator-druid', 'output of step 1'),
+          ],
+          coordinatorAnalysis: '',
+          recommendations: [],
+          publishedTo: [],
+        },
+      } as Partial<CoordinationSession>);
+
+      const withPlan = collectSessionContributions(session, plan([completedStep(1, 'campaign-coordinator-druid')]));
+      const withoutPlan = collectSessionContributions(session);
+
+      expect(withoutPlan[0]?.stepNumber).toBe(withPlan[0]?.stepNumber); // collides
+      expect(withoutPlan[0]?.agentRole).toBe('participant');
+      expect(withoutPlan[0]?.actionType).toBeNull();
+      expect(withoutPlan[0]?.description).toBeNull();
+    });
+
     it('falls through a plan with no completed steps to the tasks', () => {
       const records = collectSessionContributions(
         baseSession({

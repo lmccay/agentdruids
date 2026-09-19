@@ -2019,12 +2019,25 @@ CRITICAL: Only assign tasks to DRUIDs. If an Elemental's expertise is needed, as
 
     this.sessions.set(newSessionId, newSession);
 
-    // Start the coordination asynchronously
+    // Start the coordination asynchronously.
+    //
+    // executeSimpleCoordination only marks the session completed; it does not
+    // persist or publish. performCoordination does that for its own callers, but
+    // this entry point bypasses it, so a rerun produced contributions and then
+    // wrote no session row and no contribution rows at all. Persisting here
+    // keeps the invariant that a completed session with contributions is never
+    // recorded as empty, whichever entry point ran it.
     const coordinator = this.getBuiltInCoordinator();
-    this.executeSimpleCoordination(newSession, coordinator).catch((error: Error) => {
-      console.error('Error executing rerun session:', error);
-      newSession.status = 'failed';
-    });
+    this.executeSimpleCoordination(newSession, coordinator)
+      .then(() =>
+        this.persistAndPublishSession(newSession).catch((err) => {
+          console.error(`⚠️ persistAndPublishSession failed for rerun ${newSessionId}:`, err);
+        })
+      )
+      .catch((error: Error) => {
+        console.error('Error executing rerun session:', error);
+        newSession.status = 'failed';
+      });
 
     return {
       newSessionId,
@@ -2232,14 +2245,22 @@ When synthesizing results, focus on:
     try {
       session.status = 'in_progress';
 
+      // Held beyond the try so the post-synthesis republish below can pass it.
+      // Without it that call collects contributions plan-lessly and upserts a
+      // poorer representation over the rows the orchestration path already
+      // wrote — same step keys, but agentRole 'participant' and no actionType
+      // or description. Undefined on the fallback path, which is correct.
+      let executedPlan: OrchestrationPlan | undefined;
+
       // TRY ORCHESTRATION FIRST, FALL BACK TO SIMPLE COORDINATION IF IT FAILS
       try {
         console.log(`🎯 Attempting orchestration workflow for ${session.participantIds.length} participants...`);
         const plan = await this.createOrchestrationPlan(session);
-        
+        executedPlan = plan;
+
         console.log(`🎯 Executing ${plan.steps.length} orchestration steps...`);
         await this.executeOrchestrationPlan(session, plan);
-        
+
         console.log(`✅ Orchestration workflow completed successfully`);
       } catch (orchestrationError) {
         console.log(`⚠️ Orchestration failed, falling back to simple coordination approach:`, orchestrationError instanceof Error ? orchestrationError.message : 'Unknown error');
@@ -2361,7 +2382,10 @@ When synthesizing results, focus on:
 
       // Republish after post-orchestration synthesis so publications carry the
       // final integratedContent. Idempotent — ON CONFLICT UPDATE in publishers.
-      await this.persistAndPublishSession(session).catch((err) => {
+      // The plan is passed so this republish writes the same representation the
+      // first persist did; ON CONFLICT updates agent_role, action_type and
+      // description, so a plan-less collect here would overwrite them.
+      await this.persistAndPublishSession(session, executedPlan).catch((err) => {
         console.error(`⚠️ persistAndPublishSession failed for ${session.id}:`, err);
       });
 
@@ -3054,15 +3078,31 @@ EXPECTATION: Deliver enhanced story content that seamlessly integrates technical
 
     const contributions = collectSessionContributions(session, plan);
 
-    if (contributions.length === 0 && (session.finalResult?.participantContributions?.length ?? 0) > 0) {
-      // Should be unreachable — collectSessionContributions reads that collection.
-      // Logged rather than thrown because publication must not fail a session, but
-      // it is an error: it means a fourth shape has appeared and the durable record
-      // is silently incomplete, which is exactly how this went unnoticed before.
-      console.error(
-        `❌ Session ${session.id} produced contributions that none of the known ` +
-        'collections exposed — nothing will be persisted. See collectSessionContributions.'
-      );
+    if (contributions.length === 0) {
+      // Distinguish "a shape we do not read" from "entries we deliberately
+      // dropped". The collector skips contributions with no agentId or no
+      // content, so an empty LLM response is not evidence of an unknown
+      // collection — reporting it as one would send the next reader looking for
+      // a bug that is not there.
+      const raw = session.finalResult?.participantContributions ?? [];
+      const usable = raw.filter((c) => c && c.agentId && c.contribution);
+
+      if (usable.length > 0) {
+        // Should be unreachable: collectSessionContributions reads that
+        // collection. Logged rather than thrown because publication must not
+        // fail a session, but at error level — it means a fourth shape has
+        // appeared and the durable record is silently incomplete, which is
+        // exactly how this went unnoticed before.
+        console.error(
+          `❌ Session ${session.id} produced contributions that none of the known ` +
+          'collections exposed — nothing will be persisted. See collectSessionContributions.'
+        );
+      } else if (raw.length > 0) {
+        console.warn(
+          `⚠️ Session ${session.id} recorded ${raw.length} contribution(s) with no ` +
+          'agent id or no content; nothing to persist.'
+        );
+      }
     }
 
     const sessionRecord: SessionRecord = {
