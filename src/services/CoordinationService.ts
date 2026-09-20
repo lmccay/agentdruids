@@ -102,6 +102,28 @@ export interface CoordinationSession {
 
   // Session-scoped content storage for isolation
   sessionContentManager: SessionContentManagerImpl;
+
+  /**
+   * Outputs of orchestration steps completed so far, in order.
+   *
+   * This is the research a travelling agent "carries" into an activity realm.
+   * Realm-bound specialists are never granted corpus realms — that would be
+   * O(specialists x realms) to administer and would grow with every new realm —
+   * so the only way they see upstream findings is through the session.
+   *
+   * Held on the session rather than on the service so it is scoped and disposed
+   * with the session, per the concurrent-session architecture.
+   */
+  stepOutputs?: CarriedStepOutput[];
+}
+
+/** One completed step's output, addressable by the agent that produced it. */
+export interface CarriedStepOutput {
+  stepNumber: number;
+  agentId: string;
+  description: string;
+  output: string;
+  completedAt: string;
 }
 
 export interface ParticipantTask {
@@ -280,6 +302,83 @@ export function collectSessionContributions(
       durationMs: null,
       createdAt: session.completedAt ?? new Date(),
     }));
+}
+
+/**
+ * Whether an agent may read a session's carried research.
+ *
+ * Session membership is the authorization for carried research — that is the
+ * whole reason specialists are not granted corpus realms. So membership has to
+ * be checked, not assumed from the fact that a session id reached the tool.
+ *
+ * Holding a session id is not membership. `sendToAgent` admits any target that
+ * is active and realm co-located; it never consults `participantIds`. A
+ * participant could therefore delegate to an agent outside the session, and
+ * that agent would inherit the session id and, without this check, read the
+ * session's research.
+ *
+ * The coordinator counts: it drives the session without necessarily appearing
+ * in its own participant list.
+ */
+export function mayReadCarriedResearch(
+  session: { coordinatorId?: string; participantIds?: string[] } | undefined,
+  agentId: string | undefined
+): boolean {
+  if (!session || !agentId) return false;
+  if (session.coordinatorId === agentId) return true;
+  return (session.participantIds ?? []).includes(agentId);
+}
+
+/** How a caller asks for carried research. Ordinals are a last resort. */
+export interface CarriedStepQuery {
+  /** Agent id of the producer — the addressing agents can actually know. */
+  from?: string | undefined;
+  /** Step label, matched case-insensitively as a substring of the description. */
+  role?: string | undefined;
+  /** Explicit step number. Plan-internal and run-dependent; avoid. */
+  step?: number | undefined;
+}
+
+/**
+ * Select carried research from a session's completed steps.
+ *
+ * Addressing is by *producer* or *role*, not by ordinal. A specialist has no
+ * way to know whether positioning was step 2 or step 5 — step numbers are a
+ * plan-internal detail that changes per run — but it does know the ids of its
+ * fellow participants, and step labels are authored in the plan. `step` remains
+ * available for callers that genuinely have a number, and is checked last.
+ *
+ * With no selector, the most recent step is returned: the common case is "what
+ * did the agent before me produce".
+ *
+ * Returns null rather than throwing when nothing matches. An absent input must
+ * be reported to the agent as absent so it can declare a gap — the failure this
+ * whole area exists to prevent is a specialist inventing content because it
+ * silently received nothing.
+ */
+export function selectCarriedStep(
+  outputs: readonly CarriedStepOutput[] | undefined,
+  query: CarriedStepQuery = {}
+): CarriedStepOutput | null {
+  const available = (outputs ?? []).filter((s) => s && s.output);
+  if (available.length === 0) return null;
+
+  if (query.from) {
+    const byAgent = available.filter((s) => s.agentId === query.from);
+    return byAgent.length > 0 ? byAgent[byAgent.length - 1]! : null;
+  }
+
+  if (query.role) {
+    const needle = query.role.toLowerCase();
+    const byRole = available.filter((s) => (s.description ?? '').toLowerCase().includes(needle));
+    return byRole.length > 0 ? byRole[byRole.length - 1]! : null;
+  }
+
+  if (typeof query.step === 'number') {
+    return available.find((s) => s.stepNumber === query.step) ?? null;
+  }
+
+  return available[available.length - 1]!;
 }
 
 /**
@@ -1133,6 +1232,16 @@ CRITICAL: Only assign tasks to DRUIDs. If an Elemental's expertise is needed, as
           step.output = stepOutput;
           step.status = 'completed';
           step.completedAt = new Date();
+
+          // Carry the output on the session so later participants can read it
+          // without being granted the realm it was researched in.
+          (session.stepOutputs ??= []).push({
+            stepNumber: step.stepNumber,
+            agentId: step.agentId,
+            description: step.description,
+            output: stepOutput,
+            completedAt: step.completedAt.toISOString(),
+          });
         } finally {
           this.activeSteps.delete(session.id);
         }
@@ -1193,13 +1302,29 @@ CRITICAL: Only assign tasks to DRUIDs. If an Elemental's expertise is needed, as
     }
 
     // Instead of including full content, just provide content IDs for tool access
-    let context = "Previous step outputs available via get_step_content tool:\n";
+    let context = "Research carried into this session by earlier steps:\n";
     for (const step of completedSteps) {
-      context += `- Step ${step.stepNumber} (${step.description}): Content ID "${step.contentId}"\n`;
+      context += `- ${step.description} — produced by ${step.agentId}\n`;
     }
-    
-    context += `\nIMPORTANT: Use the get_step_content tool to retrieve specific content from previous steps by their Content ID.`;
-    context += `\nExample: get_step_content("${completedSteps[0]?.contentId}") to get the output from Step ${completedSteps[0]?.stepNumber}`;
+    // Addressed by producer or label, never by content id or step number: an
+    // agent cannot know which ordinal a plan assigned, and a call carrying
+    // neither would fall through to "the most recent step", which is a silent
+    // wrong answer rather than a miss.
+    // Serialised, never interpolated. A step description is author-supplied and
+    // may contain quotes, backslashes or newlines; splicing one into a JSON
+    // string literal would produce an invalid example, the model would copy it,
+    // and the tool-call parser would reject the result — reintroducing the
+    // silent dropped-call failure by way of a malformed sample.
+    const example = (params: Record<string, string>) =>
+      `\n  TOOL_CALL: ${JSON.stringify({ tool: 'get_step_content', params })}`;
+
+    context += `\nUse the get_step_content tool to read any of these in full.`;
+    context += `\nAddress it by the agent that produced it, or by a label:`;
+    if (completedSteps[0]) {
+      context += example({ from: completedSteps[0].agentId });
+      context += example({ role: completedSteps[0].description });
+    }
+    context += `\nIf it returns found:false, say what context you are missing. Do not invent it.`;
 
     return context;
   }
@@ -2298,6 +2423,21 @@ When synthesizing results, focus on:
    * participants, and, until the accompanying fix, no persisted contributions
    * at all. Two resolutions of the same thing, disagreeing.
    */
+  /**
+   * Carried research for a session, or [] if the session is unknown.
+   *
+   * Read by AgentService's get_step_content tool. Scoped by session id supplied
+   * by the runtime, never by the caller — an agent cannot name another session.
+   */
+  getCarriedStepOutputs(sessionId: string): CarriedStepOutput[] {
+    return this.sessions.get(sessionId)?.stepOutputs ?? [];
+  }
+
+  /** Whether `agentId` is the coordinator of, or a participant in, this session. */
+  mayReadCarriedResearch(sessionId: string, agentId: string): boolean {
+    return mayReadCarriedResearch(this.sessions.get(sessionId), agentId);
+  }
+
   async getCoordinator(coordinatorId: string): Promise<Coordinator | undefined> {
     const agentService = this.agentService;
     return resolveCoordinator(coordinatorId, {

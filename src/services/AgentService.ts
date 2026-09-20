@@ -23,6 +23,7 @@ import { MCPConfigLoader } from './mcp/MCPConfigLoader';
 import { HttpMCPClient } from './mcp/HttpMCPClient';
 import { SSEMCPClient } from './mcp/SSEMCPClient';
 import { PromptCompositionService } from './PromptCompositionService';
+import { selectCarriedStep } from './CoordinationService';
 import { PromptSourcesConfig } from '../models/PromptConfig';
 import { getSessionPublicationService } from './SessionPublicationService';
 import * as fs from 'fs/promises';
@@ -1604,8 +1605,15 @@ Available tools:
       },
       {
         name: 'get_step_content',
-        description: 'Retrieve content from a previous coordination step by content ID',
-        parameters: { content_id: 'content ID from previous step (e.g., coordination/session-123-step-1)' }
+        description:
+          'Retrieve research carried into this session by an earlier step. ' +
+          'Address it by the agent that produced it, or by a step label — not by number. ' +
+          'Returns found:false if there is no match; say what is missing rather than inventing it.',
+        parameters: {
+          from: 'agent id of the producer, e.g. the coordinator that did the research (optional)',
+          role: 'step label to match, e.g. "research" or "positioning" (optional)',
+          step: 'step number, only if you genuinely have one (optional)'
+        }
       }
     );
 
@@ -2437,7 +2445,7 @@ Your responses and behavior should be appropriate to this realm's context and ch
         return await this.toolAssignSimpleTask(agent.id, params, sessionId, requesterId);
       
       case 'get_step_content':
-        return await this.toolGetStepContent(params);
+        return await this.toolGetStepContent(params, sessionId, agent.id);
       
       case 'travel_to_realm':
         return await this.toolTravelToRealm(agent.id, params, sessionId);
@@ -2626,6 +2634,14 @@ Your responses and behavior should be appropriate to this realm's context and ch
 
     const response = await this.executeAgentPrompt(resolvedAgentId as AgentId, {
       prompt,
+      // The delegated agent runs inside the same session as the delegator. This
+      // was omitted, so a specialist reached through delegate_task executed with
+      // no session at all: it could not read research carried into the session,
+      // its realm presence fell back to global state rather than session-scoped
+      // travel, and its corpus scope lost the session's research realms. Since a
+      // realm-bound specialist has no other source of grounding, that left it
+      // with nothing but the task string.
+      ...(sessionId && { sessionId }),
       collaborationContext: {
         scenarioName,
         ...(agentRole && { agentRole }),
@@ -2828,63 +2844,105 @@ Please use your available tools to execute this task now and provide your comple
   /**
    * Tool: Get content from a previous coordination step
    */
-  private async toolGetStepContent(params: { content_id: string }): Promise<any> {
-    const fs = await import('fs/promises');
-    const path = await import('path');
-    
-    try {
-      // content_id format: "step-session-{sessionId}-step-{stepNumber}"
-      const contentId = params.content_id;
-      
-      if (!contentId.startsWith('step-session-')) {
-        throw new Error(`Invalid content ID format: ${contentId}. Expected format: step-session-{sessionId}-step-{stepNumber}`);
-      }
-      
-      // Extract session ID from content ID (keep the full session-xxx format)
-      const sessionMatch = contentId.match(/step-(session-[^-]+(?:-[^-]+)*)-step-\d+/);
-      if (!sessionMatch || !sessionMatch[1]) {
-        throw new Error(`Could not extract session ID from content ID: ${contentId}`);
-      }
-      
-      const fullSessionId = sessionMatch[1]; // This will be "session-1762622832666-af856d88"
-      
-      // Build path to session content file
-      const sessionDir = path.join(process.cwd(), 'data', 'published_content', 'sessions', 'sessions', fullSessionId);
-      const contentFilePath = path.join(sessionDir, `${contentId}.json`);
-      
-      console.log(`🔍 Retrieving step content from: ${contentFilePath}`);
-      
-      // Check if file exists
-      try {
-        await fs.access(contentFilePath);
-      } catch (error) {
-        throw new Error(`Step content not found: ${contentId}. File does not exist at ${contentFilePath}`);
-      }
-      
-      // Read and parse the content file
-      const contentData = await fs.readFile(contentFilePath, 'utf-8');
-      const stepContent = JSON.parse(contentData);
-      
-      // Extract the actual content/output from the step
-      const output = stepContent.data?.output || stepContent.output || '';
-      const agentId = stepContent.data?.agent_id || stepContent.metadata?.agentId || 'unknown';
-      const timestamp = stepContent.data?.timestamp || stepContent.metadata?.createdAt || 'unknown';
-      
-      console.log(`✅ Retrieved step content: ${contentId} from agent ${agentId}`);
-      
+  /**
+   * Retrieve research carried into this session by an earlier step.
+   *
+   * Session-scoped by construction: `sessionId` comes from the runtime, never
+   * from the caller. It used to be parsed out of a `content_id` the model had to
+   * construct in the form `step-session-{sessionId}-step-{n}`, which no agent
+   * could know — so the tool was unusable, and the coordinator's own prompt
+   * instructed it never to call this. It also meant one session could name
+   * another's content; now it cannot express the idea.
+   *
+   * Addressing is by producer or role rather than step number. An agent knows
+   * its fellow participants; it does not know which ordinal a plan assigned to
+   * the research step, and that ordinal changes per run.
+   *
+   * Returns `found: false` rather than throwing when nothing matches, so the
+   * agent can declare a gap. Silence here is what produced invented content.
+   */
+  private async toolGetStepContent(
+    params: { from?: string; role?: string; step?: number; content_id?: string },
+    sessionId?: string,
+    callerId?: string
+  ): Promise<any> {
+    if (!sessionId) {
       return {
-        content_id: contentId,
-        session_id: fullSessionId,
-        agent_id: agentId,
-        timestamp: timestamp,
-        content: output,
-        raw_data: stepContent.data || stepContent
+        found: false,
+        reason: 'no_session',
+        message:
+          'get_step_content is only available inside a coordination session. ' +
+          'State what you are missing rather than inventing it.',
       };
-      
-    } catch (error) {
-      console.error(`❌ Failed to retrieve step content ${params.content_id}:`, error);
-      throw new Error(`Failed to retrieve step content: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
+
+    // Legacy callers pass content_id, the old `step-session-{id}-step-{n}` form.
+    // It must not fall through to the no-selector default, which returns the
+    // most recent step — that would answer a request for step 1 with step 3 and
+    // look successful. Translate the ordinal out of it where possible, and
+    // refuse where not.
+    const legacyId = (params as { content_id?: string } | undefined)?.content_id;
+    let legacyStep: number | undefined;
+    if (typeof legacyId === 'string') {
+      const n = legacyId.match(/step-(\d+)\s*$/);
+      if (n?.[1]) {
+        legacyStep = Number(n[1]);
+      } else if (params?.from === undefined && params?.role === undefined && params?.step === undefined) {
+        return {
+          found: false,
+          reason: 'unaddressable_content_id',
+          message:
+            `Cannot resolve content_id "${legacyId}". Address earlier work by the ` +
+            'agent that produced it ({"from": "<agent-id>"}) or by a step label ' +
+            '({"role": "<label>"}).',
+        };
+      }
+    }
+
+    // Holding a session id is not membership. sendToAgent admits any active,
+    // realm co-located target without consulting participantIds, so a
+    // participant could delegate outward and the delegate would inherit this
+    // session id. Carried research is authorized by membership or not at all.
+    if (!this.coordinationService?.mayReadCarriedResearch?.(sessionId, String(callerId))) {
+      console.warn(`🔒 get_step_content: ${callerId} is not a member of ${sessionId} — refused`);
+      return {
+        found: false,
+        reason: 'not_a_session_member',
+        message:
+          'You are not a coordinator or participant of this session, so its ' +
+          'carried research is not available to you.',
+      };
+    }
+
+    const outputs = this.coordinationService?.getCarriedStepOutputs?.(sessionId) ?? [];
+    const match = selectCarriedStep(outputs, {
+      from: params?.from,
+      role: params?.role,
+      step: params?.step ?? legacyStep,
+    });
+
+    if (!match) {
+      const available = Array.from(new Set(outputs.map((o: { agentId: string }) => o.agentId)));
+      console.log(`🔍 get_step_content: no match in ${sessionId} (available: ${available.join(', ') || 'none'})`);
+      return {
+        found: false,
+        reason: outputs.length === 0 ? 'no_steps_completed' : 'no_match',
+        available_from: available,
+        message:
+          'No matching earlier step. Say what context you are missing rather ' +
+          'than inventing it.',
+      };
+    }
+
+    console.log(`✅ get_step_content: ${sessionId} step ${match.stepNumber} from ${match.agentId}`);
+    return {
+      found: true,
+      agent_id: match.agentId,
+      step_number: match.stepNumber,
+      description: match.description,
+      timestamp: match.completedAt,
+      content: match.output,
+    };
   }
 
   /**
