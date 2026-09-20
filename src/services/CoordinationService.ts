@@ -174,8 +174,117 @@ export interface OrchestrationPlan {
 }
 
 /**
+ * Collect the durable per-contributor records for a finished session, whichever
+ * execution path produced it.
+ *
+ * A session's contributions can end up in three different places, because the
+ * paths that produce them evolved separately:
+ *
+ *   1. `plan.steps`                              — the orchestration path
+ *   2. `session.participantTasks`                — direct task assignment
+ *   3. `session.finalResult.participantContributions`
+ *                                                — executeSimpleCoordination,
+ *                                                  the fallback taken when
+ *                                                  orchestration throws
+ *
+ * Only the first two were ever read. The fallback populates the third and
+ * nothing else, so a session that fell back persisted **zero** contributions
+ * while reporting success — the raw output of every participant was lost, and
+ * the published report was left with only the token-truncated synthesis. That
+ * went unnoticed because the fallback is rarely taken: it fires when
+ * `createOrchestrationPlan` throws, which for a long time only happened for
+ * coordinators that could not be resolved.
+ *
+ * Persistence is deliberately unconditional. `session_contributions` is the
+ * system of record; the `publishing_modes` flags (`includes_contributions` and
+ * friends) decide what a given artifact *renders*, and four of the five modes
+ * want them. Recording is also what makes re-publishing into a richer mode
+ * possible later, and retention is governed separately by
+ * `default_retention_days`.
+ *
+ * Precedence is first-non-empty rather than a merge: the three collections
+ * describe the same work seen from different paths, so concatenating them would
+ * double-count on any path that populates more than one.
+ *
+ * @param session the finished session
+ * @param plan the orchestration plan, when the orchestration path ran
+ */
+export function collectSessionContributions(
+  session: CoordinationSession,
+  plan?: OrchestrationPlan
+): ContributionRecord[] {
+  const completedSteps = plan?.steps.filter((s) => s.status === 'completed') ?? [];
+
+  if (completedSteps.length > 0) {
+    return completedSteps.map((step) => ({
+      sessionId: session.id,
+      stepNumber: step.stepNumber,
+      subStepNumber: 0,
+      agentId: step.agentId,
+      agentRole: 'coordinator',
+      agentType: null,
+      actionType: step.actionType,
+      description: step.description,
+      content: step.output ?? '',
+      contentFormat: 'markdown' as const,
+      tokenCount: null,
+      durationMs:
+        step.startedAt && step.completedAt
+          ? step.completedAt.getTime() - step.startedAt.getTime()
+          : null,
+      createdAt: step.completedAt ?? new Date(),
+    }));
+  }
+
+  const completedTasks = (session.participantTasks ?? []).filter(
+    (t) => t.status === 'completed' && t.result
+  );
+
+  if (completedTasks.length > 0) {
+    return completedTasks.map((task, idx) => ({
+      sessionId: session.id,
+      stepNumber: idx + 1,
+      subStepNumber: 0,
+      agentId: task.agentId,
+      agentRole: 'participant',
+      agentType: null,
+      actionType: null,
+      description: task.task,
+      content: task.result ?? '',
+      contentFormat: 'markdown' as const,
+      tokenCount: null,
+      durationMs:
+        task.assignedAt && task.completedAt
+          ? task.completedAt.getTime() - task.assignedAt.getTime()
+          : null,
+      createdAt: task.completedAt ?? new Date(),
+    }));
+  }
+
+  // The fallback path. Entries carry no timing or task description — only the
+  // agent and its output — so those fields are null rather than invented.
+  return (session.finalResult?.participantContributions ?? [])
+    .filter((c) => c && c.agentId && c.contribution)
+    .map((c, idx) => ({
+      sessionId: session.id,
+      stepNumber: idx + 1,
+      subStepNumber: 0,
+      agentId: c.agentId,
+      agentRole: 'participant',
+      agentType: null,
+      actionType: null,
+      description: null,
+      content: c.contribution,
+      contentFormat: 'markdown' as const,
+      tokenCount: null,
+      durationMs: null,
+      createdAt: session.completedAt ?? new Date(),
+    }));
+}
+
+/**
  * CoordinationService - Manages coordinator agents and orchestrates multi-agent collaboration
- * 
+ *
  * This service implements the core coordination workflow:
  * 1. Coordinator receives scenario prompt
  * 2. Coordinator uses its LLM to analyze and delegate tasks to participant agents
@@ -1905,17 +2014,35 @@ CRITICAL: Only assign tasks to DRUIDs. If an Elemental's expertise is needed, as
         useSessionDirectories: true
       }),
       ...(originalSession.researchRealms !== undefined && { researchRealms: [...originalSession.researchRealms] }),
-      ...(originalSession.publishTo !== undefined && { publishTo: [...originalSession.publishTo] })
+      ...(originalSession.publishTo !== undefined && { publishTo: [...originalSession.publishTo] }),
+      // Carried because this session now publishes. persistAndPublishSession
+      // passes session.publishAs to the publisher, which falls back to the
+      // default mode when it is absent — so a rerun of a session requested as
+      // 'raw' or 'dataset' would silently come back as a 'report'.
+      ...(originalSession.publishAs !== undefined && { publishAs: [...originalSession.publishAs] })
     };
 
     this.sessions.set(newSessionId, newSession);
 
-    // Start the coordination asynchronously
+    // Start the coordination asynchronously.
+    //
+    // executeSimpleCoordination only marks the session completed; it does not
+    // persist or publish. performCoordination does that for its own callers, but
+    // this entry point bypasses it, so a rerun produced contributions and then
+    // wrote no session row and no contribution rows at all. Persisting here
+    // keeps the invariant that a completed session with contributions is never
+    // recorded as empty, whichever entry point ran it.
     const coordinator = this.getBuiltInCoordinator();
-    this.executeSimpleCoordination(newSession, coordinator).catch((error: Error) => {
-      console.error('Error executing rerun session:', error);
-      newSession.status = 'failed';
-    });
+    this.executeSimpleCoordination(newSession, coordinator)
+      .then(() =>
+        this.persistAndPublishSession(newSession).catch((err) => {
+          console.error(`⚠️ persistAndPublishSession failed for rerun ${newSessionId}:`, err);
+        })
+      )
+      .catch((error: Error) => {
+        console.error('Error executing rerun session:', error);
+        newSession.status = 'failed';
+      });
 
     return {
       newSessionId,
@@ -2123,14 +2250,29 @@ When synthesizing results, focus on:
     try {
       session.status = 'in_progress';
 
+      // Held beyond the try so the post-synthesis republish below can pass it.
+      // Without it that call collects contributions plan-lessly and upserts a
+      // poorer representation over the rows the orchestration path already
+      // wrote — same step keys, but agentRole 'participant' and no actionType
+      // or description. Undefined on the fallback path, which is correct.
+      let executedPlan: OrchestrationPlan | undefined;
+
       // TRY ORCHESTRATION FIRST, FALL BACK TO SIMPLE COORDINATION IF IT FAILS
       try {
         console.log(`🎯 Attempting orchestration workflow for ${session.participantIds.length} participants...`);
         const plan = await this.createOrchestrationPlan(session);
-        
+
         console.log(`🎯 Executing ${plan.steps.length} orchestration steps...`);
         await this.executeOrchestrationPlan(session, plan);
-        
+
+        // Only after execution succeeds. This catch also covers execution, so a
+        // step failing partway leaves a plan with *some* completed steps while
+        // the fallback below re-runs the work and produces the contributions
+        // that actually became the result. Recording the plan here would hand
+        // the republish a stale partial plan, and first-non-empty precedence
+        // would return those few steps and drop the fallback's output entirely.
+        executedPlan = plan;
+
         console.log(`✅ Orchestration workflow completed successfully`);
       } catch (orchestrationError) {
         console.log(`⚠️ Orchestration failed, falling back to simple coordination approach:`, orchestrationError instanceof Error ? orchestrationError.message : 'Unknown error');
@@ -2252,7 +2394,10 @@ When synthesizing results, focus on:
 
       // Republish after post-orchestration synthesis so publications carry the
       // final integratedContent. Idempotent — ON CONFLICT UPDATE in publishers.
-      await this.persistAndPublishSession(session).catch((err) => {
+      // The plan is passed so this republish writes the same representation the
+      // first persist did; ON CONFLICT updates agent_role, action_type and
+      // description, so a plan-less collect here would overwrite them.
+      await this.persistAndPublishSession(session, executedPlan).catch((err) => {
         console.error(`⚠️ persistAndPublishSession failed for ${session.id}:`, err);
       });
 
@@ -2943,47 +3088,34 @@ EXPECTATION: Deliver enhanced story content that seamlessly integrates technical
   ): Promise<void> {
     const pubService = getSessionPublicationService();
 
-    const completedSteps = plan?.steps.filter((s) => s.status === 'completed') ?? [];
+    const contributions = collectSessionContributions(session, plan);
 
-    const contributions: ContributionRecord[] = completedSteps.length > 0
-      ? completedSteps.map((step) => ({
-          sessionId: session.id,
-          stepNumber: step.stepNumber,
-          subStepNumber: 0,
-          agentId: step.agentId,
-          agentRole: 'coordinator',
-          agentType: null,
-          actionType: step.actionType,
-          description: step.description,
-          content: step.output ?? '',
-          contentFormat: 'markdown' as const,
-          tokenCount: null,
-          durationMs:
-            step.startedAt && step.completedAt
-              ? step.completedAt.getTime() - step.startedAt.getTime()
-              : null,
-          createdAt: step.completedAt ?? new Date(),
-        }))
-      : session.participantTasks
-          .filter((t) => t.status === 'completed' && t.result)
-          .map((task, idx) => ({
-            sessionId: session.id,
-            stepNumber: idx + 1,
-            subStepNumber: 0,
-            agentId: task.agentId,
-            agentRole: 'participant',
-            agentType: null,
-            actionType: null,
-            description: task.task,
-            content: task.result ?? '',
-            contentFormat: 'markdown' as const,
-            tokenCount: null,
-            durationMs:
-              task.assignedAt && task.completedAt
-                ? task.completedAt.getTime() - task.assignedAt.getTime()
-                : null,
-            createdAt: task.completedAt ?? new Date(),
-          }));
+    if (contributions.length === 0) {
+      // Distinguish "a shape we do not read" from "entries we deliberately
+      // dropped". The collector skips contributions with no agentId or no
+      // content, so an empty LLM response is not evidence of an unknown
+      // collection — reporting it as one would send the next reader looking for
+      // a bug that is not there.
+      const raw = session.finalResult?.participantContributions ?? [];
+      const usable = raw.filter((c) => c && c.agentId && c.contribution);
+
+      if (usable.length > 0) {
+        // Should be unreachable: collectSessionContributions reads that
+        // collection. Logged rather than thrown because publication must not
+        // fail a session, but at error level — it means a fourth shape has
+        // appeared and the durable record is silently incomplete, which is
+        // exactly how this went unnoticed before.
+        console.error(
+          `❌ Session ${session.id} produced contributions that none of the known ` +
+          'collections exposed — nothing will be persisted. See collectSessionContributions.'
+        );
+      } else if (raw.length > 0) {
+        console.warn(
+          `⚠️ Session ${session.id} recorded ${raw.length} contribution(s) with no ` +
+          'agent id or no content; nothing to persist.'
+        );
+      }
+    }
 
     const sessionRecord: SessionRecord = {
       sessionId: session.id,
