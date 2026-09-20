@@ -102,6 +102,28 @@ export interface CoordinationSession {
 
   // Session-scoped content storage for isolation
   sessionContentManager: SessionContentManagerImpl;
+
+  /**
+   * Outputs of orchestration steps completed so far, in order.
+   *
+   * This is the research a travelling agent "carries" into an activity realm.
+   * Realm-bound specialists are never granted corpus realms — that would be
+   * O(specialists x realms) to administer and would grow with every new realm —
+   * so the only way they see upstream findings is through the session.
+   *
+   * Held on the session rather than on the service so it is scoped and disposed
+   * with the session, per the concurrent-session architecture.
+   */
+  stepOutputs?: CarriedStepOutput[];
+}
+
+/** One completed step's output, addressable by the agent that produced it. */
+export interface CarriedStepOutput {
+  stepNumber: number;
+  agentId: string;
+  description: string;
+  output: string;
+  completedAt: string;
 }
 
 export interface ParticipantTask {
@@ -280,6 +302,58 @@ export function collectSessionContributions(
       durationMs: null,
       createdAt: session.completedAt ?? new Date(),
     }));
+}
+
+/** How a caller asks for carried research. Ordinals are a last resort. */
+export interface CarriedStepQuery {
+  /** Agent id of the producer — the addressing agents can actually know. */
+  from?: string | undefined;
+  /** Step label, matched case-insensitively as a substring of the description. */
+  role?: string | undefined;
+  /** Explicit step number. Plan-internal and run-dependent; avoid. */
+  step?: number | undefined;
+}
+
+/**
+ * Select carried research from a session's completed steps.
+ *
+ * Addressing is by *producer* or *role*, not by ordinal. A specialist has no
+ * way to know whether positioning was step 2 or step 5 — step numbers are a
+ * plan-internal detail that changes per run — but it does know the ids of its
+ * fellow participants, and step labels are authored in the plan. `step` remains
+ * available for callers that genuinely have a number, and is checked last.
+ *
+ * With no selector, the most recent step is returned: the common case is "what
+ * did the agent before me produce".
+ *
+ * Returns null rather than throwing when nothing matches. An absent input must
+ * be reported to the agent as absent so it can declare a gap — the failure this
+ * whole area exists to prevent is a specialist inventing content because it
+ * silently received nothing.
+ */
+export function selectCarriedStep(
+  outputs: readonly CarriedStepOutput[] | undefined,
+  query: CarriedStepQuery = {}
+): CarriedStepOutput | null {
+  const available = (outputs ?? []).filter((s) => s && s.output);
+  if (available.length === 0) return null;
+
+  if (query.from) {
+    const byAgent = available.filter((s) => s.agentId === query.from);
+    return byAgent.length > 0 ? byAgent[byAgent.length - 1]! : null;
+  }
+
+  if (query.role) {
+    const needle = query.role.toLowerCase();
+    const byRole = available.filter((s) => (s.description ?? '').toLowerCase().includes(needle));
+    return byRole.length > 0 ? byRole[byRole.length - 1]! : null;
+  }
+
+  if (typeof query.step === 'number') {
+    return available.find((s) => s.stepNumber === query.step) ?? null;
+  }
+
+  return available[available.length - 1]!;
 }
 
 /**
@@ -1133,6 +1207,16 @@ CRITICAL: Only assign tasks to DRUIDs. If an Elemental's expertise is needed, as
           step.output = stepOutput;
           step.status = 'completed';
           step.completedAt = new Date();
+
+          // Carry the output on the session so later participants can read it
+          // without being granted the realm it was researched in.
+          (session.stepOutputs ??= []).push({
+            stepNumber: step.stepNumber,
+            agentId: step.agentId,
+            description: step.description,
+            output: stepOutput,
+            completedAt: step.completedAt.toISOString(),
+          });
         } finally {
           this.activeSteps.delete(session.id);
         }
@@ -2298,6 +2382,16 @@ When synthesizing results, focus on:
    * participants, and, until the accompanying fix, no persisted contributions
    * at all. Two resolutions of the same thing, disagreeing.
    */
+  /**
+   * Carried research for a session, or [] if the session is unknown.
+   *
+   * Read by AgentService's get_step_content tool. Scoped by session id supplied
+   * by the runtime, never by the caller — an agent cannot name another session.
+   */
+  getCarriedStepOutputs(sessionId: string): CarriedStepOutput[] {
+    return this.sessions.get(sessionId)?.stepOutputs ?? [];
+  }
+
   async getCoordinator(coordinatorId: string): Promise<Coordinator | undefined> {
     const agentService = this.agentService;
     return resolveCoordinator(coordinatorId, {
