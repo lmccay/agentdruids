@@ -283,6 +283,106 @@ export function collectSessionContributions(
 }
 
 /**
+ * Wrap an agent so it can drive a coordination session.
+ *
+ * Only druids are nominated as coordinators in practice, but this does not
+ * enforce that — the REST assume-gate and `enforceAssumableParticipants` decide
+ * who may drive what; this only adapts the shape.
+ *
+ * The llmConfig here is largely vestigial and deliberately left as it was.
+ * `executeCoordinatorPrompt` special-cases only the built-in engine; for a
+ * wrapped agent it calls `agentService.executeAgentPrompt(coordinator.id, ...)`,
+ * which uses the agent's own configured provider and model. So the 'openai'
+ * literal below is not consulted on that path. Changing it would be a different
+ * change with a different blast radius, and it is not what was broken.
+ */
+export function coordinatorFromAgent(agent: {
+  id: string;
+  name: string;
+  description?: string | undefined;
+  llmConfig?: { model?: string; systemPrompt?: string; temperature?: number } | undefined;
+}): Coordinator {
+  return {
+    id: agent.id,
+    name: agent.name,
+    description: agent.description || `Agent ${agent.name} acting as coordinator`,
+    capabilities: {
+      maxConcurrentScenarios: 5,
+      supportedScenarioTypes: ['collaborative'],
+      coordinationStyle: 'collaborative',
+      decisionMaking: 'consensus-seeking',
+    },
+    status: 'active',
+    createdAt: new Date(),
+    createdBy: 'system',
+    llmConfig: {
+      provider: 'openai',
+      model: agent.llmConfig?.model || 'gpt-4',
+      systemPrompt:
+        agent.llmConfig?.systemPrompt ||
+        'You are a coordination agent helping to manage a collaborative scenario.',
+      temperature: agent.llmConfig?.temperature || 0.7,
+    },
+  } as Coordinator;
+}
+
+/**
+ * Resolve a coordinator id to the coordinator that will drive a session.
+ *
+ * Three kinds resolve here, and all three must, because this is the only
+ * resolution: the built-in engine, a stored coordinator, and an agent acting as
+ * one (any druid the caller nominated).
+ *
+ * `CoordinationService.getCoordinator` used to resolve only the first, while
+ * `performCoordination` resolved all three inline. A druid-coordinated session
+ * therefore started successfully and then threw "Coordinator <id> not found"
+ * inside `createOrchestrationPlan` — which is caught and silently downgraded to
+ * `executeSimpleCoordination`. The visible symptom was not an error but a
+ * thinner report: no delegation to the participants, one corpus search instead
+ * of several, and no persisted contributions.
+ *
+ * Kept free of the class so it can be tested without constructing the service,
+ * which starts LLM clients and leaves open handles.
+ *
+ * @param getAgent the agent lookup, or undefined when no AgentService is wired.
+ *   It is expected to *throw* on a miss, as AgentService.getAgent does.
+ */
+export async function resolveCoordinator(
+  coordinatorId: string,
+  deps: {
+    builtIn: Coordinator;
+    stored: Map<string, Coordinator>;
+    getAgent?: ((id: string) => Promise<any>) | undefined;
+  }
+): Promise<Coordinator | undefined> {
+  if (!coordinatorId) return undefined;
+
+  if (coordinatorId === 'built-in-coordinator') {
+    return deps.builtIn;
+  }
+
+  const stored = deps.stored.get(coordinatorId);
+  if (stored) return stored;
+
+  if (!deps.getAgent) return undefined;
+
+  try {
+    const agent = await deps.getAgent(coordinatorId);
+    if (!agent) return undefined;
+    console.log(`🔧 Created coordinator wrapper for agent ${agent.name}`);
+    return coordinatorFromAgent(agent);
+  } catch (error) {
+    // A miss is "no such coordinator", not a failure to resolve: getAgent throws
+    // rather than returning undefined when the id is unknown.
+    console.warn(
+      `⚠️ Failed to get agent ${coordinatorId} for coordinator role:`,
+      error instanceof Error ? error.message : 'Unknown error'
+    );
+    return undefined;
+  }
+}
+
+/**
  * CoordinationService - Manages coordinator agents and orchestrates multi-agent collaboration
  *
  * This service implements the core coordination workflow:
@@ -2183,10 +2283,28 @@ When synthesizing results, focus on:
   }
 
   /**
-   * Get coordinator by ID
+   * Resolve a coordinator id to the coordinator that will drive the session.
+   *
+   * Three kinds resolve here, and all three must, because this is now the only
+   * resolution: the built-in engine, a stored coordinator, and an agent acting
+   * as one (any druid the caller nominated).
+   *
+   * It previously returned undefined for everything except the built-in engine,
+   * while `performCoordination` resolved all three inline. A druid-coordinated
+   * session therefore started successfully and then threw
+   * "Coordinator <id> not found" inside `createOrchestrationPlan` — which is
+   * caught and silently downgraded to `executeSimpleCoordination`. The visible
+   * symptom was not an error but a thinner report: no delegation to the
+   * participants, and, until the accompanying fix, no persisted contributions
+   * at all. Two resolutions of the same thing, disagreeing.
    */
-  getCoordinator(coordinatorId: string): Coordinator | undefined {
-    return coordinatorId === 'built-in-coordinator' ? this.builtInCoordinator : undefined;
+  async getCoordinator(coordinatorId: string): Promise<Coordinator | undefined> {
+    const agentService = this.agentService;
+    return resolveCoordinator(coordinatorId, {
+      builtIn: this.builtInCoordinator,
+      stored: this.coordinators,
+      ...(agentService && { getAgent: (id: string) => agentService.getAgent(id as AgentId) }),
+    });
   }
 
   /**
@@ -2198,49 +2316,11 @@ When synthesizing results, focus on:
     
     const session = this.sessions.get(sessionId);
     
-    // Handle built-in coordinator vs stored coordinators vs agent-as-coordinator
-    let coordinator: Coordinator | null = null;
-    
-    if (request.coordinatorId === 'built-in-coordinator') {
-      coordinator = this.builtInCoordinator;
-    } else {
-      // First try to find in coordinators map
-      coordinator = this.coordinators.get(request.coordinatorId) || null;
-      
-      // If not found, check if it's an agent that can act as coordinator
-      if (!coordinator && this.agentService) {
-        try {
-          const agent = await this.agentService.getAgent(request.coordinatorId as AgentId);
-          if (agent) {
-            // Create a coordinator wrapper around the agent
-            coordinator = {
-              id: agent.id,
-              name: agent.name,
-              description: agent.description || `Agent ${agent.name} acting as coordinator`,
-              capabilities: {
-                maxConcurrentScenarios: 5,
-                supportedScenarioTypes: ['collaborative'],
-                coordinationStyle: 'collaborative',
-                decisionMaking: 'consensus-seeking'
-              },
-              status: 'active',
-              createdAt: new Date(),
-              createdBy: 'system',
-              llmConfig: {
-                provider: 'openai',
-                model: agent.llmConfig?.model || 'gpt-4',
-                systemPrompt: agent.llmConfig?.systemPrompt || 'You are a coordination agent helping to manage a collaborative scenario.',
-                temperature: agent.llmConfig?.temperature || 0.7
-              }
-            };
-            console.log(`🔧 Created coordinator wrapper for agent ${agent.name}`);
-          }
-        } catch (error) {
-          console.warn(`⚠️ Failed to get agent ${request.coordinatorId} for coordinator role:`, error);
-        }
-      }
-    }
-    
+    // Built-in, stored, or agent-as-coordinator. This used to be resolved inline
+    // here and separately — more narrowly — by getCoordinator, which is why a
+    // druid could start a session and then fail to plan for it.
+    const coordinator = (await this.getCoordinator(request.coordinatorId)) ?? null;
+
     console.log(`🔍 DEBUG: Session found: ${!!session}, Coordinator found: ${!!coordinator}, AgentService: ${!!this.agentService}`);
     
     if (!session || !coordinator || !this.agentService) {
