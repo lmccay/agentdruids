@@ -153,6 +153,122 @@ interface AgentValidationResult {
   warnings: string[];
 }
 
+/** A tool call located in an agent's response. */
+export interface ExtractedToolCall {
+  /** The whole span to replace, including the TOOL_CALL: prefix and any markdown wrapper. */
+  raw: string;
+  /** Just the JSON object, ready for JSON.parse. */
+  json: string;
+  /** Offset of the TOOL_CALL: prefix in the response. */
+  index: number;
+}
+
+/**
+ * Characters and tokens a model may put between `TOOL_CALL:` and the JSON.
+ *
+ * Models wrap tool calls in markdown unprompted — fenced blocks, bold, inline
+ * code — and which ones they use varies by model, so this cannot be solved by
+ * instructing them not to. Only the wrapper vocabulary is skipped: anything
+ * else before the brace means this is prose rather than a tool call, and the
+ * match is abandoned rather than scanning ahead for an unrelated `{`.
+ */
+const TOOL_CALL_WRAPPER = /^(?:[\s`*_~]|json\b)*/i;
+
+/** Trailing fence/emphasis left after the closing brace, consumed so it is not orphaned. */
+const TOOL_CALL_WRAPPER_END = /^[\s`*_~]*/;
+
+/**
+ * Locate tool calls in an agent's response.
+ *
+ * The JSON is delimited by brace counting rather than a regex, because tool
+ * arguments routinely contain braces inside strings — a delegated task carrying
+ * a brief, for instance.
+ *
+ * Previously the extracted span started immediately after `TOOL_CALL:`, so any
+ * markdown the model emitted before the opening brace was fed to JSON.parse:
+ *
+ *     TOOL_CALL: **
+ *     ```json
+ *     { "tool": "delegate_task", ... }
+ *
+ *     -> SyntaxError: Unexpected token '*', "**\n```json"... is not valid JSON
+ *
+ * The brace counter had located the end correctly; only the start was wrong. A
+ * dropped call is silent — the agent's structured intent is lost, it is not
+ * retried, and the model carries on improvising — so a coordinator could lose
+ * delegations and still report success.
+ */
+export function extractToolCalls(response: string): ExtractedToolCall[] {
+  const found: ExtractedToolCall[] = [];
+  const prefix = /TOOL_CALL:\s*/g;
+  let prefixMatch: RegExpExecArray | null;
+
+  while ((prefixMatch = prefix.exec(response)) !== null) {
+    const afterPrefix = prefixMatch.index + prefixMatch[0].length;
+    const skip = TOOL_CALL_WRAPPER.exec(response.slice(afterPrefix))?.[0].length ?? 0;
+    const jsonStart = afterPrefix + skip;
+
+    if (response[jsonStart] !== '{') {
+      // Not a tool call — `TOOL_CALL:` appearing in prose, or a malformed one.
+      continue;
+    }
+
+    let braceCount = 0;
+    let inString = false;
+    let escapeNext = false;
+    let jsonEnd = -1;
+
+    for (let i = jsonStart; i < response.length; i++) {
+      const char = response[i];
+
+      if (escapeNext) {
+        escapeNext = false;
+        continue;
+      }
+      if (char === '\\') {
+        escapeNext = true;
+        continue;
+      }
+      if (char === '"') {
+        inString = !inString;
+        continue;
+      }
+      if (!inString) {
+        if (char === '{') braceCount++;
+        else if (char === '}') {
+          braceCount--;
+          if (braceCount === 0) {
+            jsonEnd = i + 1;
+            break;
+          }
+        }
+      }
+    }
+
+    if (jsonEnd <= jsonStart) continue;
+
+    // Consume a trailing fence or emphasis, but stop at the last wrapper
+    // character rather than running on through the whitespace after it —
+    // otherwise replacing `raw` with the tool result welds it to the next word.
+    const trail = TOOL_CALL_WRAPPER_END.exec(response.slice(jsonEnd))?.[0] ?? '';
+    const lastWrapper = Math.max(
+      trail.lastIndexOf('`'),
+      trail.lastIndexOf('*'),
+      trail.lastIndexOf('_'),
+      trail.lastIndexOf('~')
+    );
+    const trailing = lastWrapper >= 0 ? lastWrapper + 1 : 0;
+
+    found.push({
+      raw: response.substring(prefixMatch.index, jsonEnd + trailing),
+      json: response.substring(jsonStart, jsonEnd),
+      index: prefixMatch.index,
+    });
+  }
+
+  return found;
+}
+
 /**
  * Decide the slug id a new agent will be identified by.
  *
@@ -2155,59 +2271,11 @@ Your responses and behavior should be appropriate to this realm's context and ch
     const toolCalls: AgentToolCall[] = [];
     let processedResponse = response;
 
-    // Parse tool calls from the response using brace counting for robust JSON extraction
-    const matches: Array<{0: string, 1: string, index: number}> = [];
-    const toolCallPrefix = /TOOL_CALL:\s*/g;
-    let prefixMatch;
-
-    while ((prefixMatch = toolCallPrefix.exec(response)) !== null) {
-      const startIndex = prefixMatch.index + prefixMatch[0].length;
-
-      // Extract JSON by counting braces
-      let braceCount = 0;
-      let inString = false;
-      let escapeNext = false;
-      let jsonEnd = -1;
-
-      for (let i = startIndex; i < response.length; i++) {
-        const char = response[i];
-
-        if (escapeNext) {
-          escapeNext = false;
-          continue;
-        }
-
-        if (char === '\\') {
-          escapeNext = true;
-          continue;
-        }
-
-        if (char === '"') {
-          inString = !inString;
-          continue;
-        }
-
-        if (!inString) {
-          if (char === '{') braceCount++;
-          else if (char === '}') {
-            braceCount--;
-            if (braceCount === 0) {
-              jsonEnd = i + 1;
-              break;
-            }
-          }
-        }
-      }
-
-      if (jsonEnd > startIndex) {
-        const jsonStr = response.substring(startIndex, jsonEnd);
-        matches.push({
-          0: prefixMatch[0] + jsonStr,
-          1: jsonStr,
-          index: prefixMatch.index
-        } as any);
-      }
-    }
+    const matches = extractToolCalls(response).map((m) => ({
+      0: m.raw,
+      1: m.json,
+      index: m.index,
+    })) as Array<{ 0: string; 1: string; index: number }>;
 
     if (matches.length === 0) {
       // No tool calls found, return original response
