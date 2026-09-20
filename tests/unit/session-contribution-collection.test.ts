@@ -280,6 +280,42 @@ describe('collectSessionContributions', () => {
       expect(withoutPlan[0]?.description).toBeNull();
     });
 
+    it('a partially-completed plan hides the fallback output — why a stale plan must not be passed', () => {
+      // The hazard behind assigning executedPlan only after successful
+      // execution. If a step fails partway, the plan has *some* completed steps
+      // while executeSimpleCoordination re-runs the work and produces what
+      // actually became the result. First-non-empty precedence would then return
+      // the two stale steps and silently drop all seven fallback contributions.
+      const session = baseSession({
+        finalResult: {
+          summary: 's',
+          participantContributions: [
+            fallbackContribution('positioner-elemental', 'full positioning output'),
+            fallbackContribution('reddit-elemental', 'three reddit posts'),
+            fallbackContribution('linkedin-elemental', 'linkedin article'),
+          ],
+          coordinatorAnalysis: '',
+          recommendations: [],
+          publishedTo: [],
+        },
+      } as Partial<CoordinationSession>);
+
+      const partialPlan = plan([
+        completedStep(1, 'campaign-coordinator-druid'),
+        { ...completedStep(2, 'campaign-coordinator-druid'), status: 'failed' },
+      ]);
+
+      // Passing the stale plan: one step, fallback output gone.
+      expect(collectSessionContributions(session, partialPlan)).toHaveLength(1);
+
+      // Not passing it, which is what performCoordination now does: all three.
+      expect(collectSessionContributions(session).map((r) => r.agentId)).toEqual([
+        'positioner-elemental',
+        'reddit-elemental',
+        'linkedin-elemental',
+      ]);
+    });
+
     it('falls through a plan with no completed steps to the tasks', () => {
       const records = collectSessionContributions(
         baseSession({

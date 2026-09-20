@@ -2014,7 +2014,12 @@ CRITICAL: Only assign tasks to DRUIDs. If an Elemental's expertise is needed, as
         useSessionDirectories: true
       }),
       ...(originalSession.researchRealms !== undefined && { researchRealms: [...originalSession.researchRealms] }),
-      ...(originalSession.publishTo !== undefined && { publishTo: [...originalSession.publishTo] })
+      ...(originalSession.publishTo !== undefined && { publishTo: [...originalSession.publishTo] }),
+      // Carried because this session now publishes. persistAndPublishSession
+      // passes session.publishAs to the publisher, which falls back to the
+      // default mode when it is absent — so a rerun of a session requested as
+      // 'raw' or 'dataset' would silently come back as a 'report'.
+      ...(originalSession.publishAs !== undefined && { publishAs: [...originalSession.publishAs] })
     };
 
     this.sessions.set(newSessionId, newSession);
@@ -2256,10 +2261,17 @@ When synthesizing results, focus on:
       try {
         console.log(`🎯 Attempting orchestration workflow for ${session.participantIds.length} participants...`);
         const plan = await this.createOrchestrationPlan(session);
-        executedPlan = plan;
 
         console.log(`🎯 Executing ${plan.steps.length} orchestration steps...`);
         await this.executeOrchestrationPlan(session, plan);
+
+        // Only after execution succeeds. This catch also covers execution, so a
+        // step failing partway leaves a plan with *some* completed steps while
+        // the fallback below re-runs the work and produces the contributions
+        // that actually became the result. Recording the plan here would hand
+        // the republish a stale partial plan, and first-non-empty precedence
+        // would return those few steps and drop the fallback's output entirely.
+        executedPlan = plan;
 
         console.log(`✅ Orchestration workflow completed successfully`);
       } catch (orchestrationError) {
