@@ -2377,7 +2377,7 @@ Your responses and behavior should be appropriate to this realm's context and ch
         return await this.toolAssignSimpleTask(agent.id, params, sessionId, requesterId);
       
       case 'get_step_content':
-        return await this.toolGetStepContent(params, sessionId);
+        return await this.toolGetStepContent(params, sessionId, agent.id);
       
       case 'travel_to_realm':
         return await this.toolTravelToRealm(agent.id, params, sessionId);
@@ -2795,7 +2795,8 @@ Please use your available tools to execute this task now and provide your comple
    */
   private async toolGetStepContent(
     params: { from?: string; role?: string; step?: number; content_id?: string },
-    sessionId?: string
+    sessionId?: string,
+    callerId?: string
   ): Promise<any> {
     if (!sessionId) {
       return {
@@ -2828,6 +2829,21 @@ Please use your available tools to execute this task now and provide your comple
             '({"role": "<label>"}).',
         };
       }
+    }
+
+    // Holding a session id is not membership. sendToAgent admits any active,
+    // realm co-located target without consulting participantIds, so a
+    // participant could delegate outward and the delegate would inherit this
+    // session id. Carried research is authorized by membership or not at all.
+    if (!this.coordinationService?.mayReadCarriedResearch?.(sessionId, String(callerId))) {
+      console.warn(`🔒 get_step_content: ${callerId} is not a member of ${sessionId} — refused`);
+      return {
+        found: false,
+        reason: 'not_a_session_member',
+        message:
+          'You are not a coordinator or participant of this session, so its ' +
+          'carried research is not available to you.',
+      };
     }
 
     const outputs = this.coordinationService?.getCarriedStepOutputs?.(sessionId) ?? [];

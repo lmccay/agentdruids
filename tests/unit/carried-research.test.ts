@@ -16,7 +16,11 @@
  * a gap rather than improvise.
  */
 
-import { selectCarriedStep, CarriedStepOutput } from '../../src/services/CoordinationService';
+import {
+  selectCarriedStep,
+  mayReadCarriedResearch,
+  CarriedStepOutput,
+} from '../../src/services/CoordinationService';
 
 const step = (
   stepNumber: number,
@@ -134,6 +138,44 @@ describe('selectCarriedStep', () => {
       // The tool returns unaddressable_content_id for this rather than calling
       // the selector with an empty query.
       expect('coordination/some-opaque-key'.match(/step-(\d+)\s*$/)).toBeNull();
+    });
+  });
+
+  describe('membership is the authorization', () => {
+    // Holding a session id is not membership. sendToAgent admits any active,
+    // realm co-located target and never consults participantIds, so a
+    // participant can delegate outward and the delegate inherits the session
+    // id. Without this check it would also inherit the research.
+    const session = {
+      coordinatorId: 'campaign-coordinator-druid',
+      participantIds: ['positioner-elemental', 'reddit-elemental'],
+    };
+
+    it('admits a participant', () => {
+      expect(mayReadCarriedResearch(session, 'reddit-elemental')).toBe(true);
+    });
+
+    it('admits the coordinator even when absent from participantIds', () => {
+      // The coordinator drives the session without necessarily listing itself.
+      expect(session.participantIds).not.toContain('campaign-coordinator-druid');
+      expect(mayReadCarriedResearch(session, 'campaign-coordinator-druid')).toBe(true);
+    });
+
+    it('refuses an agent outside the session — the delegation escape', () => {
+      expect(mayReadCarriedResearch(session, 'legal-elemental')).toBe(false);
+    });
+
+    it('refuses when the session is unknown', () => {
+      expect(mayReadCarriedResearch(undefined, 'reddit-elemental')).toBe(false);
+    });
+
+    it('refuses an empty or missing caller rather than defaulting open', () => {
+      expect(mayReadCarriedResearch(session, '')).toBe(false);
+      expect(mayReadCarriedResearch(session, undefined)).toBe(false);
+    });
+
+    it('refuses when a session has no participants recorded', () => {
+      expect(mayReadCarriedResearch({ coordinatorId: 'x' }, 'reddit-elemental')).toBe(false);
     });
   });
 

@@ -304,6 +304,31 @@ export function collectSessionContributions(
     }));
 }
 
+/**
+ * Whether an agent may read a session's carried research.
+ *
+ * Session membership is the authorization for carried research — that is the
+ * whole reason specialists are not granted corpus realms. So membership has to
+ * be checked, not assumed from the fact that a session id reached the tool.
+ *
+ * Holding a session id is not membership. `sendToAgent` admits any target that
+ * is active and realm co-located; it never consults `participantIds`. A
+ * participant could therefore delegate to an agent outside the session, and
+ * that agent would inherit the session id and, without this check, read the
+ * session's research.
+ *
+ * The coordinator counts: it drives the session without necessarily appearing
+ * in its own participant list.
+ */
+export function mayReadCarriedResearch(
+  session: { coordinatorId?: string; participantIds?: string[] } | undefined,
+  agentId: string | undefined
+): boolean {
+  if (!session || !agentId) return false;
+  if (session.coordinatorId === agentId) return true;
+  return (session.participantIds ?? []).includes(agentId);
+}
+
 /** How a caller asks for carried research. Ordinals are a last resort. */
 export interface CarriedStepQuery {
   /** Agent id of the producer — the addressing agents can actually know. */
@@ -1285,10 +1310,20 @@ CRITICAL: Only assign tasks to DRUIDs. If an Elemental's expertise is needed, as
     // agent cannot know which ordinal a plan assigned, and a call carrying
     // neither would fall through to "the most recent step", which is a silent
     // wrong answer rather than a miss.
+    // Serialised, never interpolated. A step description is author-supplied and
+    // may contain quotes, backslashes or newlines; splicing one into a JSON
+    // string literal would produce an invalid example, the model would copy it,
+    // and the tool-call parser would reject the result — reintroducing the
+    // silent dropped-call failure by way of a malformed sample.
+    const example = (params: Record<string, string>) =>
+      `\n  TOOL_CALL: ${JSON.stringify({ tool: 'get_step_content', params })}`;
+
     context += `\nUse the get_step_content tool to read any of these in full.`;
     context += `\nAddress it by the agent that produced it, or by a label:`;
-    context += `\n  TOOL_CALL: {"tool": "get_step_content", "params": {"from": "${completedSteps[0]?.agentId}"}}`;
-    context += `\n  TOOL_CALL: {"tool": "get_step_content", "params": {"role": "${completedSteps[0]?.description}"}}`;
+    if (completedSteps[0]) {
+      context += example({ from: completedSteps[0].agentId });
+      context += example({ role: completedSteps[0].description });
+    }
     context += `\nIf it returns found:false, say what context you are missing. Do not invent it.`;
 
     return context;
@@ -2396,6 +2431,11 @@ When synthesizing results, focus on:
    */
   getCarriedStepOutputs(sessionId: string): CarriedStepOutput[] {
     return this.sessions.get(sessionId)?.stepOutputs ?? [];
+  }
+
+  /** Whether `agentId` is the coordinator of, or a participant in, this session. */
+  mayReadCarriedResearch(sessionId: string, agentId: string): boolean {
+    return mayReadCarriedResearch(this.sessions.get(sessionId), agentId);
   }
 
   async getCoordinator(coordinatorId: string): Promise<Coordinator | undefined> {
