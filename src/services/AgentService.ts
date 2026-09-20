@@ -2566,6 +2566,14 @@ Your responses and behavior should be appropriate to this realm's context and ch
 
     const response = await this.executeAgentPrompt(resolvedAgentId as AgentId, {
       prompt,
+      // The delegated agent runs inside the same session as the delegator. This
+      // was omitted, so a specialist reached through delegate_task executed with
+      // no session at all: it could not read research carried into the session,
+      // its realm presence fell back to global state rather than session-scoped
+      // travel, and its corpus scope lost the session's research realms. Since a
+      // realm-bound specialist has no other source of grounding, that left it
+      // with nothing but the task string.
+      ...(sessionId && { sessionId }),
       collaborationContext: {
         scenarioName,
         ...(agentRole && { agentRole }),
@@ -2786,7 +2794,7 @@ Please use your available tools to execute this task now and provide your comple
    * agent can declare a gap. Silence here is what produced invented content.
    */
   private async toolGetStepContent(
-    params: { from?: string; role?: string; step?: number },
+    params: { from?: string; role?: string; step?: number; content_id?: string },
     sessionId?: string
   ): Promise<any> {
     if (!sessionId) {
@@ -2799,11 +2807,34 @@ Please use your available tools to execute this task now and provide your comple
       };
     }
 
+    // Legacy callers pass content_id, the old `step-session-{id}-step-{n}` form.
+    // It must not fall through to the no-selector default, which returns the
+    // most recent step — that would answer a request for step 1 with step 3 and
+    // look successful. Translate the ordinal out of it where possible, and
+    // refuse where not.
+    const legacyId = (params as { content_id?: string } | undefined)?.content_id;
+    let legacyStep: number | undefined;
+    if (typeof legacyId === 'string') {
+      const n = legacyId.match(/step-(\d+)\s*$/);
+      if (n?.[1]) {
+        legacyStep = Number(n[1]);
+      } else if (params?.from === undefined && params?.role === undefined && params?.step === undefined) {
+        return {
+          found: false,
+          reason: 'unaddressable_content_id',
+          message:
+            `Cannot resolve content_id "${legacyId}". Address earlier work by the ` +
+            'agent that produced it ({"from": "<agent-id>"}) or by a step label ' +
+            '({"role": "<label>"}).',
+        };
+      }
+    }
+
     const outputs = this.coordinationService?.getCarriedStepOutputs?.(sessionId) ?? [];
     const match = selectCarriedStep(outputs, {
       from: params?.from,
       role: params?.role,
-      step: params?.step,
+      step: params?.step ?? legacyStep,
     });
 
     if (!match) {

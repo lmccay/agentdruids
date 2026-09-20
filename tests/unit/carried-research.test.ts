@@ -117,6 +117,26 @@ describe('selectCarriedStep', () => {
     });
   });
 
+  describe('a legacy content_id must not resolve to the wrong step', () => {
+    // buildStepContext used to hand agents content ids and an example call that
+    // supplied no selector at all. Under the new interface that would fall
+    // through to "most recent step" — answering a request for step 1 with step
+    // 3 and looking successful. The tool translates the ordinal where the id
+    // carries one and refuses where it does not; these pin the selector half.
+    it('an ordinal parsed from a legacy id selects that step, not the latest', () => {
+      const parsed = 'step-session-1789919978857-7d54b20b-step-1'.match(/step-(\d+)\s*$/);
+      expect(parsed?.[1]).toBe('1');
+      expect(selectCarriedStep(SESSION, { step: Number(parsed![1]) })?.stepNumber).toBe(1);
+      expect(selectCarriedStep(SESSION)?.stepNumber).toBe(3); // what it would have returned
+    });
+
+    it('an unparseable ordinal must not silently become the latest step', () => {
+      // The tool returns unaddressable_content_id for this rather than calling
+      // the selector with an empty query.
+      expect('coordination/some-opaque-key'.match(/step-(\d+)\s*$/)).toBeNull();
+    });
+  });
+
   describe('isolation', () => {
     it('only ever sees the outputs it is given', () => {
       // The caller cannot name a session; the runtime supplies the list. This

@@ -1277,13 +1277,19 @@ CRITICAL: Only assign tasks to DRUIDs. If an Elemental's expertise is needed, as
     }
 
     // Instead of including full content, just provide content IDs for tool access
-    let context = "Previous step outputs available via get_step_content tool:\n";
+    let context = "Research carried into this session by earlier steps:\n";
     for (const step of completedSteps) {
-      context += `- Step ${step.stepNumber} (${step.description}): Content ID "${step.contentId}"\n`;
+      context += `- ${step.description} — produced by ${step.agentId}\n`;
     }
-    
-    context += `\nIMPORTANT: Use the get_step_content tool to retrieve specific content from previous steps by their Content ID.`;
-    context += `\nExample: get_step_content("${completedSteps[0]?.contentId}") to get the output from Step ${completedSteps[0]?.stepNumber}`;
+    // Addressed by producer or label, never by content id or step number: an
+    // agent cannot know which ordinal a plan assigned, and a call carrying
+    // neither would fall through to "the most recent step", which is a silent
+    // wrong answer rather than a miss.
+    context += `\nUse the get_step_content tool to read any of these in full.`;
+    context += `\nAddress it by the agent that produced it, or by a label:`;
+    context += `\n  TOOL_CALL: {"tool": "get_step_content", "params": {"from": "${completedSteps[0]?.agentId}"}}`;
+    context += `\n  TOOL_CALL: {"tool": "get_step_content", "params": {"role": "${completedSteps[0]?.description}"}}`;
+    context += `\nIf it returns found:false, say what context you are missing. Do not invent it.`;
 
     return context;
   }
